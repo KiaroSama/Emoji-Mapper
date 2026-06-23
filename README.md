@@ -147,6 +147,14 @@ Tokens and the owner id live only in `.env` (never committed) and are read at
 runtime. See [SECURITY.md](SECURITY.md). Revoke a leaked token via @BotFather
 and update `.env`.
 
+## License
+
+Emoji Mapper is **proprietary** software — **All Rights Reserved**.
+See [LICENSE](LICENSE). No use, copying, modification or distribution is
+permitted without prior written permission from the copyright holder. Viewing
+the source here does not grant any license. Third-party logos and data remain
+subject to their own providers' licenses (see below).
+
 ## Sources & attribution
 
 Coin vector logos come from open icon sets
