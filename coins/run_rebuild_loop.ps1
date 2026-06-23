@@ -5,7 +5,8 @@
 
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot
-$py = Join-Path $root ".venv\Scripts\python.exe"
+# .venv is at the project root, one level up from coins/.
+$py = Join-Path $root "..\.venv\Scripts\python.exe"
 $log = Join-Path $root "rebuild_dedup_out.txt"
 
 $maxLoops = 200

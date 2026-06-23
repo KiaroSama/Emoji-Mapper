@@ -163,9 +163,11 @@ function Action-ConvertOnly ($py) {
 
 function Action-CoinRebuild ($py) {
     Write-Title "Crypto-coin pack rebuild (TELEGRAM_BOT_TOKEN)"
-    Write-Warn "This uses the crypto-coin bot and existing logos/emoji output."
-    if (Confirm-YesDefault "Run rebuild_packs.py now?") {
-        & $py rebuild_packs.py
+    Write-Warn "This uses the crypto-coin bot and the coins/ component."
+    $script = Join-Path $ScriptRoot 'coins\rebuild_packs.py'
+    if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_packs.py not found."; return }
+    if (Confirm-YesDefault "Run coins/rebuild_packs.py now?") {
+        & $py $script
     }
 }
 

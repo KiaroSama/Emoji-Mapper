@@ -90,34 +90,56 @@ to attach searchable keywords to each emoji. Without it, the file name is used.
 Runs are **resumable**: progress is saved to `state_<base>.json`, so an
 interrupted or flood-limited run continues without recreating existing sets.
 
-## Crypto-coin workflow (original)
+## Crypto-coin workflow (one component: `coins/`)
 
-The coin-specific helpers remain unchanged and use `TELEGRAM_BOT_TOKEN`:
+The crypto-coin tool is now a self-contained component under `coins/`. It reuses
+the shared engine at the project root (`build_pack.py`) and the coin bot
+(`TELEGRAM_BOT_TOKEN`). Its data, scripts and images all live under `coins/`:
 
-- `fetch_logos.py` — download coin logos from CoinGecko + write `keywords.csv`
-- `fetch_paprika.py` / `fetch_cmc.py` — fill remaining coins from CoinPaprika / CoinMarketCap
-- `build_keywords.py` — (re)build `keywords.csv` from logos on disk
-- `make_emoji_pngs.py` (no args) — `logos/svg` + `logos/png` → `logos/emoji`
-- `rebuild_packs.py` / `rebuild_dedup.py` — duplicate-proof full rebuild + inventory fill
-- `check_all_packs.py` — audit every pack for blank/duplicate stickers
-- `run_convert.ps1` / `run_rebuild_loop.ps1` — watchdog drivers for long runs
+- `coins/fetch_logos.py` — download coin logos from CoinGecko + write `coins/keywords.csv`
+- `coins/fetch_paprika.py` / `coins/fetch_cmc.py` — fill remaining coins from CoinPaprika / CoinMarketCap
+- `coins/build_keywords.py` — (re)build `coins/keywords.csv` from logos on disk
+- `coins/rebuild_packs.py` / `coins/rebuild_dedup.py` — duplicate-proof full rebuild + inventory fill
+- `coins/check_all_packs.py` — audit every pack for blank/duplicate stickers
+- `coins/run_convert.ps1` / `coins/run_rebuild_loop.ps1` — watchdog drivers for long runs
+
+Convert coin logos to 100×100 PNGs (images live in `coins/logos/{svg,png}` →
+`coins/logos/emoji`):
+
+```powershell
+.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\svg --out coins\logos\emoji
+.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\png --out coins\logos\emoji
+```
+
+Then build/rebuild with the coin bot:
+
+```powershell
+.venv\Scripts\python.exe coins\rebuild_packs.py
+```
 
 ## Project layout
 
 ```
-build_pack.py          # generic uploader (any source dir + any bot token)
-make_emoji_pngs.py     # image -> 100x100 PNG (general --in/--out, or coin dirs)
-fetch_*.py             # crypto-coin logo fetchers
-rebuild_*.py           # crypto-coin pack rebuild / dedup / inventory fill
-check_all_packs.py     # pack integrity audit
-keywords.csv           # coin ticker -> keywords (data)
-currency-emoji-inventory.md   # coin inventory (source)
-.env.example           # configuration template
-requirements.txt       # Python dependencies
+Emoji Mapper/                  # the whole project
+  build_pack.py                # core engine: upload any source dir with any bot
+  make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
+  run.ps1                      # launcher (general + coin workflows)
+  requirements.txt
+  .env.example                 # configuration template
+  README.md  SECURITY.md
+  coins/                       # ONE component: the crypto-coin emoji tool
+    fetch_*.py                 # coin logo fetchers (CoinGecko/Paprika/CMC)
+    build_keywords.py
+    rebuild_packs.py rebuild_dedup.py   # duplicate-proof rebuild + inventory fill
+    check_all_packs.py         # pack integrity audit
+    run_convert.ps1 run_rebuild_loop.ps1
+    keywords.csv               # coin ticker -> keywords (data)
+    currency-emoji-inventory.md         # coin inventory (source)
+    ticker_to_id.json shared_logo_groups.json
 ```
 
-Generated/local-only (gitignored): `logos/`, `build/`, `input/`, `*_state.json`,
-`*.filled.md`, `.env`, `secrets.md`.
+Generated/local-only (gitignored): `logos/` (and `coins/logos/`), `build/`,
+`input/`, `*_state.json`, `*.filled.md`, `.env`, `secrets.md`.
 
 ## Security
 

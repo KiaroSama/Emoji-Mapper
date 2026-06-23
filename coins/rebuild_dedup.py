@@ -24,6 +24,12 @@ Usage:
 
 from __future__ import annotations
 
+# This script lives in coins/; allow importing the shared engine (build_pack.py)
+# from the project root.
+import os as _bootstrap_os, sys as _bootstrap_sys
+_bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
+    _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
+
 import csv
 import hashlib
 import json
