@@ -3,6 +3,6 @@
 
 requests>=2.32          # Telegram Bot API calls (build_pack.py, check_all_packs.py)
 Pillow>=10.0            # image decode / 100x100 fitting
-numpy>=1.26             # SVG alpha recovery (make_emoji_pngs.py)
+numpy>=2.5.0             # SVG alpha recovery (make_emoji_pngs.py)
 svglib>=1.5            # SVG -> ReportLab drawing
 reportlab>=3.6         # rasterize SVG drawings to pixels
