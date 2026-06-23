@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile all sources
+        run: python -m compileall -q .
+
+      - name: Import smoke test
+        run: |
+          python -c "import build_pack, make_emoji_pngs; print('imports OK')"
+
+      - name: build_pack dry-run (no network)
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from PIL import Image
+          os.makedirs("ci_tmp/out", exist_ok=True)
+          Image.new("RGBA", (100, 100), (0, 128, 255, 255)).save("ci_tmp/out/a.png")
+          os.environ["GENERAL_BOT_TOKEN"] = "dummy"
+          r = subprocess.run([sys.executable, "build_pack.py", "--base", "ci",
+                              "--title", "CI", "--user-id", "1",
+                              "--source-dir", "ci_tmp/out",
+                              "--token-env", "GENERAL_BOT_TOKEN", "--dry-run"])
+          sys.exit(r.returncode)
+          PY

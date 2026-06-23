@@ -1,0 +1,18 @@
+# Normalize line endings: keep LF in the repository for text files.
+* text=auto eol=lf
+
+# Windows-only scripts use CRLF on checkout.
+*.ps1 text eol=crlf
+
+# Treat common binary/image formats as binary (no diff/merge mangling).
+*.png binary
+*.webp binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+
+# Data files
+*.csv text
+*.json text
+*.md text
