@@ -1,0 +1,151 @@
+"""Fetch cryptocurrency logos.
+
+Strategy:
+- SVG (vector, colored) logos already live in ``logos/svg/<ticker>.svg`` (taken
+  from open icon sets).
+- For every other coin (by market cap, from CoinGecko) that has no SVG, download
+  the raster PNG logo into ``logos/png/<ticker>.png``.
+- Write ``keywords.csv`` (ticker, name, format, file, keywords) for every logo.
+
+Robust by design: resumes (skips logos already on disk), sanitizes tickers into
+Windows-safe filenames, and never lets one bad coin abort the whole run.
+
+Pure standard library (urllib) — no third-party dependencies required.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import re
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SVG_DIR = ROOT / "logos" / "svg"
+PNG_DIR = ROOT / "logos" / "png"
+KEYWORDS_CSV = ROOT / "keywords.csv"
+
+API = "https://api.coingecko.com/api/v3/coins/markets"
+PER_PAGE = 250
+MAX_PAGES = int(sys.argv[1]) if len(sys.argv) > 1 else 40  # 40 * 250 = up to 10,000 coins
+PAGE_DELAY = 12.0        # CoinGecko free tier rate-limits hard; be patient
+IMG_DELAY = 0.05
+HEADERS = {"User-Agent": "Mozilla/5.0 (logo-fetcher; local tool)"}
+
+# Keep only Windows-safe filename characters.
+_SAFE_RE = re.compile(r"[^a-z0-9._-]+")
+
+
+def safe_ticker(symbol: str) -> str:
+    return _SAFE_RE.sub("", str(symbol).lower().strip()).strip("._-")
+
+
+def _get(url: str, *, binary: bool = False, retries: int = 6):
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+                return data if binary else json.loads(data.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            # Long, escalating backoff so transient 429s don't end the run.
+            wait = min(8.0 * attempt, 60.0)
+            print(f"  retry {attempt}/{retries}: {exc} (wait {wait:.0f}s)", flush=True)
+            time.sleep(wait)
+    raise RuntimeError(f"GET failed after {retries} attempts: {url} ({last})")
+
+
+def existing_svg_tickers() -> set[str]:
+    return {p.stem.lower() for p in SVG_DIR.glob("*.svg")} if SVG_DIR.is_dir() else set()
+
+
+def main() -> int:
+    PNG_DIR.mkdir(parents=True, exist_ok=True)
+    svg_tickers = existing_svg_tickers()
+    print(f"SVG logos already present: {len(svg_tickers)}", flush=True)
+
+    rows: dict[str, dict] = {}   # ticker -> keyword row (dedup by ticker)
+    png_new = 0
+    png_resumed = 0
+    coins_seen = 0
+
+    for page in range(1, MAX_PAGES + 1):
+        url = (f"{API}?vs_currency=usd&order=market_cap_desc&per_page={PER_PAGE}"
+               f"&page={page}&sparkline=false")
+        print(f"[page {page}/{MAX_PAGES}] fetching market data...", flush=True)
+        try:
+            data = _get(url)
+        except RuntimeError as exc:
+            print(f"  stopping paging: {exc}", flush=True)
+            break
+        if not isinstance(data, list) or not data:
+            print("  no more coins; done paging.", flush=True)
+            break
+
+        for coin in data:
+            coins_seen += 1
+            try:
+                ticker = safe_ticker(coin.get("symbol", ""))
+                name = str(coin.get("name", "")).strip()
+                img = coin.get("image") or ""
+                if not ticker or ticker in rows:
+                    continue
+                if ticker in svg_tickers:
+                    rows[ticker] = {"ticker": ticker, "name": name, "format": "svg",
+                                    "file": f"logos/svg/{ticker}.svg"}
+                    continue
+                dest = PNG_DIR / f"{ticker}.png"
+                if dest.exists():  # resume: keep what we already downloaded
+                    rows[ticker] = {"ticker": ticker, "name": name, "format": "png",
+                                    "file": f"logos/png/{ticker}.png"}
+                    png_resumed += 1
+                    continue
+                if not img or not str(img).startswith("http"):
+                    continue
+                blob = _get(img, binary=True, retries=3)
+                dest.write_bytes(blob)
+                rows[ticker] = {"ticker": ticker, "name": name, "format": "png",
+                                "file": f"logos/png/{ticker}.png"}
+                png_new += 1
+                time.sleep(IMG_DELAY)
+            except Exception as exc:  # noqa: BLE001 - never abort the whole run
+                print(f"  skip coin {coin.get('id', '?')}: {exc}", flush=True)
+                continue
+
+        print(f"  page {page} done: seen={coins_seen} png_new={png_new} resumed={png_resumed}",
+              flush=True)
+        time.sleep(PAGE_DELAY)
+
+    # Ensure every SVG logo is recorded even if not seen in the market pages.
+    for t in sorted(svg_tickers):
+        rows.setdefault(t, {"ticker": t, "name": "", "format": "svg",
+                            "file": f"logos/svg/{t}.svg"})
+
+    # Record every PNG already on disk, even from pages not reached this run.
+    for p in PNG_DIR.glob("*.png"):
+        t = p.stem.lower()
+        rows.setdefault(t, {"ticker": t, "name": "", "format": "png",
+                            "file": f"logos/png/{t}.png"})
+
+    with open(KEYWORDS_CSV, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ticker", "name", "format", "file", "keywords"])
+        for r in sorted(rows.values(), key=lambda x: x["ticker"]):
+            kw = r["ticker"] if not r["name"] else f"{r['ticker']}, {r['name']}"
+            w.writerow([r["ticker"], r["name"], r["format"], r["file"], kw])
+
+    total_png = len({r["ticker"] for r in rows.values() if r["format"] == "png"})
+    print("", flush=True)
+    print(f"DONE: {len(svg_tickers)} SVG + {total_png} PNG = {len(svg_tickers) + total_png} "
+          f"logos. (new png this run: {png_new}, resumed: {png_resumed}). keywords.csv written.",
+          flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

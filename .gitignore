@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Local secret registry (mandatory local-only file)
+# ---------------------------------------------------------------------------
+/secrets.md
+secrets.md
+
+# Private AI explanation file (must always remain local-only)
+explain-AI.md
+
+# Strictly local-only protected directories/files (any depth)
+.ignoreme
+**/.ignoreme
+
+# AI assistant local config directories (local-only, any depth)
+.kiro/
+.claude/
+.codex/
+**/.kiro/
+**/.claude/
+**/.codex/
+
+# ---------------------------------------------------------------------------
+# Environment / secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Generated images (downloaded/rendered; large, external licenses) and
+# general-pack working directories.
+# ---------------------------------------------------------------------------
+logos/
+build/
+input/
+output/
+# Multi-format collector working data (catalog DB + downloaded/built media)
+collection/
+
+# ---------------------------------------------------------------------------
+# Generated run state, plans, audits, caches and resumable progress files
+# ---------------------------------------------------------------------------
+pack_state.json
+state_*.json
+rebuild_state.json
+rebuild_dedup_state.json
+rebuild_dedup_plan.json
+paprika_matches.json
+pack_audit*.json
+pack_audit*_report.txt
+.svg_skip.txt
+.svg_cur
+
+# Generated, regenerable output (filled inventory)
+currency-emoji-inventory.filled.md
+
+# ---------------------------------------------------------------------------
+# Logs / scratch
+# ---------------------------------------------------------------------------
+logs/
+*.log
+*_out.txt
+*.txt.tmp
+kw.txt
+logs_fetch*.txt
+emoji_conv.txt
+emoji_err.txt
+
+# ---------------------------------------------------------------------------
+# OS / editor junk
+# ---------------------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+launch_test.txt
