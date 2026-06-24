@@ -46,6 +46,8 @@ logos/
 build/
 input/
 output/
+# Multi-format collector working data (catalog DB + downloaded/built media)
+collection/
 
 # ---------------------------------------------------------------------------
 # Generated run state, plans, audits, caches and resumable progress files
