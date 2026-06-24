@@ -66,6 +66,10 @@ pack_audit*_report.txt
 # Generated, regenerable output (filled inventory)
 currency-emoji-inventory.filled.md
 
+# Remap tool: live-signature cache + pre-fix backup of the id map (regenerable)
+remap_live_cache.json
+ticker_to_id.prebroken.json
+
 # ---------------------------------------------------------------------------
 # Logs / scratch
 # ---------------------------------------------------------------------------
