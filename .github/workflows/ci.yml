@@ -27,12 +27,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install ffmpeg (for video emoji tests)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Byte-compile all sources
         run: python -m compileall -q .
 
       - name: Import smoke test
         run: |
-          python -c "import build_pack, make_emoji_pngs; print('imports OK')"
+          python -c "import build_pack, make_emoji_pngs, fetch_pack, add_media, build_collection; from emojikit import media, catalog, logsetup; print('imports OK')"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
 
       - name: build_pack dry-run (no network)
         run: |

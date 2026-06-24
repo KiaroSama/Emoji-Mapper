@@ -31,6 +31,9 @@ source folder and the selected bot token differ.
 - A Telegram bot (create one with [@BotFather](https://t.me/BotFather))
 - Your numeric Telegram user id (the pack owner) — press **Start** on the bot once
 - Dependencies in `requirements.txt` (`pip install -r requirements.txt`)
+- **ffmpeg + ffprobe** on `PATH` — only required for **video** emoji (`.webm`).
+  Install on Windows with `winget install Gyan.FFmpeg`. Static and animated
+  workflows do not need it.
 
 ## Setup
 
@@ -90,6 +93,65 @@ to attach searchable keywords to each emoji. Without it, the file name is used.
 Runs are **resumable**: progress is saved to `state_<base>.json`, so an
 interrupted or flood-limited run continues without recreating existing sets.
 
+## Collecting & republishing packs (multi-format)
+
+The collector workflow downloads emoji from existing Telegram packs (and/or
+builds them from scratch from your own files), deduplicates everything into a
+persistent catalog, and republishes them into new packs with your own name and
+labels. It supports all three custom-emoji formats — **static** (PNG/WEBP),
+**animated** (`.tgs` Lottie) and **video** (`.webm` VP9).
+
+### Animated vs. video — and how detection works
+
+| | Animated (`.tgs`) | Video (`.webm`) |
+|---|---|---|
+| Nature | vector Lottie animation (gzip JSON) | VP9 pixel video |
+| Cap | ≤ 64 KB | ≤ 256 KB, ≤ 3 s, 30 fps, no audio |
+| `format` | `animated` | `video` |
+| Build from | Lottie JSON/TGS only | any GIF/MP4/WEBM/image (ffmpeg) |
+
+Detection is automatic: from the Bot API a sticker's `is_animated` / `is_video`
+flags decide the format; downloaded files are also verified by magic bytes
+(`1F 8B`→tgs, `1A 45 DF A3`→webm, PNG/RIFF-WEBP→static). A GIF or video **cannot**
+become an *animated* emoji (those are vector-only) — it becomes a *video* emoji.
+
+### Duplicate-proof by design
+
+The old delete-and-rebuild churn is gone. The catalog (`collection/catalog.db`)
+deduplicates at **ingest** time, not after publishing:
+
+1. **`file_unique_id` pre-check** — a sticker already ingested is never
+   downloaded again.
+2. **Normalized content hash** — identical media from different packs collapse
+   into one entry (their emoji/keywords/sources merge).
+3. **Perceptual hash (dHash)** — near-identical logos merge within a threshold.
+4. **Idempotent publish** — uploaded items are tracked; resuming reconciles from
+   live Telegram counts, so interruptions can never create duplicates.
+
+### Commands
+
+```powershell
+# 1. Download from one or more existing packs into the catalog
+.venv\Scripts\python.exe fetch_pack.py https://t.me/addemoji/somepack_by_bot `
+    --token-env GENERAL_BOT_TOKEN
+
+# 2. (optional) Build extra emoji from your own files (auto static/video/animated)
+.venv\Scripts\python.exe add_media.py --in input\myset --emoji 😀
+
+# 3. Preview, then publish into new per-format packs (resumable)
+.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+    --token-env GENERAL_BOT_TOKEN --dry-run
+.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+    --token-env GENERAL_BOT_TOKEN
+```
+
+Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>_by_<bot>` (video) and
+`<base>a<n>_by_<bot>` (animated). All working data lives under `collection/`
+(gitignored).
+
+> Re-publishing other people's emoji under a new name may raise ownership /
+> copyright concerns — only collect content you have the right to use.
+
 ## Crypto-coin workflow (one component: `coins/`)
 
 The crypto-coin tool is now a self-contained component under `coins/`. It reuses
@@ -123,10 +185,18 @@ Then build/rebuild with the coin bot:
 Emoji Mapper/                  # the whole project
   build_pack.py                # core engine: upload any source dir with any bot
   make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
-  run.ps1                      # launcher (general + coin workflows)
+  fetch_pack.py                # collector: download Telegram packs -> catalog
+  add_media.py                 # collector: build emoji from scratch -> catalog
+  build_collection.py          # collector: publish catalog -> new per-format packs
+  emojikit/                    # shared core toolkit
+    logsetup.py                # UTC file logging
+    media.py                   # format detect + hashing + static/video/tgs convert
+    catalog.py                 # content-addressed SQLite catalog (dedup)
+  run.ps1                      # launcher (single-pack + collection workflows)
   requirements.txt
   .env.example                 # configuration template
-  README.md  SECURITY.md
+  README.md  SECURITY.md  LICENSE
+  tests/                       # unit tests + fixtures (run: python -m unittest)
   coins/                       # ONE component: the crypto-coin emoji tool
     fetch_*.py                 # coin logo fetchers (CoinGecko/Paprika/CMC)
     build_keywords.py
@@ -139,7 +209,7 @@ Emoji Mapper/                  # the whole project
 ```
 
 Generated/local-only (gitignored): `logos/` (and `coins/logos/`), `build/`,
-`input/`, `*_state.json`, `*.filled.md`, `.env`, `secrets.md`.
+`input/`, `collection/`, `*_state.json`, `*.filled.md`, `.env`, `secrets.md`.
 
 ## Security
 

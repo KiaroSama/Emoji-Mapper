@@ -171,6 +171,57 @@ function Action-CoinRebuild ($py) {
     }
 }
 
+function Test-Ffmpeg {
+    return ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and
+            (Get-Command ffprobe -ErrorAction SilentlyContinue))
+}
+
+function Action-CollectPacks ($py) {
+    Write-Title "Collect emoji from existing Telegram packs"
+    Write-Info "Paste pack links/names (t.me/addemoji/...). Blank line to finish."
+    $packs = @()
+    while ($true) {
+        $line = Read-Host "Pack"
+        if ([string]::IsNullOrWhiteSpace($line)) { break }
+        $packs += $line.Trim()
+    }
+    if ($packs.Count -eq 0) { Write-Warn "No packs entered."; return }
+    $tokenEnv = Read-Host "Token env var (default GENERAL_BOT_TOKEN)"
+    if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
+    & $py fetch_pack.py @packs --token-env $tokenEnv
+}
+
+function Action-AddMedia ($py) {
+    Write-Title "Build emoji from scratch (folder of images/animations/videos)"
+    if (-not (Test-Ffmpeg)) {
+        Write-Warn "ffmpeg/ffprobe not found: video emoji (.webm) will fail."
+        Write-Warn "Install with: winget install Gyan.FFmpeg"
+    }
+    $inDir = Read-Host "Source folder"
+    if (-not (Test-Path -LiteralPath $inDir)) { Write-Err "Folder not found."; return }
+    $emoji = Read-Host "Associated standard emoji (default 😀)"
+    if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = '😀' }
+    & $py add_media.py --in $inDir --emoji $emoji
+}
+
+function Action-PublishCollection ($py) {
+    Write-Title "Publish the collection into new packs (multi-format)"
+    $base  = Read-Host "Pack base name (letters/digits only), e.g. mypack"
+    $title = Read-Host "Pack title, e.g. My Collection"
+    $tokenEnv = Read-Host "Token env var (default GENERAL_BOT_TOKEN)"
+    if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
+    Write-Step "Dry-run preview ..."
+    & $py build_collection.py --base $base --title $title --token-env $tokenEnv --dry-run
+    if ($LASTEXITCODE -ne 0) { Write-Err "Dry-run failed (run a collect/add step first?)."; return }
+    if (Confirm-YesDefault "Upload to Telegram now?") {
+        & $py build_collection.py --base $base --title $title --token-env $tokenEnv
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Collection published." }
+        else { Write-Err "Publish failed (exit $LASTEXITCODE)." }
+    } else {
+        Write-Info "Skipped upload. Re-run when ready (resumable)."
+    }
+}
+
 # --- Bootstrap ------------------------------------------------------------
 Write-Title "Emoji Mapper"
 $py = Ensure-Environment
@@ -180,6 +231,8 @@ if (-not (Test-Deps $py)) {
 }
 Check-Env $py
 Write-Ok ("Python: " + (& $py --version))
+if (Test-Ffmpeg) { Write-Ok "ffmpeg present (video emoji enabled)." }
+else { Write-Warn "ffmpeg not found: video emoji disabled (winget install Gyan.FFmpeg)." }
 
 # Non-interactive environment check ("doctor") for CI / scripted use.
 if ($Check) {
@@ -193,15 +246,23 @@ if ($Check) {
 $running = $true
 while ($running) {
     Write-Title "Menu"
+    Write-Host "  Build a single pack" -ForegroundColor DarkCyan
     Write-Host "  1) Build a general emoji pack  (new bot)" -ForegroundColor White
     Write-Host "  2) Convert images to 100x100 PNGs only"   -ForegroundColor White
     Write-Host "  3) Crypto-coin pack rebuild     (coin bot)" -ForegroundColor White
+    Write-Host "  Collection (multi-format, duplicate-proof)" -ForegroundColor DarkCyan
+    Write-Host "  4) Collect emoji from existing packs (download)" -ForegroundColor White
+    Write-Host "  5) Add media from a folder (build from scratch)" -ForegroundColor White
+    Write-Host "  6) Publish the collection into new packs"        -ForegroundColor White
     Write-Host "  q) Quit" -ForegroundColor DarkGray
     $choice = Read-Host "Select"
     switch ($choice) {
         '1' { Action-BuildGeneral $py }
         '2' { Action-ConvertOnly $py }
         '3' { Action-CoinRebuild $py }
+        '4' { Action-CollectPacks $py }
+        '5' { Action-AddMedia $py }
+        '6' { Action-PublishCollection $py }
         { $_ -in @('q','quit','0','exit') } { Write-Info "Bye."; $running = $false }
         default { Write-Warn "Unknown option: $choice" }
     }

@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packs from any folder of images, not only crypto-coin logos.
 
 ### Added
+- **Multi-format collector workflow**: download emoji from existing Telegram
+  packs (`fetch_pack.py`), build emoji from scratch (`add_media.py`) and
+  republish into new per-format packs (`build_collection.py`).
+- Support for **animated** (`.tgs`) and **video** (`.webm`/VP9) custom emoji in
+  addition to static, including GIF/MP4 → WEBM conversion via ffmpeg.
+- `emojikit/` core toolkit: UTC file logging, media detection/hashing/conversion
+  and a content-addressed SQLite **catalog** that deduplicates at ingest time
+  (by `file_unique_id`, content hash and perceptual hash) and makes publishing
+  idempotent and resumable — eliminating the old delete-and-rebuild churn.
+- `tests/` unit suite (stdlib `unittest`) with a committed Lottie fixture.
 - Proprietary `LICENSE` (All Rights Reserved).
 - GitHub repository support files: issue/PR templates, Dependabot config and
   this changelog.

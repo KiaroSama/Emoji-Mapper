@@ -151,6 +151,96 @@ class Telegram:
                 "sticker": json.dumps(_sticker_json(emoji, keywords)),
             }, files={"file0": (png.name, fh, "image/png")})
 
+    # ----- multi-format helpers (static / animated / video) -------------- #
+    def get_sticker_set(self, name: str) -> dict:
+        """Return the full Bot API StickerSet object for a set short name."""
+        return self._call("getStickerSet", data={"name": name})
+
+    def download_file(self, file_id: str, dest: Path, retries: int = 5) -> Path:
+        """Download a Telegram file (by file_id) to ``dest`` (with retries)."""
+        info = self._call("getFile", data={"file_id": file_id})
+        url = f"{API_BASE}/file/bot{self.token}/{info['file_path']}"
+        for attempt in range(1, retries + 1):
+            try:
+                r = self.s.get(url, timeout=60)
+                r.raise_for_status()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(r.content)
+                return dest
+            except requests.RequestException as exc:
+                wait = min(3 * attempt, 15)
+                print(f"  download retry {attempt}/{retries}: {exc} (wait {wait}s)",
+                      flush=True)
+                time.sleep(wait)
+        raise RuntimeError(f"download failed for file_id {file_id}")
+
+    def create_emoji_set(self, user_id: int, name: str, title: str, path: Path,
+                         fmt: str, emoji_list: list[str], keywords: list[str]) -> None:
+        """Create a custom-emoji set whose first emoji is ``path`` (any format)."""
+        with open(path, "rb") as fh:
+            self._call("createNewStickerSet", data={
+                "user_id": user_id, "name": name, "title": title,
+                "sticker_type": "custom_emoji",
+                "stickers": json.dumps([_input_sticker(fmt, emoji_list, keywords)]),
+            }, files={"file0": (path.name, fh, _mime_for_path(path))})
+
+    def add_emoji(self, user_id: int, name: str, path: Path, fmt: str,
+                  emoji_list: list[str], keywords: list[str]) -> None:
+        """Add one emoji (any format) to an existing custom-emoji set."""
+        with open(path, "rb") as fh:
+            self._call("addStickerToSet", data={
+                "user_id": user_id, "name": name,
+                "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
+            }, files={"file0": (path.name, fh, _mime_for_path(path))})
+
+
+_MIME_BY_FORMAT = {
+    "static": "image/png",
+    "animated": "application/gzip",
+    "video": "video/webm",
+}
+
+_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".tgs": "application/gzip",
+    ".webm": "video/webm",
+}
+
+
+def _mime_for(fmt: str) -> str:
+    return _MIME_BY_FORMAT.get(fmt, "application/octet-stream")
+
+
+def _mime_for_path(path: Path) -> str:
+    """MIME type derived from the file's real extension (preferred for uploads)."""
+    return _MIME_BY_EXT.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _trim_keywords(keywords: list[str]) -> list[str]:
+    """Clamp a keyword list to Telegram's per-sticker budget (<=20, ~64 chars)."""
+    kw: list[str] = []
+    total = 0
+    for raw in keywords:
+        k = (raw or "").strip()[:48]
+        if not k:
+            continue
+        if kw and total + len(k) + 1 > 60:
+            break
+        kw.append(k)
+        total += len(k) + 1
+        if len(kw) >= 20:
+            break
+    return kw
+
+
+def _input_sticker(fmt: str, emoji_list: list[str], keywords: list[str]) -> dict:
+    """Build a Bot API InputSticker for any custom-emoji format (uploaded as file0)."""
+    emojis = [e for e in (emoji_list or []) if e][:20] or [DEFAULT_EMOJI]
+    return {"sticker": "attach://file0", "format": fmt,
+            "emoji_list": emojis, "keywords": _trim_keywords(keywords)}
+
 
 def _sticker_json(emoji: str, keywords: str) -> dict:
     # Telegram limits the total keyword length per sticker (~64 chars). Keep the
