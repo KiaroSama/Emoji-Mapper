@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a problem with Emoji Mapper
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Never paste real bot tokens or API keys.**
+        Redact any secrets before submitting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+      placeholder: When I run ..., I get ... but I expected ...
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      options:
+        - General emoji pack (GENERAL_BOT_TOKEN)
+        - Crypto-coin pack (TELEGRAM_BOT_TOKEN)
+        - Image conversion only (make_emoji_pngs.py)
+        - Launcher (run.ps1)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: The exact command, with secrets redacted.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Full error / traceback (redact tokens).
+      render: shell
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.11.9
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Windows 11
+    validations:
+      required: true
