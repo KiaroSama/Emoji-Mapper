@@ -69,6 +69,17 @@ def img_hash(path: Path) -> str:
     return hashlib.sha256(im.tobytes()).hexdigest()[:24]
 
 
+def is_blank(path: Path, min_visible: int = 8) -> bool:
+    """True if an image is effectively empty -- never upload a blank emoji."""
+    try:
+        alpha = Image.open(path).convert("RGBA").split()[3]
+    except Exception:  # noqa: BLE001
+        return True
+    if alpha.getbbox() is None:
+        return True
+    return sum(1 for v in alpha.getdata() if v > 10) <= min_visible
+
+
 def load_keywords() -> dict[str, str]:
     out: dict[str, str] = {}
     if KEYWORDS_CSV.is_file():
@@ -176,6 +187,7 @@ def delete_old_packs(tg: Telegram) -> None:
 def build(tg: Telegram, bot: str) -> None:
     plan = load_plan()
     state = load_state()
+    state.setdefault("order", [])  # actual successful-upload order (drift-proof map)
 
     if not state.get("deleted_old"):
         print("deleting ALL old packs (full rebuild)...", flush=True)
@@ -201,6 +213,9 @@ def build(tg: Telegram, bot: str) -> None:
         png = EMOJI / f"{g['rep']}.png"
         if not png.is_file() or png.stat().st_size == 0:
             print(f"  skip {g['rep']}: missing/empty", flush=True)
+            continue
+        if is_blank(png):
+            print(f"  skip {g['rep']}: blank image (no blank emoji)", flush=True)
             continue
         kw = g["kw"]
         try:
@@ -228,6 +243,7 @@ def build(tg: Telegram, bot: str) -> None:
             print(f"  skip {g['rep']}: {exc}", flush=True)
             continue
         in_set += 1
+        state["order"].append(g["rep"])  # record actual upload order
         if in_set >= PER_SET:
             notify(tg, state, set_name, f"{TITLE} {set_index}")
             in_set = 0
@@ -276,15 +292,32 @@ def map_and_fill(tg: Telegram) -> None:
     for s in sets:
         cids += [str(st.get("custom_emoji_id", ""))
                  for st in tg._call("getStickerSet", data={"name": s["name"]}).get("stickers", [])]
-    if len(cids) != len(plan):
-        print(f"  WARNING: live stickers {len(cids)} != plan {len(plan)}; "
-              f"mapping by min length.", flush=True)
+
     ticker_to_id: dict[str, str] = {}
-    for i, cid in enumerate(cids):
-        if i >= len(plan):
-            break
-        for t in plan[i]["tickers"]:
-            ticker_to_id[t] = cid
+    order = state.get("order") or []
+    if len(order) == len(cids) and order:
+        # Preferred, drift-proof: map cids to the ACTUAL upload order recorded
+        # during build (immune to skipped/failed items shifting positions).
+        by_rep = {g["rep"]: g for g in plan}
+        for i, cid in enumerate(cids):
+            g = by_rep.get(order[i])
+            if not g:
+                continue
+            for t in g["tickers"]:
+                ticker_to_id[t] = cid
+        print(f"mapped via recorded upload order ({len(cids)} stickers)", flush=True)
+    else:
+        # Fallback (legacy): assumes live order == plan order. If this warns, run
+        # coins/remap_ids.py to rebuild the map from image content instead.
+        if len(cids) != len(plan):
+            print(f"  WARNING: live stickers {len(cids)} != plan {len(plan)} and no "
+                  f"upload-order record; mapping by position may be WRONG. "
+                  f"Run coins/remap_ids.py to fix by image content.", flush=True)
+        for i, cid in enumerate(cids):
+            if i >= len(plan):
+                break
+            for t in plan[i]["tickers"]:
+                ticker_to_id[t] = cid
     reapply_aliases(ticker_to_id)
     TICKER_IDS.write_text(json.dumps(ticker_to_id, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"mapped {len(ticker_to_id)} tickers across {len(sets)} sets "

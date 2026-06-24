@@ -97,18 +97,45 @@ def _render_svg(path: Path) -> Image.Image | None:
     return Image.fromarray(rgba, mode="RGBA")
 
 
+def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:
+    """True if an RGBA image is effectively empty (too few non-transparent pixels)."""
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    alpha = img.split()[3]
+    if alpha.getbbox() is None:
+        return True
+    visible = sum(1 for a in alpha.getdata() if a > 10)
+    return visible <= min_visible
+
+
 def _convert_svg(p: Path, out: Path) -> bool:
-    """Render an SVG to a 100x100 PNG. Returns True on success."""
+    """Render an SVG to a 100x100 PNG. Returns True only on a NON-blank result.
+
+    Some SVG features (e.g. gradient fills) are not rendered by the bundled
+    svglib/reportlab backend and yield a fully transparent image. We never save
+    such a blank result -- returning False lets the caller fall back to a raster
+    source (logos/png/<ticker>.png) instead of producing a blank emoji.
+    """
     img = _render_svg(p)
     if img is None:
         return False
-    _fit_100(img).save(out, format="PNG", optimize=True)
+    fitted = _fit_100(img)
+    if _is_blank(fitted):
+        return False
+    fitted.save(out, format="PNG", optimize=True)
     return True
 
 
 def _convert_raster(p: Path, out: Path) -> bool:
-    """Open a raster image and fit it into a 100x100 transparent PNG."""
-    _fit_100(Image.open(p).convert("RGBA")).save(out, format="PNG", optimize=True)
+    """Open a raster image and fit it into a 100x100 transparent PNG.
+
+    Returns False (without saving) if the result is blank, so a blank source can
+    never become a blank emoji.
+    """
+    fitted = _fit_100(Image.open(p).convert("RGBA"))
+    if _is_blank(fitted):
+        return False
+    fitted.save(out, format="PNG", optimize=True)
     return True
 
 
@@ -140,8 +167,10 @@ def _run_general(in_dir: Path, out_dir: Path, limit: int) -> int:
                 else:
                     failed += 1
             else:
-                _convert_raster(p, out)
-                made += 1; raster_ok += 1
+                if _convert_raster(p, out):
+                    made += 1; raster_ok += 1
+                else:
+                    failed += 1  # blank/empty source -> never write a blank emoji
         except Exception:  # noqa: BLE001
             marker.unlink(missing_ok=True)
             failed += 1
@@ -194,8 +223,10 @@ def _run_legacy(limit: int) -> int:
         if out.exists():
             done.add(t); continue
         try:
-            _convert_raster(p, out)
-            done.add(t); made += 1; png_ok += 1
+            if _convert_raster(p, out):
+                done.add(t); made += 1; png_ok += 1
+            else:
+                failed += 1  # blank/empty source -> skip instead of blank emoji
         except Exception:  # noqa: BLE001
             failed += 1
         if made and made % 250 == 0:

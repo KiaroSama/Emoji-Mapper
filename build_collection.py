@@ -33,6 +33,7 @@ from pathlib import Path
 from build_pack import Telegram, load_env
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact, setup_logging
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("build_collection")
@@ -41,6 +42,18 @@ PER_SET = 200                       # Telegram custom-emoji set hard cap
 FMT_TAG = {"static": "s", "video": "v", "animated": "a"}
 FMT_WORD = {"static": "Static", "video": "Video", "animated": "Animated"}
 DEFAULT_EMOJI = "\U0001F600"
+
+
+def _static_is_blank(path: Path, min_visible: int = 8) -> bool:
+    """True if a static image is effectively empty (guards against blank emoji)."""
+    try:
+        im = Image.open(path).convert("RGBA")
+    except Exception:  # noqa: BLE001 - non-static or unreadable: let upload decide
+        return False
+    alpha = im.split()[3]
+    if alpha.getbbox() is None:
+        return True
+    return sum(1 for v in alpha.getdata() if v > 10) <= min_visible
 
 
 def _state_path(data_dir: Path, base: str) -> Path:
@@ -146,6 +159,9 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         if not path.is_file() or path.stat().st_size == 0:
             log.warning("[%s] missing/empty media for %s; skipping", fmt, key)
             continue
+        if fmt == "static" and _static_is_blank(path):
+            log.warning("[%s] BLANK image for %s; skipping (no blank emoji)", fmt, key)
+            continue
         emojis = item.emojis or [default_emoji]
         try:
             placed = False
@@ -164,7 +180,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 tg.create_emoji_set(user_id, set_name, set_title, path, fmt,
                                     emojis, item.keywords)
                 fmt_sets.append({"fmt": fmt, "index": set_index, "name": set_name,
-                                 "title": set_title, "live": 0})
+                                 "title": set_title, "live": 0, "keys": []})
                 state["sets"].append(fmt_sets[-1])
                 save_json(_state_path(data_dir, base), state)
                 log.info("[%s set %d] created %s", fmt, set_index, set_name)
@@ -175,6 +191,9 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             continue
         in_set += 1
         fmt_sets[-1]["live"] = in_set
+        # Record the ACTUAL upload order so the cid<->key mapping can never drift
+        # (this is the root-cause fix for the historical scrambled map).
+        fmt_sets[-1].setdefault("keys", []).append(key)
         cat.mark_uploaded(key, None)
         if in_set >= per_set:
             notify(tg, user_id, state, data_dir, base, set_name,
@@ -182,9 +201,30 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             in_set = 0
         time.sleep(0.1)
 
+    save_json(_state_path(data_dir, base), state)
+    # Assign real custom_emoji_ids from the live sets, matched by the recorded
+    # upload order (drift-proof). Tickers/keys map to the exact sticker created.
+    _record_cids(tg, cat, fmt_sets)
+
     if fmt_sets:
         last = fmt_sets[-1]
         notify(tg, user_id, state, data_dir, base, last["name"], last["title"])
+
+
+def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict]) -> None:
+    """Store each item's real custom_emoji_id using the recorded upload order."""
+    for s in fmt_sets:
+        keys = s.get("keys") or []
+        if not keys:
+            continue
+        try:
+            live = tg.get_sticker_set(s["name"]).get("stickers", [])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read %s for cid mapping: %s", s["name"], exc)
+            continue
+        for i, key in enumerate(keys):
+            if i < len(live):
+                cat.mark_uploaded(key, str(live[i].get("custom_emoji_id")))
 
 
 def valid_base(base: str) -> str:
