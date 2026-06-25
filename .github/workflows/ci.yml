@@ -13,7 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        # The project targets Python 3.11 (see run.ps1 / .venv). SVG rendering
+        # needs reportlab<4 (bundled renderPM backend, no system cairo); that
+        # line ships wheels for 3.11 but not 3.12, so CI pins to 3.11 to match
+        # the supported runtime and avoid fragile from-source builds.
+        python-version: ["3.11"]
     steps:
       - uses: actions/checkout@v4
 
