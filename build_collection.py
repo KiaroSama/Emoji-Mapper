@@ -127,22 +127,61 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
         log.warning("notify failed for %s: %s", name, exc)
 
 
+def _media_ok(path: Path, fmt: str) -> bool:
+    """False if the media is effectively blank (guards against blank emoji)."""
+    if fmt == "static":
+        return not _static_is_blank(path)
+    if fmt == "video":
+        # Best-effort: a fully-transparent/empty first frame => treat as blank.
+        try:
+            from emojikit.media import _first_video_frame
+            im = _first_video_frame(path)
+            a = im.convert("RGBA").split()[3]
+            if a.getbbox() is None:
+                return False
+            return sum(1 for v in a.getdata() if v > 10) > 8
+        except Exception:  # noqa: BLE001 - probing failed; let the upload decide
+            return True
+    return True  # animated (.tgs) validity is enforced at creation time
+
+
+def write_manifest(data_dir: Path, cat: Catalog, s: dict) -> None:
+    """Write a per-pack manifest: emoji name (keywords) + custom_emoji_id."""
+    keys = s.get("keys") or []
+    if not keys:
+        return
+    md = data_dir / "manifests"
+    md.mkdir(parents=True, exist_ok=True)
+    lines = [f"# {s.get('title', s['name'])}", "",
+             f"Pack: https://t.me/addemoji/{s['name']}  |  format: {s['fmt']}  |  {len(keys)} emoji",
+             "", "| # | Name | Emoji ID |", "|---|------|----------|"]
+    for i, key in enumerate(keys, 1):
+        it = cat.get(key)
+        name = ", ".join(it.keywords[:2]) if it and it.keywords else (
+            it.sources[0] if it and it.sources else key)
+        cid = (it.custom_emoji_id if it else "") or ""
+        lines.append(f"| {i} | {name} | {cid} |")
+    (md / f"{s['name']}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    log.info("manifest written: manifests/%s.md (%d emoji)", s["name"], len(keys))
+
+
 def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str],
                    base: str, title: str, user_id: int, default_emoji: str,
                    per_set: int, data_dir: Path, state: dict, bot: str) -> None:
-    """Publish all pending items of one format into per-format sets."""
+    """Publish all pending items of one format into per-format sets.
+
+    Duplicate-proof: "already uploaded" is decided by the catalog's per-item
+    (committed) ``uploaded`` flag, NOT by a positional offset, so skipped items
+    can never shift the boundary and cause a re-upload on resume.
+    """
     if not plan_keys:
         return
     fmt_sets = [s for s in state["sets"] if s["fmt"] == fmt]
+    skipped = set(state.setdefault("skipped", []))
 
-    # Reconcile from live counts -> duplicate-proof resume.
-    cum = 0
-    for s in fmt_sets:
-        s["live"] = live_count(tg, s["name"])
-        cum += s["live"]
-    log.info("[%s] %d sets, %d live, %d pending", fmt, len(fmt_sets), cum,
-             len(plan_keys) - cum)
-
+    # Active (last, non-full) set: reconcile its capacity from the LIVE count.
+    if fmt_sets:
+        fmt_sets[-1]["live"] = live_count(tg, fmt_sets[-1]["name"])
     if fmt_sets and fmt_sets[-1]["live"] < per_set:
         cur = fmt_sets[-1]
         set_index, set_name, in_set = cur["index"], cur["name"], cur["live"]
@@ -150,17 +189,27 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         set_index = max((s["index"] for s in fmt_sets), default=0)
         set_name, in_set = "", 0
 
-    for key in plan_keys[cum:]:
+    # Pending = plan keys neither already uploaded nor permanently skipped.
+    pending = [k for k in plan_keys
+               if (it := cat.get(k)) and not it.uploaded and k not in skipped]
+    log.info("[%s] %d sets, active in_set=%d, %d pending (of %d planned)",
+             fmt, len(fmt_sets), in_set, len(pending), len(plan_keys))
+
+    def skip(key: str, why: str) -> None:
+        log.warning("[%s] skip %s: %s", fmt, key, why)
+        skipped.add(key)
+        state["skipped"] = sorted(skipped)
+        save_json(_state_path(data_dir, base), state)
+
+    n = 0
+    for key in pending:
         item = cat.get(key)
-        if item is None:
-            log.warning("[%s] missing catalog item %s; skipping", fmt, key)
-            continue
         path = Path(item.file_path)
         if not path.is_file() or path.stat().st_size == 0:
-            log.warning("[%s] missing/empty media for %s; skipping", fmt, key)
+            skip(key, "missing/empty media")
             continue
-        if fmt == "static" and _static_is_blank(path):
-            log.warning("[%s] BLANK image for %s; skipping (no blank emoji)", fmt, key)
+        if not _media_ok(path, fmt):
+            skip(key, "blank media (no blank emoji)")
             continue
         emojis = item.emojis or [default_emoji]
         try:
@@ -187,14 +236,19 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
-            log.warning("[%s] skip %s: %s", fmt, key, redact(str(exc)))
+            # Transient/non-blank failure: log and retry on a later run (NOT
+            # added to skipped), while the catalog flag keeps it dup-proof.
+            log.warning("[%s] upload failed for %s (will retry): %s", fmt, key, redact(str(exc)))
             continue
         in_set += 1
         fmt_sets[-1]["live"] = in_set
-        # Record the ACTUAL upload order so the cid<->key mapping can never drift
-        # (this is the root-cause fix for the historical scrambled map).
+        # Record actual upload order (for cid mapping) + mark uploaded (committed
+        # immediately -> crash-safe duplicate guard).
         fmt_sets[-1].setdefault("keys", []).append(key)
         cat.mark_uploaded(key, None)
+        n += 1
+        if n % 20 == 0:
+            save_json(_state_path(data_dir, base), state)
         if in_set >= per_set:
             notify(tg, user_id, state, data_dir, base, set_name,
                    f"{title} {FMT_WORD[fmt]} {set_index}")
@@ -202,9 +256,10 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         time.sleep(0.1)
 
     save_json(_state_path(data_dir, base), state)
-    # Assign real custom_emoji_ids from the live sets, matched by the recorded
-    # upload order (drift-proof). Tickers/keys map to the exact sticker created.
+    # Assign real custom_emoji_ids (drift-proof, from recorded order) + manifests.
     _record_cids(tg, cat, fmt_sets)
+    for s in fmt_sets:
+        write_manifest(data_dir, cat, s)
 
     if fmt_sets:
         last = fmt_sets[-1]
