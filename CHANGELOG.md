@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packs from any folder of images, not only crypto-coin logos.
 
 ### Added
+- **Emoji Mapper bot** (`emoji_bot.py`): interactive long-polling bot that
+  extracts premium custom-emoji IDs from sent/forwarded messages and from new
+  channel/group posts, with tap-to-copy (`copy_text`) inline buttons and a
+  `/start` help menu.
 - **Multi-format collector workflow**: download emoji from existing Telegram
   packs (`fetch_pack.py`), build emoji from scratch (`add_media.py`) and
   republish into new per-format packs (`build_collection.py`).
