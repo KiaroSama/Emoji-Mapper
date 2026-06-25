@@ -152,6 +152,21 @@ Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>_by_<bot>` (video) and
 > Re-publishing other people's emoji under a new name may raise ownership /
 > copyright concerns — only collect content you have the right to use.
 
+## Emoji Mapper bot (premium-emoji ID extractor)
+
+`emoji_bot.py` runs the general bot interactively (long-polling) and extracts
+premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
+
+- Send the bot a **premium emoji** → it replies with the ID on a copy button.
+- Send/forward a **post mixing text + premium emoji** → it lists every ID;
+  tapping a button copies them.
+- **Add it to a channel/group** (as admin) → it DMs you the premium-emoji IDs
+  from new posts. (Bots cannot read past channel history, only new posts.)
+
+```powershell
+.venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> option 7
+```
+
 ## Crypto-coin workflow (one component: `coins/`)
 
 The crypto-coin tool is now a self-contained component under `coins/`. It reuses

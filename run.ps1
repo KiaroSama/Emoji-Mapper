@@ -222,6 +222,13 @@ function Action-PublishCollection ($py) {
     }
 }
 
+function Action-RunBot ($py) {
+    Write-Title "Run the Emoji Mapper bot (premium-emoji ID extractor)"
+    Write-Info "Send the bot a premium emoji or a post with emoji, or add it to a channel/group."
+    Write-Info "Press Ctrl+C to stop the bot."
+    & $py emoji_bot.py
+}
+
 # --- Bootstrap ------------------------------------------------------------
 Write-Title "Emoji Mapper"
 $py = Ensure-Environment
@@ -254,6 +261,8 @@ while ($running) {
     Write-Host "  4) Collect emoji from existing packs (download)" -ForegroundColor White
     Write-Host "  5) Add media from a folder (build from scratch)" -ForegroundColor White
     Write-Host "  6) Publish the collection into new packs"        -ForegroundColor White
+    Write-Host "  Bot" -ForegroundColor DarkCyan
+    Write-Host "  7) Run the Emoji Mapper bot (premium-emoji ID extractor)" -ForegroundColor White
     Write-Host "  q) Quit" -ForegroundColor DarkGray
     $choice = Read-Host "Select"
     switch ($choice) {
@@ -263,6 +272,7 @@ while ($running) {
         '4' { Action-CollectPacks $py }
         '5' { Action-AddMedia $py }
         '6' { Action-PublishCollection $py }
+        '7' { Action-RunBot $py }
         { $_ -in @('q','quit','0','exit') } { Write-Info "Bye."; $running = $false }
         default { Write-Warn "Unknown option: $choice" }
     }
