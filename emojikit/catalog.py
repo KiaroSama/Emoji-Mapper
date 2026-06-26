@@ -32,7 +32,11 @@ from . import media
 log = logging.getLogger("emojikit.catalog")
 
 SCHEMA_VERSION = 1
-DEFAULT_PHASH_THRESHOLD = 5      # Hamming distance for near-duplicate merging
+# Near-duplicate (perceptual) merging is OFF by default: faithfully copying a
+# pack must keep visually-similar-but-DISTINCT emoji. Dedup then relies on exact
+# content (normalized pixels) + file_unique_id only. Set a >=0 Hamming threshold
+# (e.g. via --phash-threshold) to opt in to merging near-identical images.
+DEFAULT_PHASH_THRESHOLD = -1
 
 
 @dataclass
