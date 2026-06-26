@@ -189,9 +189,11 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         set_index = max((s["index"] for s in fmt_sets), default=0)
         set_name, in_set = "", 0
 
-    # Pending = plan keys neither already uploaded nor permanently skipped.
+    # Pending = plan keys neither already uploaded, excluded in the panel, nor
+    # permanently skipped.
     pending = [k for k in plan_keys
-               if (it := cat.get(k)) and not it.uploaded and k not in skipped]
+               if (it := cat.get(k)) and not it.uploaded and it.included
+               and k not in skipped]
     log.info("[%s] %d sets, active in_set=%d, %d pending (of %d planned)",
              fmt, len(fmt_sets), in_set, len(pending), len(plan_keys))
 

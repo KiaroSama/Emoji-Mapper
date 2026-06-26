@@ -229,6 +229,12 @@ function Action-RunBot ($py) {
     & $py emoji_bot.py
 }
 
+function Action-Panel ($py) {
+    Write-Title "Curate panel (pick which emoji go into the pack)"
+    Write-Info "Opens a dark neon web panel; tick/untick emoji, then Save. Ctrl+C to stop."
+    & $py panel.py
+}
+
 # --- Bootstrap ------------------------------------------------------------
 Write-Title "Emoji Mapper"
 $py = Ensure-Environment
@@ -261,6 +267,7 @@ while ($running) {
     Write-Host "  4) Collect emoji from existing packs (download)" -ForegroundColor White
     Write-Host "  5) Add media from a folder (build from scratch)" -ForegroundColor White
     Write-Host "  6) Publish the collection into new packs"        -ForegroundColor White
+    Write-Host "  8) Curate panel — pick which emoji to include (web)" -ForegroundColor White
     Write-Host "  Bot" -ForegroundColor DarkCyan
     Write-Host "  7) Run the Emoji Mapper bot (premium-emoji ID extractor)" -ForegroundColor White
     Write-Host "  q) Quit" -ForegroundColor DarkGray
@@ -273,6 +280,7 @@ while ($running) {
         '5' { Action-AddMedia $py }
         '6' { Action-PublishCollection $py }
         '7' { Action-RunBot $py }
+        '8' { Action-Panel $py }
         { $_ -in @('q','quit','0','exit') } { Write-Info "Bye."; $running = $false }
         default { Write-Warn "Unknown option: $choice" }
     }

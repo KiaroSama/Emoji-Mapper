@@ -89,3 +89,7 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 launch_test.txt
+
+# Playwright MCP test artifacts
+.playwright-mcp/
+*.jpeg
