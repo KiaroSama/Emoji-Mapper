@@ -14,6 +14,7 @@ Run:  python panel.py            (serves http://127.0.0.1:8765 and opens it)
 from __future__ import annotations
 
 import argparse
+import gzip
 import html
 import json
 import logging
@@ -29,6 +30,7 @@ from emojikit.logsetup import setup_logging
 from emojikit.media import hamming
 
 ROOT = Path(__file__).resolve().parent
+ASSET_DIR = ROOT / "assets" / "vendor"
 log = logging.getLogger("panel")
 
 _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
@@ -106,6 +108,29 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
                 data = it.read_bytes()
                 self._send(200, data, _MIME.get(it.suffix.lower(), "application/octet-stream"))
                 return
+            if self.path.startswith("/lottie/"):
+                key = unquote(self.path[len("/lottie/"):])
+                it = by_key.get(key)
+                if not it or not it.is_file():
+                    self._send(404, b"{}")
+                    return
+                try:
+                    raw = it.read_bytes()
+                    if raw[:2] == b"\x1f\x8b":          # gzip-compressed .tgs
+                        raw = gzip.decompress(raw)
+                    self._send(200, raw, "application/json")
+                except Exception:  # noqa: BLE001
+                    self._send(500, b"{}")
+                return
+            if self.path.startswith("/static/"):
+                name = unquote(self.path[len("/static/"):])
+                f = (ASSET_DIR / name)
+                if f.is_file() and f.parent == ASSET_DIR:   # no traversal
+                    ctype = "application/javascript" if f.suffix == ".js" else "application/octet-stream"
+                    self._send(200, f.read_bytes(), ctype)
+                else:
+                    self._send(404, b"not found", "text/plain")
+                return
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
@@ -132,6 +157,7 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Emoji Mapper — Curate</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='10' fill='%2322d3ee'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -172,6 +198,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   background-image:conic-gradient(#0000 90deg,#ffffff0f 90deg 180deg,#0000 180deg 270deg,#ffffff0f 270deg);
   background-size:18px 18px;background-color:#0a0f17}
 .thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
+.thumb.lottie svg{width:104px!important;height:104px!important}
 .ph{font-size:46px;line-height:108px}
 .badge{position:absolute;top:8px;left:8px;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
@@ -201,6 +228,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 </header>
 <div class="grid" id="grid"></div>
 <div id="toast"></div>
+<script src="/static/lottie_svg.min.js"></script>
 <script>
 const ITEMS = __ITEMS__;
 let lastIdx = null;
@@ -208,10 +236,32 @@ const grid = document.getElementById('grid');
 
 function thumb(it){
   if(it.fmt==='static') return `<div class="thumb"><img loading="lazy" src="/img/${encodeURIComponent(it.key)}" alt="${it.label}"></div>`;
-  if(it.fmt==='video') return `<div class="thumb"><video src="/img/${encodeURIComponent(it.key)}" muted loop autoplay playsinline></video></div>`;
-  return `<div class="thumb"><span class="ph">${it.emoji||'🎞️'}</span></div>`; // animated .tgs: no in-browser preview
+  if(it.fmt==='video') return `<div class="thumb"><video src="/img/${encodeURIComponent(it.key)}" muted loop autoplay playsinline preload="metadata"></video></div>`;
+  return `<div class="thumb lottie" data-key="${encodeURIComponent(it.key)}"><span class="ph">${it.emoji||'▶'}</span></div>`;
 }
+const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const anims = new Map();
+const io = new IntersectionObserver(entries=>{
+  for(const e of entries){
+    const div = e.target, key = div.dataset.key;
+    if(e.isIntersecting){
+      if(!anims.has(div) && window.lottie){
+        const ph = div.querySelector('.ph'); if(ph) ph.remove();
+        const a = lottie.loadAnimation({container:div,renderer:'svg',loop:true,
+          autoplay:!RM, path:'/lottie/'+key});
+        if(RM) a.addEventListener('DOMLoaded',()=>a.goToAndStop(0,true));
+        anims.set(div,a);
+      }
+    } else {
+      const a = anims.get(div);
+      if(a){ try{a.destroy();}catch(_){} anims.delete(div); div.innerHTML=''; }
+    }
+  }
+},{root:null, rootMargin:'250px'});
+function cleanupLottie(){ anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims.clear(); io.disconnect(); }
+function observeLottie(){ document.querySelectorAll('.thumb.lottie').forEach(d=>io.observe(d)); }
 function render(){
+  cleanupLottie();
   grid.innerHTML = ITEMS.map((it,i)=>`
     <div class="card ${it.included?'on':'off'}" data-i="${i}">
       <span class="badge">${it.fmt}</span>
@@ -221,6 +271,7 @@ function render(){
       <div class="sub">${it.key.slice(0,10)}…</div>
     </div>`).join('');
   updateCount();
+  observeLottie();
 }
 function updateCount(){
   document.getElementById('selCount').textContent = ITEMS.filter(x=>x.included).length;

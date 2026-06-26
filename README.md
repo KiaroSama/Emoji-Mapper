@@ -170,11 +170,13 @@ premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
 ## Curate panel (pick which emoji go into the pack)
 
 `panel.py` opens a local dark neon-blue web panel showing every emoji in the
-catalog as a large card with a label. All are selected by default; click a card
-to toggle it (deselected = excluded from the next publish), Shift+click for a
-range. Visually similar emoji are placed next to each other so look-alikes are
-quick to deselect. Click **Save**, then `build_collection.py` only publishes the
-included items.
+catalog as a large labelled card — static as images, video as autoplaying
+`<video>`, and **animated `.tgs` rendered and looped with Lottie** (lazy: only
+on-screen animations play, freed when scrolled away). All are selected by
+default; click a card to toggle it (deselected = excluded from the next
+publish), Shift+click for a range. Visually similar emoji are placed next to
+each other so look-alikes are quick to deselect. Click **Save**, then
+`build_collection.py` only publishes the included items.
 
 ```powershell
 .venv\Scripts\python.exe panel.py        # or run.ps1 -> option 8
