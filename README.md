@@ -167,6 +167,19 @@ premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
 .venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> option 7
 ```
 
+## Curate panel (pick which emoji go into the pack)
+
+`panel.py` opens a local dark neon-blue web panel showing every emoji in the
+catalog as a large card with a label. All are selected by default; click a card
+to toggle it (deselected = excluded from the next publish), Shift+click for a
+range. Visually similar emoji are placed next to each other so look-alikes are
+quick to deselect. Click **Save**, then `build_collection.py` only publishes the
+included items.
+
+```powershell
+.venv\Scripts\python.exe panel.py        # or run.ps1 -> option 8
+```
+
 ## Crypto-coin workflow (one component: `coins/`)
 
 The crypto-coin tool is now a self-contained component under `coins/`. It reuses

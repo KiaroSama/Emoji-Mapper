@@ -50,6 +50,7 @@ class Item:
     phash: int | None
     custom_emoji_id: str | None
     uploaded: bool
+    included: bool = True
 
 
 def _now() -> str:
@@ -103,6 +104,7 @@ class Catalog:
                 phash            INTEGER,
                 custom_emoji_id  TEXT,
                 uploaded         INTEGER NOT NULL DEFAULT 0,
+                included         INTEGER NOT NULL DEFAULT 1,
                 created_utc      TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_items_format ON items(format);
@@ -113,6 +115,11 @@ class Catalog:
             );
             """
         )
+        # Migrate older databases that predate the 'included' column.
+        try:
+            self.db.execute("ALTER TABLE items ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self.db.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -223,17 +230,42 @@ class Catalog:
 
     # ----- publishing ---------------------------------------------------- #
     def pending(self, fmt: str | None = None) -> list[Item]:
-        """Items not yet uploaded, in deterministic (frozen) order."""
+        """Items not yet uploaded AND included, in deterministic (frozen) order."""
         if fmt:
             rows = self.db.execute(
-                "SELECT * FROM items WHERE uploaded=0 AND format=? ORDER BY content_key",
-                (fmt,),
+                "SELECT * FROM items WHERE uploaded=0 AND included=1 AND format=? "
+                "ORDER BY content_key", (fmt,),
             ).fetchall()
         else:
             rows = self.db.execute(
-                "SELECT * FROM items WHERE uploaded=0 ORDER BY format, content_key"
+                "SELECT * FROM items WHERE uploaded=0 AND included=1 "
+                "ORDER BY format, content_key"
             ).fetchall()
         return [_row_to_item(r) for r in rows]
+
+    def all_items(self, fmt: str | None = None) -> list[Item]:
+        """Every catalog item (any state), deterministic order. For the panel."""
+        if fmt:
+            rows = self.db.execute(
+                "SELECT * FROM items WHERE format=? ORDER BY content_key", (fmt,)).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM items ORDER BY format, content_key").fetchall()
+        return [_row_to_item(r) for r in rows]
+
+    def set_inclusion(self, excluded_keys: set[str]) -> tuple[int, int]:
+        """Mark the given keys as excluded (included=0) and all others included=1.
+
+        Returns (included_count, excluded_count).
+        """
+        self.db.execute("UPDATE items SET included=1")
+        if excluded_keys:
+            self.db.executemany("UPDATE items SET included=0 WHERE content_key=?",
+                                [(k,) for k in excluded_keys])
+        self.db.commit()
+        inc = self.db.execute("SELECT COUNT(*) FROM items WHERE included=1").fetchone()[0]
+        exc = self.db.execute("SELECT COUNT(*) FROM items WHERE included=0").fetchone()[0]
+        return int(inc), int(exc)
 
     def mark_uploaded(self, content_key: str, custom_emoji_id: str | None) -> None:
         self.db.execute(
@@ -293,4 +325,5 @@ def _row_to_item(r: sqlite3.Row) -> Item:
         sources=json.loads(r["sources"]),
         phash=_phash_from_db(r["phash"]),
         custom_emoji_id=r["custom_emoji_id"], uploaded=bool(r["uploaded"]),
+        included=bool(r["included"] if "included" in r.keys() else 1),
     )

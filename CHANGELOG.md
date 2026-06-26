@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packs from any folder of images, not only crypto-coin logos.
 
 ### Added
+- **Curate web panel** (`panel.py`): a local dark neon-blue panel to review the
+  downloaded emoji as large labelled cards, toggle which ones to include
+  (all on by default, Shift+click ranges), with look-alikes ordered next to each
+  other; the saved selection drives what `build_collection` publishes.
 - **Emoji Mapper bot** (`emoji_bot.py`): interactive long-polling bot that
   extracts premium custom-emoji IDs from sent/forwarded messages and from new
   channel/group posts, with tap-to-copy (`copy_text`) inline buttons and a
