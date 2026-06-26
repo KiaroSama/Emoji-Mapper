@@ -17,6 +17,9 @@ It ships with two independent workflows that share the same engine:
 The same scripts (`make_emoji_pngs.py` + `build_pack.py`) power both; only the
 source folder and the selected bot token differ.
 
+> 📘 **[Full Guide (0 → 100) — docs/GUIDE.md](docs/GUIDE.md)** — complete
+> reference for every workflow and command, written for humans and AI agents.
+
 ## How it works
 
 1. **Prepare PNGs** — `make_emoji_pngs.py` converts your images (SVG, PNG, JPG,
