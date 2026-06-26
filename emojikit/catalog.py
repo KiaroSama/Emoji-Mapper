@@ -52,6 +52,25 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+# A 64-bit dHash is unsigned and can exceed SQLite's signed-64-bit INTEGER max.
+# Store it as a signed 64-bit value (two's complement) and restore on read so it
+# fits the driver without a schema migration.
+_U64 = (1 << 64) - 1
+
+
+def _phash_to_db(p: int | None) -> int | None:
+    if p is None:
+        return None
+    p &= _U64
+    return p - (1 << 64) if p >= (1 << 63) else p
+
+
+def _phash_from_db(v) -> int | None:
+    if v is None:
+        return None
+    return int(v) & _U64
+
+
 class Catalog:
     """SQLite-backed, content-addressed emoji catalog."""
 
@@ -135,7 +154,7 @@ class Catalog:
             (fmt,),
         ).fetchall()
         for r in rows:
-            if media.hamming(int(r["phash"]), phash) <= self.phash_threshold:
+            if media.hamming(_phash_from_db(r["phash"]), phash) <= self.phash_threshold:
                 return r["content_key"]
         return None
 
@@ -175,7 +194,7 @@ class Catalog:
             "sources, phash, uploaded, created_utc) VALUES(?,?,?,?,?,?,?,0,?)",
             (content_key, fmt, str(file_path), json.dumps(emojis),
              json.dumps(keywords), json.dumps([source] if source else []),
-             phash, _now()),
+             _phash_to_db(phash), _now()),
         )
         if file_unique_id:
             self._record_seen(file_unique_id, content_key)
@@ -268,6 +287,6 @@ def _row_to_item(r: sqlite3.Row) -> Item:
         content_key=r["content_key"], fmt=r["format"], file_path=r["file_path"],
         emojis=json.loads(r["emojis"]), keywords=json.loads(r["keywords"]),
         sources=json.loads(r["sources"]),
-        phash=(int(r["phash"]) if r["phash"] is not None else None),
+        phash=_phash_from_db(r["phash"]),
         custom_emoji_id=r["custom_emoji_id"], uploaded=bool(r["uploaded"]),
     )
