@@ -82,6 +82,17 @@ class TestCatalog(unittest.TestCase):
         s = self.cat.stats()
         self.assertEqual(s["static"], {"total": 2, "uploaded": 1, "pending": 1})
 
+    def test_large_phash_64bit(self):
+        # A full 64-bit dHash can exceed SQLite's signed-64-bit INTEGER max.
+        big = (1 << 64) - 1  # all bits set
+        self.cat.add(content_key="s:big", fmt="static", file_path=self._f(), phash=big)
+        self.assertEqual(self.cat.get("s:big").phash, big)
+        # near-dup lookup must still work with such values
+        k, new = self.cat.add(content_key="s:big2", fmt="static",
+                              file_path=self._f(), phash=big)
+        self.assertFalse(new)  # identical phash -> merged onto s:big
+        self.assertEqual(k, "s:big")
+
     def test_persistence_across_reopen(self):
         self.cat.add(content_key="s:a", fmt="static", file_path=self._f(),
                      file_unique_id="FX")
