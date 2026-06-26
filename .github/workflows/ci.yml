@@ -39,7 +39,7 @@ jobs:
 
       - name: Import smoke test
         run: |
-          python -c "import build_pack, make_emoji_pngs, fetch_pack, add_media, build_collection, emoji_bot; from emojikit import media, catalog, logsetup; print('imports OK')"
+          python -c "import build_pack, make_emoji_pngs, fetch_pack, add_media, build_collection, emoji_bot, panel; from emojikit import media, catalog, logsetup; print('imports OK')"
 
       - name: Unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
