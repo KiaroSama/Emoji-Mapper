@@ -1,98 +1,307 @@
-"""Mandatory UTC file logging for Emoji Mapper executable scripts.
+"""Advanced, secret-safe logging for Emoji Mapper executable scripts.
 
-Every execution creates a new log file named
-``<script>_YYYY-MM-DD_HH-mm-ss_UTC.log`` under the project ``logs/`` directory
-(resolved relative to the project root, not the caller's CWD). Timestamps are
-UTC to the second (no milliseconds). Bot tokens and other secrets must be
-redacted with :func:`redact` before logging.
+Every execution creates a fresh UTC log file under the project ``logs/``
+directory, named ``<script>_YYYY-MM-DD_HH-mm-ss_UTC_<run_id>.log`` (resolved
+relative to the project root, not the caller's CWD). Timestamps are UTC to the
+second (no milliseconds).
+
+Features
+--------
+* **Per-run id** — a short id stamped on every line, so interleaved/streamed
+  logs are attributable to one execution.
+* **Automatic secret redaction** — known secret *values* (from ``.env``-style
+  env vars) and token-shaped strings are masked in *every* emitted record,
+  including exception tracebacks. Nothing token-shaped reaches a file.
+* **Rich file format** — UTC time, level, logger, ``module:line`` and the run id;
+  a concise (optionally colored) console format.
+* **Optional JSONL sidecar** — machine-readable ``.jsonl`` next to the log.
+* **Uncaught-exception capture** — ``sys.excepthook`` and the threading hook log
+  full tracebacks as CRITICAL.
+* **Timing + call helpers** — :func:`log_duration` context manager and
+  :func:`logcall` decorator.
+* **Run summary** — at interpreter exit, a summary line reports duration and the
+  number of warnings/errors/criticals plus the log path.
+* **Quiet third parties** — ``urllib3``/``requests``/``PIL`` are turned down so
+  bot-token URLs and decoder chatter never flood (or leak into) the log.
+
+Backwards compatible: ``setup_logging(name)`` and ``redact(text)`` keep working.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import re
+import secrets
 import sys
+import threading
 import time
+import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
 # Project root = parent of this package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 
-# Telegram bot tokens look like 1234567890:AA... ; CMC keys are long hex. Redact
-# anything token-shaped so it can never leak into a log file.
+# Env vars whose *values* are secrets and must be masked wherever they appear.
+SECRET_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "GENERAL_BOT_TOKEN", "CMC_API_KEY",
+                   "BOT_TOKEN", "API_KEY", "TOKEN")
+
+# Token-shaped patterns (catch secrets even if not registered as a value).
 _TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _BOT_URL_RE = re.compile(r"/bot\d{6,}:[A-Za-z0-9_-]{20,}/")
 
+# Registered literal secret values (longest-first matching is applied).
+_SECRETS: set[str] = set()
 
-class _UtcFormatter(logging.Formatter):
-    """Formatter that emits UTC timestamps to the second (no milliseconds)."""
+# Per-run state.
+_RUN: dict = {"id": None, "start": None, "log_path": None,
+              "counts": {"WARNING": 0, "ERROR": 0, "CRITICAL": 0}}
 
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+_LEVEL_COLOR = {  # ANSI for TTY consoles
+    "DEBUG": "\033[38;5;244m", "INFO": "\033[38;5;39m", "WARNING": "\033[38;5;214m",
+    "ERROR": "\033[38;5;203m", "CRITICAL": "\033[1;37;41m",
+}
+_RESET = "\033[0m"
+
+
+# --------------------------------------------------------------------------- #
+# Redaction
+# --------------------------------------------------------------------------- #
+def register_secret(value: str | None) -> None:
+    """Register a literal secret value to be masked in all future log output."""
+    if value and len(value) >= 8:
+        _SECRETS.add(value)
 
 
 def redact(text: str) -> str:
-    """Mask token-shaped secrets in a string before it is logged or printed."""
+    """Mask registered secret values and token-shaped strings."""
+    if not text:
+        return text
+    for sec in sorted(_SECRETS, key=len, reverse=True):
+        if sec in text:
+            text = text.replace(sec, "[REDACTED]")
     text = _BOT_URL_RE.sub("/bot[REDACTED]/", text)
     return _TOKEN_RE.sub("[REDACTED]", text)
 
 
 def _sanitize(name: str) -> str:
-    """Make a script name safe for use inside a filename."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "script"
 
 
-def setup_logging(script_name: str, *, console_level: int = logging.INFO,
-                  file_level: int = logging.DEBUG) -> logging.Logger:
-    """Configure root logging with a console handler and a fresh UTC file handler.
+def get_run_id() -> str | None:
+    return _RUN["id"]
 
-    Returns the configured root logger. Safe to call once per process; repeated
-    calls reuse the existing handlers to avoid duplicate log lines.
+
+def get_log_path() -> Path | None:
+    return _RUN["log_path"]
+
+
+# --------------------------------------------------------------------------- #
+# Formatters / handlers
+# --------------------------------------------------------------------------- #
+class _HumanFormatter(logging.Formatter):
+    """UTC, redacted, optionally colored human-readable formatter."""
+
+    def __init__(self, fmt: str, *, color: bool = False):
+        super().__init__(fmt)
+        self.color = color
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.run_id = _RUN["id"] or "--------"
+        s = redact(super().format(record))
+        if self.color:
+            c = _LEVEL_COLOR.get(record.levelname, "")
+            if c:
+                s = f"{c}{s}{_RESET}"
+        return s
+
+
+class _JsonFormatter(logging.Formatter):
+    """Redacted JSON-lines formatter for the optional sidecar."""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+        obj = {
+            "ts": self.formatTime(record),
+            "run_id": _RUN["id"],
+            "level": record.levelname,
+            "logger": record.name,
+            "module": record.module,
+            "line": record.lineno,
+            "func": record.funcName,
+            "msg": redact(record.getMessage()),
+        }
+        if record.exc_info:
+            obj["exc"] = redact("".join(traceback.format_exception(*record.exc_info)))
+        return json.dumps(obj, ensure_ascii=False)
+
+
+class _CounterHandler(logging.Handler):
+    """Counts WARNING/ERROR/CRITICAL records for the end-of-run summary."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelname in _RUN["counts"]:
+            _RUN["counts"][record.levelname] += 1
+
+
+# --------------------------------------------------------------------------- #
+# Setup
+# --------------------------------------------------------------------------- #
+def setup_logging(script_name: str, *, console_level: int = logging.INFO,
+                  file_level: int = logging.DEBUG, json_sidecar: bool = False,
+                  color: bool | None = None) -> logging.Logger:
+    """Configure root logging (console + fresh UTC file). Idempotent per process.
+
+    Parameters
+    ----------
+    json_sidecar : also write a machine-readable ``.jsonl`` next to the log.
+    color : force ANSI colors on/off for the console (default: auto by TTY).
     """
     logger = logging.getLogger()
     if getattr(logger, "_emojikit_configured", False):
         return logger
     logger.setLevel(logging.DEBUG)
 
-    fmt = _UtcFormatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+    _RUN["id"] = secrets.token_hex(4)
+    _RUN["start"] = time.time()
+
+    # Register secret values from the environment so they are always masked.
+    for key in SECRET_ENV_KEYS:
+        register_secret(os.environ.get(key))
+
+    if color is None:
+        color = bool(getattr(sys.stderr, "isatty", lambda: False)()) and os.name != "nt"
 
     console = logging.StreamHandler(sys.stderr)
     console.setLevel(console_level)
-    console.setFormatter(fmt)
+    console.setFormatter(_HumanFormatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s", color=color))
     logger.addHandler(console)
+    logger.addHandler(_CounterHandler())
 
-    # File logging must not crash the program if the directory is unwritable;
-    # fall back to console-only and report the failure clearly.
+    file_fmt = _HumanFormatter(
+        "[%(asctime)s] [%(levelname)s] [%(run_id)s] [%(name)s] "
+        "%(module)s:%(lineno)d %(message)s")
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_UTC")
         base = _sanitize(script_name)
-        path = LOG_DIR / f"{base}_{stamp}.log"
+        path = LOG_DIR / f"{base}_{stamp}_{_RUN['id']}.log"
         n = 1
-        while path.exists():  # never overwrite a previous execution's log
-            path = LOG_DIR / f"{base}_{stamp}_{n}.log"
+        while path.exists():
+            path = LOG_DIR / f"{base}_{stamp}_{_RUN['id']}_{n}.log"
             n += 1
         fileh = logging.FileHandler(path, encoding="utf-8")
         fileh.setLevel(file_level)
-        fileh.setFormatter(fmt)
+        fileh.setFormatter(file_fmt)
         logger.addHandler(fileh)
-        logger.info("Logging to %s", path)
+        _RUN["log_path"] = path
+        if json_sidecar:
+            jh = logging.FileHandler(path.with_suffix(".jsonl"), encoding="utf-8")
+            jh.setLevel(file_level)
+            jh.setFormatter(_JsonFormatter())
+            logger.addHandler(jh)
     except OSError as exc:
         logger.warning("File logging unavailable (%s); console only.", exc)
 
     logger._emojikit_configured = True  # type: ignore[attr-defined]
 
-    # Silence noisy third-party DEBUG logs. urllib3/requests log full request
-    # URLs at DEBUG level, which for the Telegram API include the bot token in
-    # the path -- those must never be written to a log file.
+    # Quiet noisy third parties (and keep bot-token URLs out of the log).
     for noisy in ("urllib3", "requests", "urllib3.connectionpool"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.INFO)
+    logging.captureWarnings(True)
 
-    # Record a little environment context up front for diagnostics.
-    logger.info("Python %s on %s", sys.version.split()[0], sys.platform)
+    _install_excepthooks(logger)
+    _install_summary(logger)
+
+    # Startup context block.
+    logger.info("=== %s started | run %s ===", base, _RUN["id"])
+    logger.info("Python %s on %s (%s)", sys.version.split()[0], sys.platform, os.name)
     logger.info("Project root: %s", PROJECT_ROOT)
-    logger.debug("UTC start: %s", time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+    logger.info("Args: %s", redact(" ".join(sys.argv)))
+    if _RUN["log_path"]:
+        logger.info("Log file: %s", _RUN["log_path"])
+    logger.debug("CWD: %s", os.getcwd())
     return logger
+
+
+def _install_excepthooks(logger: logging.Logger) -> None:
+    prev = sys.excepthook
+
+    def hook(exc_type, exc, tb):
+        if not issubclass(exc_type, KeyboardInterrupt):
+            logger.critical("UNCAUGHT %s", exc_type.__name__,
+                            exc_info=(exc_type, exc, tb))
+        prev(exc_type, exc, tb)
+
+    sys.excepthook = hook
+    if hasattr(threading, "excepthook"):
+        def thook(args):
+            logger.critical("UNCAUGHT in thread %s: %s", args.thread.name if args.thread else "?",
+                            args.exc_type.__name__,
+                            exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        threading.excepthook = thook
+
+
+def _install_summary(logger: logging.Logger) -> None:
+    def summary():
+        dur = time.time() - (_RUN["start"] or time.time())
+        c = _RUN["counts"]
+        logger.info("=== run %s finished in %.2fs | warnings=%d errors=%d critical=%d ===",
+                    _RUN["id"], dur, c["WARNING"], c["ERROR"], c["CRITICAL"])
+        logging.shutdown()
+    atexit.register(summary)
+
+
+# --------------------------------------------------------------------------- #
+# Helpers for scripts
+# --------------------------------------------------------------------------- #
+@contextmanager
+def log_duration(label: str, *, logger: logging.Logger | None = None,
+                 level: int = logging.INFO):
+    """Log ``label`` start/finish with elapsed seconds (and failure on error)."""
+    lg = logger or logging.getLogger("emojikit.timing")
+    lg.log(level, "%s: started", label)
+    t0 = time.time()
+    try:
+        yield
+    except Exception:
+        lg.error("%s: FAILED after %.2fs", label, time.time() - t0)
+        raise
+    else:
+        lg.log(level, "%s: done in %.2fs", label, time.time() - t0)
+
+
+def logcall(fn=None, *, level: int = logging.DEBUG):
+    """Decorator: log a function's entry, exit, duration and exceptions."""
+    def deco(func):
+        lg = logging.getLogger(func.__module__)
+
+        @wraps(func)
+        def wrapper(*a, **k):
+            lg.log(level, "-> %s()", func.__qualname__)
+            t0 = time.time()
+            try:
+                r = func(*a, **k)
+                lg.log(level, "<- %s() in %.3fs", func.__qualname__, time.time() - t0)
+                return r
+            except Exception as exc:  # noqa: BLE001
+                lg.exception("xx %s() raised %s after %.3fs",
+                             func.__qualname__, type(exc).__name__, time.time() - t0)
+                raise
+        return wrapper
+    return deco(fn) if fn else deco
