@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packs from any folder of images, not only crypto-coin logos.
 
 ### Added
+- **Advanced logging** (`emojikit/logsetup.py`): per-run id on every line,
+  automatic secret-value + token redaction across all records and tracebacks
+  (content hashes/ids preserved), rich file format, optional JSONL sidecar,
+  uncaught-exception capture, `log_duration`/`logcall` helpers, third-party
+  noise reduction, and an end-of-run warnings/errors summary.
 - **Curate web panel** (`panel.py`): a local dark neon-blue panel to review the
   downloaded emoji as large labelled cards — static/video previewed and
   **animated `.tgs` rendered & looped via a vendored Lottie player** (lazy,
