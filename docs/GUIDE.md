@@ -563,12 +563,40 @@ with Catalog("collection/catalog.db", phash_threshold=-1) as cat:
 merges perceptual near-duplicates; with `-1` (default) only exact content +
 `file_unique_id` dedup happens.
 
-### 14.3 `emojikit.logsetup`
+### 14.3 `emojikit.logsetup` (advanced logging)
 
-`setup_logging(name)` configures a console + a fresh UTC file log under `logs/`
-named `<name>_YYYY-MM-DD_HH-mm-ss_UTC.log`. It silences `urllib3`/`requests`
-DEBUG logs so bot-token URLs never reach a log file. `redact(text)` masks
-token-shaped strings before logging.
+`setup_logging(name, *, console_level=INFO, file_level=DEBUG, json_sidecar=False,
+color=None)` configures a console handler plus a fresh UTC file log under
+`logs/`, named `<name>_YYYY-MM-DD_HH-mm-ss_UTC_<run_id>.log`. It is idempotent
+per process and returns the root logger. Capabilities:
+
+- **Per-run id** — an 8-hex id stamped on every file line (`get_run_id()`).
+- **Automatic secret redaction** — known secret *values* (auto-registered from
+  `TELEGRAM_BOT_TOKEN`, `GENERAL_BOT_TOKEN`, `CMC_API_KEY`, …) and token-shaped
+  strings/`/bot<token>/` URLs are masked in **every** record, including
+  exception tracebacks and the JSON sidecar. Content hashes (`s:...`) and numeric
+  ids are **not** redacted. Register extra secrets with `register_secret(value)`.
+- **Rich file format** — `[UTC] [LEVEL] [run_id] [logger] module:line message`;
+  concise (optionally ANSI-colored on TTY) console format.
+- **JSONL sidecar** — pass `json_sidecar=True` to also write `*.jsonl`.
+- **Uncaught-exception capture** — `sys.excepthook` + threading hook log full
+  tracebacks as CRITICAL.
+- **Quiet third parties** — `urllib3`/`requests`/`PIL` turned down;
+  `logging.captureWarnings(True)`.
+- **End-of-run summary** (atexit) — `run <id> finished in N.NNs | warnings=… errors=… critical=…`.
+
+Helpers for scripts:
+
+```python
+from emojikit.logsetup import setup_logging, log_duration, logcall, get_run_id, redact
+setup_logging("myscript", json_sidecar=True)
+with log_duration("download pack"):     # logs start/finish + elapsed (+ failure)
+    ...
+@logcall                                 # logs entry/exit/duration/exceptions
+def work(...): ...
+```
+
+`redact(text)` is also exported for masking before any manual print.
 
 ### 14.4 `build_pack.Telegram`
 
