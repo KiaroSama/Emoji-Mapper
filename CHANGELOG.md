@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   codebase, documentation and launcher.
 - Generalized the engine so `make_emoji_pngs.py` + `build_pack.py` build emoji
   packs from any folder of images, not only crypto-coin logos.
+- **Curate panel** thumbnails now use a contrast checkerboard plus a Backdrop
+  switch (Checker/Light/Dark/Gray, persisted to `localStorage`) so black,
+  hollow-center and faint emoji stay clearly visible against the background.
 
 ### Added
 - **Advanced logging** (`emojikit/logsetup.py`): per-run id on every line,
