@@ -839,8 +839,9 @@ order.
 Front-end:
 
 - Dark OLED theme, neon-blue accent (`#22d3ee`), Inter font, big 108-px cards
-  with a label and a format badge. Thumbnails sit on a **contrast checkerboard**
-  so black, hollow-center, and faint/low-opacity emoji are all visible by
+  with a label and a format badge. Thumbnails sit on a **dark-slate contrast
+  checkerboard** (`#828c9a`/`#464e5a`, matching the dark theme) so black,
+  hollow-center, and faint/low-opacity emoji are all visible by
   default, plus a **Backdrop switch** (Checker → Light → Dark → Gray, persisted
   in `localStorage`) to inspect tricky emoji on any background.
 - All selected by default. Click toggles; **Shift+click** toggles a range.
