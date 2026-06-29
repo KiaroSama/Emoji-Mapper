@@ -194,9 +194,16 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 .card.on{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee66,0 0 16px #22d3ee2e}
 .card.off{opacity:.42;filter:grayscale(.9)}
 .thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
-  align-items:center;justify-content:center;
-  background-image:conic-gradient(#0000 90deg,#ffffff0f 90deg 180deg,#0000 180deg 270deg,#ffffff0f 270deg);
-  background-size:18px 18px;background-color:#0a0f17}
+  align-items:center;justify-content:center;overflow:hidden;
+  box-shadow:inset 0 0 0 1px #00000026, inset 0 0 0 2px #ffffff14}
+/* Backdrops so black / hollow / faint emoji are all visible. Default = checker. */
+body.bg-checker .thumb{background-color:#cfd6df;background-image:
+  linear-gradient(45deg,#99a2ac 25%,transparent 25%,transparent 75%,#99a2ac 75%),
+  linear-gradient(45deg,#99a2ac 25%,#cfd6df 25%,#cfd6df 75%,#99a2ac 75%);
+  background-size:16px 16px;background-position:0 0,8px 8px}
+body.bg-light .thumb{background:#f4f6f9}
+body.bg-dark  .thumb{background:#0a0e16}
+body.bg-gray  .thumb{background:#808a96}
 .thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
 .thumb.lottie svg{width:104px!important;height:104px!important}
 .ph{font-size:46px;line-height:108px}
@@ -216,7 +223,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style></head>
-<body>
+<body class="bg-checker">
 <header>
   <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
   <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected</span>
@@ -224,6 +231,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   <button id="all">Select all</button>
   <button id="none">Deselect all</button>
   <button id="inv">Invert</button>
+  <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
   <button id="save" class="primary">Save selection</button>
 </header>
 <div class="grid" id="grid"></div>
@@ -298,6 +306,20 @@ grid.addEventListener('click',e=>{
 document.getElementById('all').onclick=()=>{ITEMS.forEach(x=>x.included=true);render();};
 document.getElementById('none').onclick=()=>{ITEMS.forEach(x=>x.included=false);render();};
 document.getElementById('inv').onclick=()=>{ITEMS.forEach(x=>x.included=!x.included);render();};
+// Preview backdrop switcher: makes black / hollow / faint emoji visible.
+const BGS=['checker','light','dark','gray'];
+const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};
+function applyBg(b){
+  BGS.forEach(x=>document.body.classList.remove('bg-'+x));
+  document.body.classList.add('bg-'+b);
+  document.getElementById('bg').textContent='Backdrop: '+BGLABEL[b];
+  try{localStorage.setItem('emojiBg',b);}catch(_){}
+}
+document.getElementById('bg').onclick=()=>{
+  const cur=BGS.find(x=>document.body.classList.contains('bg-'+x))||'checker';
+  applyBg(BGS[(BGS.indexOf(cur)+1)%BGS.length]);
+};
+applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){return 'checker';}})());
 document.getElementById('save').onclick=async()=>{
   const excluded = ITEMS.filter(x=>!x.included).map(x=>x.key);
   const r = await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},
