@@ -196,11 +196,16 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 .thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
   box-shadow:inset 0 0 0 1px #00000026, inset 0 0 0 2px #ffffff14}
-/* Backdrops so black / hollow / faint emoji are all visible. Default = checker. */
-body.bg-checker .thumb{background-color:#cfd6df;background-image:
-  linear-gradient(45deg,#99a2ac 25%,transparent 25%,transparent 75%,#99a2ac 75%),
-  linear-gradient(45deg,#99a2ac 25%,#cfd6df 25%,#cfd6df 75%,#99a2ac 75%);
-  background-size:16px 16px;background-position:0 0,8px 8px}
+/* Backdrops so black / hollow / faint emoji are all visible. Default = checker.
+   Dark-friendly mid-slate checker: light enough to reveal black/hollow emoji,
+   dark enough to reveal faint/white emoji, while matching the dark panel. */
+body.bg-checker .thumb{background-color:#828c9a;background-image:
+  linear-gradient(45deg,#464e5a 25%,transparent 25%),
+  linear-gradient(-45deg,#464e5a 25%,transparent 25%),
+  linear-gradient(45deg,transparent 75%,#464e5a 75%),
+  linear-gradient(-45deg,transparent 75%,#464e5a 75%);
+  background-size:16px 16px;
+  background-position:0 0,0 8px,8px -8px,-8px 0}
 body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
