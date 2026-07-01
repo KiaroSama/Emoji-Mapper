@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`fetch_emoji_ids.py`** — download only *specific* premium custom-emoji by
   their IDs (e.g. `premium-id:<n>` entries from bot inventory files) instead of
-  whole packs. De-duplicates IDs first (each real emoji fetched once) and again
-  by content, resolving via `getCustomEmojiStickers` into the catalog. New
+  whole packs. Reads only real `premium-id:` entry lines (skips example/prose
+  mentions), de-duplicates IDs (each real emoji fetched once) and again by
+  content, resolving via `getCustomEmojiStickers` into the catalog. New
   `Telegram.get_custom_emoji_stickers()` helper (batched, ≤200 IDs/call).
 - **Advanced logging** (`emojikit/logsetup.py`): per-run id on every line,
   automatic secret-value + token redaction across all records and tracebacks
