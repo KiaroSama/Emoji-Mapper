@@ -39,15 +39,40 @@ ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("fetch_emoji_ids")
 
 
-# A real inventory entry is a line that *starts* with premium-id:<n>
-# (optionally after a "- "/"* " bullet). Mentions inside prose/examples such as
-# "(e.g. premium-id: 123)" are intentionally ignored so example IDs are never
-# downloaded by mistake.
-_REAL_ENTRY = re.compile(r"^\s*[-*]?\s*premium-id\s*:\s*(\d{5,25})\s*$", re.IGNORECASE)
+# A real inventory entry is a line whose first token (after an optional bullet)
+# is ``premium-id:<n>``. Any label/emoji *after* the id is allowed, so formats
+# like ``premium-id:123 👋 waving`` still count. Mentions in the middle of prose
+# such as ``(e.g. premium-id: 123)`` are NOT real entries and are skipped, so
+# example IDs are never fetched by mistake.
+_REAL_ENTRY = re.compile(r"^\s*[-*]?\s*premium-id\s*:\s*(\d{5,25})(?!\d)", re.IGNORECASE)
 # Any premium-id: mention anywhere on a line (used only to report skipped prose).
-_ANY_MENTION = re.compile(r"premium-id\s*:\s*(\d{5,25})", re.IGNORECASE)
+_ANY_MENTION = re.compile(r"premium-id\s*:\s*(\d{5,25})(?!\d)", re.IGNORECASE)
 # A bare numeric ID on its own line (fallback for plain ID lists).
-_BARE_ID = re.compile(r"^(\d{5,25})$")
+_BARE_ID = re.compile(r"^\s*(\d{5,25})\s*$")
+
+
+def extract_real_ids(text: str) -> list[str]:
+    """Return every real ``premium-id:`` entry ID in *text*, in order, WITH
+    duplicates preserved. Prose/example mentions are excluded. If the text has
+    no real entry lines, falls back to bare numeric-ID lines (plain ID lists).
+
+    Pure and side-effect free so the duplicate logic can be unit-tested.
+    """
+    lines = text.splitlines()
+    found = [m.group(1) for line in lines
+             for m in [_REAL_ENTRY.match(line)] if m]
+    if not found:
+        found = [m.group(1) for line in lines
+                 for m in [_BARE_ID.match(line)] if m]
+    return found
+
+
+def within_file_duplicates(text: str) -> dict[str, int]:
+    """IDs that appear as a real entry more than once within the same text."""
+    counts: dict[str, int] = {}
+    for eid in extract_real_ids(text):
+        counts[eid] = counts.get(eid, 0) + 1
+    return {k: v for k, v in counts.items() if v > 1}
 
 
 def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
@@ -55,7 +80,8 @@ def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
 
     Only real ``premium-id:<n>`` entry lines are taken (prose/example mentions
     are skipped); files that are plain lists of bare IDs are also supported.
-    Duplicates and skipped example mentions are logged for transparency.
+    Within-file duplicates, cross-file duplicates and skipped example mentions
+    are all logged for transparency.
     """
     ordered: list[str] = []
     occurrences: dict[str, int] = {}
@@ -66,21 +92,20 @@ def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
             ordered.append(eid)
 
     for f in ids_files:
-        lines = Path(f).read_text(encoding="utf-8", errors="replace").splitlines()
-        found = [m.group(1) for line in lines
-                 for m in [_REAL_ENTRY.match(line)] if m]
-        if not found:
-            # Fallback: a plain list of bare numeric IDs, one per line.
-            found = [m.group(1) for line in lines
-                     for m in [_BARE_ID.match(line.strip())] if m]
-        # Count example/prose mentions we deliberately skipped, for transparency.
-        all_mentions = len(_ANY_MENTION.findall("\n".join(lines)))
+        text = Path(f).read_text(encoding="utf-8", errors="replace")
+        found = extract_real_ids(text)
+        wdups = within_file_duplicates(text)
+        # Mentions that are NOT real entries (prose/examples) we deliberately skip.
+        all_mentions = len(_ANY_MENTION.findall(text))
         skipped = max(0, all_mentions - len(found))
         for eid in found:
             _add(eid)
-        msg = f"{Path(f).name}: {len(found)} real entries"
+        msg = f"{Path(f).name}: {len(found)} real entries ({len(set(found))} unique)"
         if skipped:
-            msg += f" ({skipped} example/prose mention(s) skipped)"
+            msg += f", {skipped} example/prose mention(s) skipped"
+        if wdups:
+            msg += ", within-file duplicate(s): " + ", ".join(
+                f"{k}x{v}" for k, v in sorted(wdups.items(), key=lambda kv: -kv[1]))
         log.info(msg)
 
     for eid in inline_ids:
