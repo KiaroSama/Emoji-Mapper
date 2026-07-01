@@ -418,10 +418,14 @@ is fetched at most once, resolved via `getCustomEmojiStickers` (batched,
 
 Two levels of de-duplication protect you: **ID-level** (repeated IDs across
 files fetched once) and **content-level** (two different IDs pointing at the
-same media collapse to one catalog row). The run reports
+same media collapse to one catalog row). It also reports **within-file
+duplicates** (the same real entry repeated inside one file) separately from
+cross-file duplicates. The run reports
 `unique_ids / new / dedup / failed / missing`; `missing` counts IDs Telegram
 could no longer resolve. Each row keeps its origin in `keywords`
-(`premium-id:<n>`).
+(`premium-id:<n>`). The extraction/dedup logic is covered by
+`tests/test_fetch_emoji_ids.py` (example lines, trailing labels, bullets,
+within-file and cross-file duplicates, bare-ID lists).
 
 Example — pull only the emoji referenced by four bot inventory files:
 
