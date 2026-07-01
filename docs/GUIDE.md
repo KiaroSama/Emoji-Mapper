@@ -37,6 +37,7 @@ Emoji Mapper/
   build_pack.py            core engine: upload a folder of media to emoji sets
   make_emoji_pngs.py       image -> 100x100 PNG (static)
   fetch_pack.py            collector: download a Telegram pack -> catalog
+  fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
   add_media.py             collector: build emoji from local files -> catalog
   build_collection.py      collector: publish the catalog into new packs
   panel.py                 web "Curate" panel: pick which emoji to publish
@@ -396,6 +397,41 @@ run continues without recreating existing sets. Use `--dry-run` first.
 
 Re-running is cheap: stickers whose `file_unique_id` was already ingested are
 skipped without downloading; identical media collapse to one catalog row.
+
+### 12.3b `fetch_emoji_ids.py` — download *specific* emoji by ID (not whole packs)
+
+Downloads only the individual premium custom-emoji you name — e.g. the
+`premium-id:<n>` entries inside bot inventory files — and nothing else from
+their packs. IDs are **de-duplicated first** so each real emoji is fetched at
+most once, then resolved via `getCustomEmojiStickers` (batched, ≤200/call),
+downloaded and content-hashed into the same catalog.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--ids-file <path>` | *(empty)* | File containing `premium-id:<n>` lines or bare IDs. Repeatable. |
+| `--id <n>` | *(empty)* | A single custom-emoji ID. Repeatable. |
+| `--token-env` | `GENERAL_BOT_TOKEN` | Bot token env var (any bot can resolve IDs). |
+| `--data-dir` | `collection` | Catalog/media directory. |
+| `--phash-threshold` | `-1` (off) | Near-dup merge threshold; `-1` keeps look-alikes. |
+
+Two levels of de-duplication protect you: **ID-level** (repeated IDs across
+files fetched once) and **content-level** (two different IDs pointing at the
+same media collapse to one catalog row). The run reports
+`unique_ids / new / dedup / failed / missing`; `missing` counts IDs Telegram
+could no longer resolve. Each row keeps its origin in `keywords`
+(`premium-id:<n>`).
+
+Example — pull only the emoji referenced by four bot inventory files:
+
+```powershell
+.venv\Scripts\python.exe fetch_emoji_ids.py `
+  --ids-file "...\GV Swap bot\bot-emoji-inventory-user.md" `
+  --ids-file "...\GV Swap bot\bot-emoji-inventory-admin.md" `
+  --ids-file "...\GodVerify Payment Bot\bot-emoji-inventory-admin.md" `
+  --ids-file "...\GodVerify Payment Bot\bot-emoji-inventory-user.md"
+# -> collected 244 id occurrences -> 101 unique (83 ids were duplicated)
+# -> Done. unique_ids=101 new=100 dedup=1 failed=0 missing=0
+```
 
 ### 12.4 `add_media.py` — build emoji from local files into the catalog
 
@@ -1042,6 +1078,7 @@ $PY build_pack.py --base set --title "Set" --source-dir build\set --token-env GE
 
 # --- collector ---
 $PY fetch_pack.py <pack-or-link> --token-env GENERAL_BOT_TOKEN
+$PY fetch_emoji_ids.py --ids-file <file-with-premium-ids> [--id <n>]
 $PY add_media.py --in input\set --emoji 😀
 $PY panel.py                                            # curate, then Save
 $PY build_collection.py --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN --dry-run
@@ -1066,7 +1103,7 @@ $PY coins\write_manifests.py --out-dir "F:\...\@GodVerify Crypto Emoji"
 # --- tests / CI-locally ---
 $PY -m unittest discover -s tests -p "test_*.py"
 $PY -m compileall -q .
-$PY -c "import build_pack, make_emoji_pngs, fetch_pack, add_media, build_collection, emoji_bot, panel"
+$PY -c "import build_pack, make_emoji_pngs, fetch_pack, fetch_emoji_ids, add_media, build_collection, emoji_bot, panel"
 
 # --- git ---
 git add -A; git commit -m "..."; git push origin main
