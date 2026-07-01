@@ -156,6 +156,21 @@ class Telegram:
         """Return the full Bot API StickerSet object for a set short name."""
         return self._call("getStickerSet", data={"name": name})
 
+    def get_custom_emoji_stickers(self, custom_emoji_ids: list[str]) -> list[dict]:
+        """Resolve custom-emoji IDs to their Sticker objects (max 200 per call).
+
+        Any bot can resolve arbitrary ``custom_emoji_id`` values; the Bot API
+        silently drops IDs it cannot find, so the returned list may be shorter
+        than the input. Each returned Sticker carries ``custom_emoji_id``,
+        ``file_id`` and ``file_unique_id`` plus the animated/video flags.
+        """
+        if not custom_emoji_ids:
+            return []
+        if len(custom_emoji_ids) > 200:
+            raise ValueError("getCustomEmojiStickers accepts at most 200 IDs per call")
+        return self._call("getCustomEmojiStickers",
+                          data={"custom_emoji_ids": json.dumps(custom_emoji_ids)})
+
     def download_file(self, file_id: str, dest: Path, retries: int = 5) -> Path:
         """Download a Telegram file (by file_id) to ``dest`` (with retries)."""
         info = self._call("getFile", data={"file_id": file_id})
