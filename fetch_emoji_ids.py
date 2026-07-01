@@ -38,15 +38,24 @@ from emojikit.logsetup import redact, setup_logging
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("fetch_emoji_ids")
 
-# Matches "premium-id:5334673106202010226" and bare IDs on their own line.
-_ID_IN_TEXT = re.compile(r"(?:premium-id\s*:\s*)?(\d{5,25})", re.IGNORECASE)
+
+# A real inventory entry is a line that *starts* with premium-id:<n>
+# (optionally after a "- "/"* " bullet). Mentions inside prose/examples such as
+# "(e.g. premium-id: 123)" are intentionally ignored so example IDs are never
+# downloaded by mistake.
+_REAL_ENTRY = re.compile(r"^\s*[-*]?\s*premium-id\s*:\s*(\d{5,25})\s*$", re.IGNORECASE)
+# Any premium-id: mention anywhere on a line (used only to report skipped prose).
+_ANY_MENTION = re.compile(r"premium-id\s*:\s*(\d{5,25})", re.IGNORECASE)
+# A bare numeric ID on its own line (fallback for plain ID lists).
+_BARE_ID = re.compile(r"^(\d{5,25})$")
 
 
 def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
-    """Read IDs from files (premium-id:<n> or bare) and CLI, dedup, preserve order.
+    """Read IDs from files and CLI, dedup, preserve first-seen order.
 
-    Returns the unique ID list. Duplicates are logged so the user can see that
-    de-duplication happened.
+    Only real ``premium-id:<n>`` entry lines are taken (prose/example mentions
+    are skipped); files that are plain lists of bare IDs are also supported.
+    Duplicates and skipped example mentions are logged for transparency.
     """
     ordered: list[str] = []
     occurrences: dict[str, int] = {}
@@ -57,15 +66,22 @@ def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
             ordered.append(eid)
 
     for f in ids_files:
-        text = Path(f).read_text(encoding="utf-8", errors="replace")
-        # Prefer explicit premium-id: matches; fall back to bare numbers per line.
-        found = re.findall(r"premium-id\s*:\s*(\d{5,25})", text, re.IGNORECASE)
+        lines = Path(f).read_text(encoding="utf-8", errors="replace").splitlines()
+        found = [m.group(1) for line in lines
+                 for m in [_REAL_ENTRY.match(line)] if m]
         if not found:
-            found = [m.group(1) for line in text.splitlines()
-                     for m in [_ID_IN_TEXT.fullmatch(line.strip())] if m]
+            # Fallback: a plain list of bare numeric IDs, one per line.
+            found = [m.group(1) for line in lines
+                     for m in [_BARE_ID.match(line.strip())] if m]
+        # Count example/prose mentions we deliberately skipped, for transparency.
+        all_mentions = len(_ANY_MENTION.findall("\n".join(lines)))
+        skipped = max(0, all_mentions - len(found))
         for eid in found:
             _add(eid)
-        log.info("%s: %d id occurrences", Path(f).name, len(found))
+        msg = f"{Path(f).name}: {len(found)} real entries"
+        if skipped:
+            msg += f" ({skipped} example/prose mention(s) skipped)"
+        log.info(msg)
 
     for eid in inline_ids:
         eid = eid.strip()
@@ -74,7 +90,7 @@ def collect_ids(ids_files: list[str], inline_ids: list[str]) -> list[str]:
 
     dups = {k: v for k, v in occurrences.items() if v > 1}
     total = sum(occurrences.values())
-    log.info("collected %d id occurrences -> %d unique (%d ids were duplicated)",
+    log.info("collected %d real id occurrences -> %d unique (%d ids duplicated across files)",
              total, len(ordered), len(dups))
     if dups:
         top = sorted(dups.items(), key=lambda kv: -kv[1])[:10]

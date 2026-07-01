@@ -402,9 +402,11 @@ skipped without downloading; identical media collapse to one catalog row.
 
 Downloads only the individual premium custom-emoji you name — e.g. the
 `premium-id:<n>` entries inside bot inventory files — and nothing else from
-their packs. IDs are **de-duplicated first** so each real emoji is fetched at
-most once, then resolved via `getCustomEmojiStickers` (batched, ≤200/call),
-downloaded and content-hashed into the same catalog.
+their packs. Only **real entry lines** that start with `premium-id:` are taken;
+example/prose mentions like `(e.g. premium-id: 123)` are skipped so example IDs
+are never fetched by mistake. IDs are then **de-duplicated** so each real emoji
+is fetched at most once, resolved via `getCustomEmojiStickers` (batched,
+≤200/call), downloaded and content-hashed into the same catalog.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -429,7 +431,7 @@ Example — pull only the emoji referenced by four bot inventory files:
   --ids-file "...\GV Swap bot\bot-emoji-inventory-admin.md" `
   --ids-file "...\GodVerify Payment Bot\bot-emoji-inventory-admin.md" `
   --ids-file "...\GodVerify Payment Bot\bot-emoji-inventory-user.md"
-# -> collected 244 id occurrences -> 101 unique (83 ids were duplicated)
+# -> collected 240 real id occurrences -> 101 unique (83 ids duplicated across files)
 # -> Done. unique_ids=101 new=100 dedup=1 failed=0 missing=0
 ```
 
