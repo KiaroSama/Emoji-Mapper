@@ -48,6 +48,8 @@ input/
 output/
 # Multi-format collector working data (catalog DB + downloaded/built media)
 collection/
+# Archived collections set aside for later (local-only, downloaded media)
+collection_archive/
 
 # ---------------------------------------------------------------------------
 # Generated run state, plans, audits, caches and resumable progress files
