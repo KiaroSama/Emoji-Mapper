@@ -31,33 +31,47 @@ class TestExtract(unittest.TestCase):
         self.assertEqual(b.extract_custom_emoji_ids(m), ["9"])
 
 
-class TestBuildReply(unittest.TestCase):
+class TestBuildMessages(unittest.TestCase):
     def test_empty(self):
-        text, kb = b.build_reply([])
-        self.assertIn("No premium", text)
-        self.assertEqual(kb["inline_keyboard"], [])
+        msgs = b.build_messages([])
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("No premium", msgs[0])
 
-    def test_single_button_copies_id(self):
-        text, kb = b.build_reply(["5899"])
-        self.assertIn("5899", text)
-        btn = kb["inline_keyboard"][0][0]
-        self.assertEqual(btn["copy_text"]["text"], "5899")
+    def test_single_has_both_formats_and_copyable_code(self):
+        msgs = b.build_messages(["5899"], {"5899": "👋"})
+        self.assertEqual(len(msgs), 1)
+        text = msgs[0]
+        # Format 1: emoji + <code>id</code> ; Format 2: <code> block with the id.
+        self.assertIn("👋 <code>5899</code>", text)
+        self.assertIn("<code>5899</code>", text)
+        self.assertEqual(text.count("<blockquote expandable>"), 2)
 
-    def test_many_copy_all_fits(self):
+    def test_many_single_message_copy_all_block(self):
         ids = [str(1000 + i) for i in range(5)]
-        text, kb = b.build_reply(ids)
-        # last row is a single "Copy all" button copying every id
-        last = kb["inline_keyboard"][-1][0]
-        self.assertEqual(last["copy_text"]["text"], "\n".join(ids))
+        msgs = b.build_messages(ids)
+        self.assertEqual(len(msgs), 1)
+        text = msgs[0]
+        # Format 2 contains every id joined by newlines inside one <code> block.
+        self.assertIn("<code>" + "\n".join(ids) + "</code>", text)
+        # Format 1 lists each id in its own <code>.
+        for cid in ids:
+            self.assertIn(f"<code>{cid}</code>", text)
 
-    def test_many_copyall_chunked_under_limit(self):
-        ids = [str(10**18 + i) for i in range(30)]  # 19-digit ids, >256 chars total
-        text, kb = b.build_reply(ids)
-        copyall = [r[0] for r in kb["inline_keyboard"]
-                   if r and r[0]["text"].startswith("📋")]
-        self.assertGreater(len(copyall), 1)  # split into chunks
-        for btn in copyall:
-            self.assertLessEqual(len(btn["copy_text"]["text"]), b.COPY_MAX)
+    def test_large_list_splits_into_multiple_messages(self):
+        ids = [str(10**18 + i) for i in range(400)]  # 19-digit ids
+        msgs = b.build_messages(ids)
+        self.assertGreater(len(msgs), 1)          # had to split
+        for m in msgs:
+            self.assertLessEqual(len(m), 4096)    # each within Telegram's limit
+        self.assertIn("part 1/", msgs[0])
+        # Every id appears exactly once across all messages' Format 2 blocks.
+        joined = "\n".join(msgs)
+        for cid in ids:
+            self.assertEqual(joined.count(f"<code>{cid}</code>"), 1)
+
+    def test_unknown_label_uses_bullet(self):
+        msgs = b.build_messages(["777"], {})
+        self.assertIn("\u2022 <code>777</code>", msgs[0])
 
 
 if __name__ == "__main__":

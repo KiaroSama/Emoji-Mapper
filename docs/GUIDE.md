@@ -260,13 +260,20 @@ Long-polling bot (run it and leave it running; only one instance at a time):
 .venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> 7
 ```
 
-- Send it a **premium emoji** → replies with the ID on a tap-to-copy button.
-- Send/forward a **post with premium emoji** → lists every ID; tap to copy.
+- Send it **one or more premium emoji in a row** (spaces/newlines between them
+  don't matter) → it replies with **two collapsed (expandable) quotes**:
+  1. **Emoji + ID** — each line is `emoji <code>id</code>`; tap an ID to copy
+     just that one.
+  2. **IDs only** — one `<code>` block of every ID (one per line); tap it once
+     to copy them all.
+- Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
 - `/start`, `/help` show the menu (registered via `setMyCommands`).
 
-Tap-to-copy uses Telegram's `copy_text` inline button (Bot API 9.0).
+Tap-to-copy uses Telegram's built-in `<code>` copy behaviour (no inline buttons):
+each ID copies individually, and the Format-2 block copies every ID at once.
+Very large lists are split across multiple messages (each under 4096 chars).
 
 ---
 
@@ -468,10 +475,23 @@ emoji.
 | `--formats` | `static,video,animated` | Which formats to publish, in order. |
 | `--per-set` | `200` | Emojis per set. |
 | `--data-dir` | `collection` | Catalog/media directory. |
+| `--brand-logo` | God Verify logo PNG | First-emoji brand logo (Emoji Mapper bot only). |
+| `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
 | `--dry-run` | off | Show the plan without uploading. |
 
 Only **included** (panel-selected), not-yet-uploaded, non-skipped items are
 published. Per-format sets, drift-proof resume, per-pack manifests.
+
+**Brand logo (first emoji of every set).** When publishing with the
+`@GodVerifyEmojiMapperbot` bot, the God Verify logo is inserted as the **first
+emoji of every set** (`--brand-logo`, default
+`F:\documents\My Logo\God Verify\God Verify Emoji Logo.png`). It is converted to
+match each set's format: static→PNG, video→looped WEBM. Animated (`.tgs`) sets
+need a Lottie logo (`.tgs`/`.json`) next to the PNG; without one they are
+published **without** the logo (a raster image can't become a vector `.tgs`) and
+a warning is logged. The `@GodVerifyCoinEmojiMapperbot` coin bot is exempt.
+Disable with `--no-brand-logo`. The logo occupies position 0, so item
+`custom_emoji_id`s are read from position 1 onward (handled automatically).
 
 ### 12.6 `panel.py` — curate web panel
 
@@ -484,7 +504,8 @@ published. Per-format sets, drift-proof resume, per-pack manifests.
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One
-instance at a time (two pollers cause Telegram 409 Conflict).
+instance at a time (two pollers cause Telegram 409 Conflict). Replies with two
+collapsed quotes (emoji+ID, and IDs-only) using tap-to-copy `<code>` (see §8/§19).
 
 ### 12.8 `coins/` commands
 
@@ -835,11 +856,15 @@ Pure, unit-tested helpers:
 
 - `extract_custom_emoji_ids(message)` — ordered, de-duplicated `custom_emoji_id`s
   from `entities` + `caption_entities`.
-- `build_reply(ids, labels)` — returns `(html_text, inline_keyboard)`:
-  - 1 id → a single button whose label *is* the id and which `copy_text`-copies it.
-  - many → a numbered list in the text, one `#i` copy button per id, plus
-    "Copy all" button(s) chunked so each stays within the 256-char `copy_text`
-    limit (~12 ids per chunk).
+- `build_messages(ids, labels)` — returns a **list of HTML messages**. Each
+  message has two collapsed (`<blockquote expandable>`) quotes:
+  1. **Emoji + ID** — `emoji <code>id</code>` per line; each `<code>` is
+     tap-to-copy for that single id.
+  2. **IDs only** — one `<code>` block of all ids (one per line); tapping copies
+     them all at once.
+  `_batch_ids` splits the list so every message stays under `MSG_MAX` (3500)
+  chars; multi-message replies are labelled "part i/n". No inline keyboard is
+  used — copying relies on Telegram's native `<code>` tap-to-copy.
 - `enrich_labels(tg, ids)` — `getCustomEmojiStickers` (≤200/call) → `id → emoji char`.
 
 Behaviour by chat type:
@@ -982,8 +1007,10 @@ No — Telegram forbids mixing formats; `build_collection` makes separate
 | `setMyCommands` | bot | Register `/start`, `/help`. |
 | `getUpdates` | bot | Long polling. |
 
-`InlineKeyboardButton.copy_text` (CopyTextButton, ≤256 chars) provides
-tap-to-copy. Emoji sets cap at 200 stickers.
+Tap-to-copy uses Telegram's native `<code>` entity copy (works for a single id
+and for a whole multi-line `<code>` block); collapsed quotes use
+`<blockquote expandable>`. Emoji sets cap at 200 stickers (a brand logo, when
+added, counts as the first of those 200).
 
 ---
 
