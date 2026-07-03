@@ -268,17 +268,20 @@ Long-polling bot (run it and leave it running; only one instance at a time):
      a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`; tap an ID to
      copy just that one (mobile). (Collapsed by height, so long lists show a few
      lines until expanded — this is expected, not missing data.)
-  2. **IDs only** — a `<pre>` code block of every ID **inside a collapsed
-     (expandable) quote**; Telegram shows a **Copy button** on the `<pre>`, so
-     one click copies all IDs at once (even while collapsed; works on desktop).
+  2. **IDs only** — also a collapsed (expandable) quote of the IDs, plus a
+     **“Copy all” inline button** (`copy_text`) that copies every ID in one tap
+     on any platform. (A `<pre>` block has a copy button but can't collapse, and
+     an expandable quote can't host a copy button — so the button provides the
+     one-click copy-all while both quotes stay collapsed. Long lists get a few
+     “Copy a-b” buttons to respect the 256-char button limit.)
 - Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
 - `/start`, `/help` show the menu (registered via `setMyCommands`).
 
-Copy-all is reliable via the `<pre>` block's Copy button; per-ID tap-to-copy
-uses Telegram's native `<code>` copy (mobile). Very large lists are split across
-multiple messages (each under 4096 chars).
+Copy-all is reliable via the “Copy all” inline `copy_text` button; per-ID
+tap-to-copy uses Telegram's native `<code>` copy (mobile). Very large lists are
+split across multiple messages (each under 4096 chars).
 
 ---
 
@@ -860,24 +863,23 @@ Pure, unit-tested helpers:
 
 - `extract_custom_emoji_ids(message)` — ordered, de-duplicated `custom_emoji_id`s
   from `entities` + `caption_entities`.
-- `build_messages(ids, labels, rich=True)` — returns a **list of HTML messages**.
-  Each message has two collapsed (`<blockquote expandable>`) quotes:
+- `build_payloads(ids, labels, rich=True)` — returns a **list of
+  `(html_text, inline_keyboard)`** payloads. Each message has two collapsed
+  (`<blockquote expandable>`) quotes:
   1. **Emoji + ID** — a collapsed `<blockquote expandable>` where each line is
      `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>` when `rich`
      (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
      Expandable collapses by height, so long lists show a few lines until tapped
      (expected behaviour).
-  2. **IDs only** — a `<pre>` block of all ids nested inside a
-     `<blockquote expandable>` (so it is collapsed too); Telegram renders a Copy
-     button on the `<pre>`, so one click copies every id at once even while the
-     quote is collapsed (desktop + mobile).
+  2. **IDs only** — a collapsed `<blockquote expandable>` of `<code>id</code>`
+     lines, plus a `copy_text` **“Copy all” inline button** (`_copy_keyboard`)
+     that copies every id in one tap on every platform (chunked into “Copy a-b”
+     buttons when the 256-char `copy_text` limit is exceeded).
   `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
   stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
-  multi-message replies are labelled "part i/n". No inline keyboard is used —
-  copying relies on Telegram's native `<code>` tap-to-copy. `send_reply` sends
-  the rich version and, if a message is rejected (a custom emoji the bot can't
-  render), automatically re-sends that message with `rich=False` (fallback
-  chars only).
+  multi-message replies are labelled "part i/n". `send_reply` sends the rich
+  version and, if a message is rejected (a custom emoji the bot can't render),
+  automatically re-sends that message with `rich=False` (fallback chars only).
 - `enrich_labels(tg, ids)` — `getCustomEmojiStickers` (≤200/call) → `id → emoji char`.
 
 Behaviour by chat type:
@@ -885,7 +887,7 @@ Behaviour by chat type:
 | Incoming | Action |
 |----------|--------|
 | `/start`, `/help`, `/menu` (private) | Send the help/menu text. |
-| Private message with premium emoji | Reply with the IDs + copy buttons. |
+| Private message with premium emoji | Reply with the two-format collapsed quotes + Copy-all button. |
 | Group message with premium emoji | DM the **owner** the IDs (header = group title). |
 | Channel post with premium emoji | DM the **owner** the IDs (header = channel title). |
 
