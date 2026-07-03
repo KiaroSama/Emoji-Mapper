@@ -96,21 +96,28 @@ not 3.12, so the project targets 3.11 and CI runs on 3.11.
 ## 4. The launcher (`run.ps1`)
 
 Right-click → *Run with PowerShell*, or `.\run.ps1`. It bootstraps `.venv`,
-checks deps + ffmpeg, then shows a menu:
+checks deps + ffmpeg, then shows a **colored, sectioned** menu. Each section has
+its own numbering with a one-letter prefix (**B** = Build, **C** = Collection,
+**R** = Run bot), so keys stay unique — type e.g. `B1`, `C3`, `R1` (or `q`):
 
 ```
-1) Build a general emoji pack (new bot)
-2) Convert images to 100x100 PNGs only
-3) Crypto-coin pack rebuild (coin bot)
-4) Collect emoji from existing packs (download)
-5) Add media from a folder (build from scratch)
-6) Publish the collection into new packs
-7) Run the Emoji Mapper bot (premium-emoji ID extractor)
-8) Curate panel — pick which emoji to include (web)
-q) Quit
+Build a single pack
+  B1) Build a general emoji pack  (new bot)
+  B2) Convert images to 100x100 PNGs only
+  B3) Crypto-coin pack rebuild    (coin bot)
+Collection (multi-format, duplicate-proof)
+  C1) Collect emoji from existing packs (download)
+  C2) Add media from a folder (build from scratch)
+  C3) Publish the collection into new packs
+  C4) Curate panel - pick which emoji to include (web)
+Bot
+  R1) Run the Emoji Mapper bot (premium-emoji ID extractor)
+  q ) Quit
 ```
 
-Non-interactive health check (used by CI / scripts): `.\run.ps1 -Check`.
+Every run writes a UTC log to `logs\run_<YYYY-MM-DD_HH-mm-ss>_UTC.log` (startup,
+prereq checks, menu selections, actions, warnings/errors, shutdown — no secret
+values). Non-interactive health check (CI / scripts): `.\run.ps1 -Check`.
 ---
 
 ## 5. The collector model (how dedup, mapping & curation work)
@@ -258,7 +265,7 @@ not from positions** (a historical position-based bug scrambled it):
 Long-polling bot (run it and leave it running; only one instance at a time):
 
 ```powershell
-.venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> 7
+.venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> R1
 ```
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
