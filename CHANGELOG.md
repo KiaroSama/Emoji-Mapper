@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
-  spacing/newlines) now returns two collapsed (expandable) quotes — (1) the
+  spacing/newlines) now returns two formats — (1) a non-collapsed quote of the
   **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>` ID per line for
-  individual tap-to-copy, and (2) one `<code>` block of all IDs for one-tap
-  copy-all. Native `<code>` copy replaces inline buttons; huge lists split across
-  messages; a rejected custom emoji falls back to plain fallback chars.
+  individual tap-to-copy, and (2) a `<pre>` block of all IDs with Telegram's
+  Copy button for reliable one-click copy-all (desktop + mobile). Format 1 is no
+  longer expandable (the height-based collapse was hiding lines and made it look
+  shorter than Format 2); huge lists split across messages; a rejected custom
+  emoji falls back to plain fallback chars.
 - **`build_collection.py`** now places the **God Verify logo as the first emoji
   of every set** built with `@GodVerifyEmojiMapperbot`. Since Bot API 7.2 a
   single set may contain mixed formats, so the logo is always a static 100x100
