@@ -61,6 +61,23 @@ function Write-Log ($level, $msg) {
     try { Add-Content -LiteralPath $script:LogFile -Value "[$ts UTC] [$level] $msg" -Encoding utf8 } catch { }
 }
 
+# --- ANSI 256/truecolor palette (rendered in Windows Terminal / PowerShell 7) -
+$script:E = [char]27
+function Paint ($code, $text) { "$($script:E)[${code}m$text$($script:E)[0m" }
+
+# Palette (mirrors the FFmWiz sample launcher vibe).
+$script:CTitle   = '1;38;2;255;50;115'   # bold pink-red banner title + rule
+$script:CLogNote = '38;5;229'            # soft yellow "Logging to:" line
+$script:CBuild   = '38;5;222'            # Build section header (amber)
+$script:CColl    = '38;5;123'            # Collection section header (cyan)
+$script:CBot     = '38;5;219'            # Bot section header (pink/magenta)
+$script:CKeyA    = '38;5;154'            # Build keys (chartreuse)
+$script:CKeyB    = '38;5;87'             # Collection keys (aqua)
+$script:CKeyC    = '38;5;209'            # Bot keys (coral)
+$script:CText    = '38;5;252'            # menu item text (near-white)
+$script:CDim     = '38;5;244'            # quit / dim
+$script:CPrompt  = '38;5;117'            # "Select" prompt
+
 # --- Consistent color + log helpers ---------------------------------------
 function Write-Title  ($m) { Write-Host ""; Write-Host " $m " -ForegroundColor Black -BackgroundColor Cyan; Write-Log 'INFO' "== $m ==" }
 function Write-Info   ($m) { Write-Host "[*] $m" -ForegroundColor Cyan;    Write-Log 'INFO' $m }
@@ -68,6 +85,17 @@ function Write-Ok     ($m) { Write-Host "[OK] $m" -ForegroundColor Green;  Write
 function Write-Warn   ($m) { Write-Host "[!] $m" -ForegroundColor Yellow;  Write-Log 'WARNING' $m }
 function Write-Err    ($m) { Write-Host "[X] $m" -ForegroundColor Red;     Write-Log 'ERROR' $m }
 function Write-Step   ($m) { Write-Host "==> $m" -ForegroundColor Magenta; Write-Log 'INFO' "step: $m" }
+
+function Show-Banner {
+    $title = 'Emoji Mapper'
+    $width = 100
+    try { if ([Console]::WindowWidth -gt 0) { $width = [Console]::WindowWidth } } catch { }
+    $pad = [Math]::Max(0, [int](($width - $title.Length) / 2))
+    Write-Host ''
+    Write-Host ((' ' * $pad) + (Paint $script:CTitle $title))
+    Write-Host (Paint $script:CTitle ('=' * $width))
+    if ($script:LogFile) { Write-Host (Paint $script:CLogNote "Logging to: $script:LogFile") }
+}
 
 # --- Prefer Windows Terminal + PowerShell 7 (single relaunch, loop-safe) ---
 if (-not $NoRelaunch -and -not $env:EMOJI_MAPPER_RELAUNCHED) {
@@ -282,45 +310,49 @@ function Action-RunBot ($py) {
 # --- Menu -----------------------------------------------------------------
 # Each row: Key, Text, Action. Grouped by section; per-section numbering with a
 # one-letter section prefix so keys stay unique (B/C/R).
+function Menu-Item ($keyColor, $key, $text) {
+    Write-Host ("  " + (Paint $keyColor "$key)") + " " + (Paint $script:CText $text))
+}
+
 function Show-Menu {
-    Write-Title "Menu"
-
-    Write-Host "  Build a single pack" -ForegroundColor Yellow
-    Write-Host "   B1" -ForegroundColor Yellow -NoNewline; Write-Host ") Build a general emoji pack  (new bot)"      -ForegroundColor White
-    Write-Host "   B2" -ForegroundColor Yellow -NoNewline; Write-Host ") Convert images to 100x100 PNGs only"        -ForegroundColor White
-    Write-Host "   B3" -ForegroundColor Yellow -NoNewline; Write-Host ") Crypto-coin pack rebuild    (coin bot)"     -ForegroundColor White
-
-    Write-Host "  Collection (multi-format, duplicate-proof)" -ForegroundColor Green
-    Write-Host "   C1" -ForegroundColor Green -NoNewline; Write-Host ") Collect emoji from existing packs (download)" -ForegroundColor White
-    Write-Host "   C2" -ForegroundColor Green -NoNewline; Write-Host ") Add media from a folder (build from scratch)" -ForegroundColor White
-    Write-Host "   C3" -ForegroundColor Green -NoNewline; Write-Host ") Publish the collection into new packs"        -ForegroundColor White
-    Write-Host "   C4" -ForegroundColor Green -NoNewline; Write-Host ") Curate panel - pick which emoji to include (web)" -ForegroundColor White
-
-    Write-Host "  Bot" -ForegroundColor Magenta
-    Write-Host "   R1" -ForegroundColor Magenta -NoNewline; Write-Host ") Run the Emoji Mapper bot (premium-emoji ID extractor)" -ForegroundColor White
-
-    Write-Host "   q"  -ForegroundColor DarkGray -NoNewline; Write-Host ") Quit" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host (Paint $script:CBuild 'Build a single pack')
+    Menu-Item $script:CKeyA 'A1' 'Build a general emoji pack  (new bot)'
+    Menu-Item $script:CKeyA 'A2' 'Convert images to 100x100 PNGs only'
+    Menu-Item $script:CKeyA 'A3' 'Crypto-coin pack rebuild    (coin bot)'
+    Write-Host ''
+    Write-Host (Paint $script:CColl 'Collection (multi-format, duplicate-proof)')
+    Menu-Item $script:CKeyB 'B1' 'Collect emoji from existing packs (download)'
+    Menu-Item $script:CKeyB 'B2' 'Add media from a folder (build from scratch)'
+    Menu-Item $script:CKeyB 'B3' 'Publish the collection into new packs'
+    Menu-Item $script:CKeyB 'B4' 'Curate panel - pick which emoji to include (web)'
+    Write-Host ''
+    Write-Host (Paint $script:CBot 'Bot')
+    Menu-Item $script:CKeyC 'C1' 'Run the Emoji Mapper bot (premium-emoji ID extractor)'
+    Write-Host ''
+    Write-Host ("  " + (Paint $script:CDim 'q)') + " " + (Paint $script:CDim 'Quit'))
+    Write-Host ''
 }
 
 function Invoke-Choice ($choice, $py) {
     switch ($choice.ToLower().Trim()) {
-        'b1' { Action-BuildGeneral $py }
-        'b2' { Action-ConvertOnly $py }
-        'b3' { Action-CoinRebuild $py }
-        'c1' { Action-CollectPacks $py }
-        'c2' { Action-AddMedia $py }
-        'c3' { Action-PublishCollection $py }
-        'c4' { Action-Panel $py }
-        'r1' { Action-RunBot $py }
+        'a1' { Action-BuildGeneral $py }
+        'a2' { Action-ConvertOnly $py }
+        'a3' { Action-CoinRebuild $py }
+        'b1' { Action-CollectPacks $py }
+        'b2' { Action-AddMedia $py }
+        'b3' { Action-PublishCollection $py }
+        'b4' { Action-Panel $py }
+        'c1' { Action-RunBot $py }
         { $_ -in @('q','quit','exit') } { return $false }
-        default { Write-Warn "Unknown option: $choice  (use e.g. B1, C3, R1, or q)" }
+        default { Write-Warn "Unknown option: $choice  (use e.g. A1, B3, C1, or q)" }
     }
     return $true
 }
 
 # --- Bootstrap ------------------------------------------------------------
 Initialize-Log
-Write-Title "Emoji Mapper"
+Show-Banner
 $py = Ensure-Environment
 if (-not $py) { Write-Log 'CRITICAL' 'no Python environment; exiting'; exit 1 }
 if (-not (Test-Deps $py)) {
@@ -345,7 +377,7 @@ if ($Check) {
 $running = $true
 while ($running) {
     Show-Menu
-    $choice = Read-Host "Select"
+    $choice = Read-Host (Paint $script:CPrompt 'Select')
     Write-Log 'INFO' "menu selection: '$choice'"
     try {
         $running = Invoke-Choice $choice $py

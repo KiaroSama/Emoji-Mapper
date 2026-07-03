@@ -95,25 +95,35 @@ not 3.12, so the project targets 3.11 and CI runs on 3.11.
 
 ## 4. The launcher (`run.ps1`)
 
-Right-click → *Run with PowerShell*, or `.\run.ps1`. It bootstraps `.venv`,
-checks deps + ffmpeg, then shows a **colored, sectioned** menu. Each section has
-its own numbering with a one-letter prefix (**B** = Build, **C** = Collection,
-**R** = Run bot), so keys stay unique — type e.g. `B1`, `C3`, `R1` (or `q`):
+Right-click → *Run with PowerShell*, or `.\run.ps1`. It shows a centered banner
+(title + full-width rule + `Logging to: ...`), bootstraps `.venv`, checks deps +
+ffmpeg, then shows a **colored, sectioned** menu. Sections are lettered in order
+(**A** = Build, **B** = Collection, **C** = Bot) and each has its own numbering,
+so keys stay unique — type e.g. `A1`, `B3`, `C1` (or `q`):
 
 ```
+                              Emoji Mapper
+====================================================================
+Logging to: logs\run_2026-07-03_12-29-45_UTC.log
+
 Build a single pack
-  B1) Build a general emoji pack  (new bot)
-  B2) Convert images to 100x100 PNGs only
-  B3) Crypto-coin pack rebuild    (coin bot)
+  A1) Build a general emoji pack  (new bot)
+  A2) Convert images to 100x100 PNGs only
+  A3) Crypto-coin pack rebuild    (coin bot)
+
 Collection (multi-format, duplicate-proof)
-  C1) Collect emoji from existing packs (download)
-  C2) Add media from a folder (build from scratch)
-  C3) Publish the collection into new packs
-  C4) Curate panel - pick which emoji to include (web)
+  B1) Collect emoji from existing packs (download)
+  B2) Add media from a folder (build from scratch)
+  B3) Publish the collection into new packs
+  B4) Curate panel - pick which emoji to include (web)
+
 Bot
-  R1) Run the Emoji Mapper bot (premium-emoji ID extractor)
-  q ) Quit
+  C1) Run the Emoji Mapper bot (premium-emoji ID extractor)
+
+  q) Quit
 ```
+
+The menu is ANSI 256-colour (renders in Windows Terminal / PowerShell 7).
 
 Every run writes a UTC log to `logs\run_<YYYY-MM-DD_HH-mm-ss>_UTC.log` (startup,
 prereq checks, menu selections, actions, warnings/errors, shutdown — no secret
@@ -265,7 +275,7 @@ not from positions** (a historical position-based bug scrambled it):
 Long-polling bot (run it and leave it running; only one instance at a time):
 
 ```powershell
-.venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> R1
+.venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> C1
 ```
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
