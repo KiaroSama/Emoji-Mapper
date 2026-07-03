@@ -45,12 +45,12 @@ class FakeTelegram:
         return {"username": self.username}
 
     def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
-        self.sets[name] = [{"emojis": list(emojis),
+        self.sets[name] = [{"emojis": list(emojis), "fmt": fmt,
                             "custom_emoji_id": f"{name}-0"}]
 
     def add_emoji(self, user_id, name, path, fmt, emojis, keywords):
         i = len(self.sets[name])
-        self.sets[name].append({"emojis": list(emojis),
+        self.sets[name].append({"emojis": list(emojis), "fmt": fmt,
                                 "custom_emoji_id": f"{name}-{i}"})
 
     def get_sticker_set(self, name):
@@ -60,7 +60,7 @@ class FakeTelegram:
         self.messages.append(text)
 
 
-class BrandLogoConversion(unittest.TestCase):
+class BrandLogoPrepare(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name)
@@ -72,28 +72,20 @@ class BrandLogoConversion(unittest.TestCase):
 
     def test_static_logo_is_100x100_png(self):
         logo = bc.BrandLogo(str(self.png), self.data)
-        out = logo.for_format("static")
+        out = logo.static_png()
         self.assertIsNotNone(out)
         self.assertTrue(out.is_file())
         with Image.open(out) as im:
             self.assertEqual(im.size, (media.SIZE, media.SIZE))
 
-    def test_video_logo_is_valid_webm(self):
+    def test_static_png_is_cached(self):
         logo = bc.BrandLogo(str(self.png), self.data)
-        out = logo.for_format("video")
-        self.assertIsNotNone(out)
-        self.assertTrue(out.is_file())
-        media.validate_video(out)  # raises if not a compliant VP9 100x100 webm
-
-    def test_animated_without_lottie_is_skipped(self):
-        logo = bc.BrandLogo(str(self.png), self.data)
-        self.assertIsNone(logo.for_format("animated"))
-        self.assertIn("animated", logo._warned)
+        self.assertEqual(logo.static_png(), logo.static_png())
 
     def test_missing_source_returns_none(self):
         logo = bc.BrandLogo(str(self.data / "nope.png"), self.data)
         self.assertFalse(logo.available())
-        self.assertIsNone(logo.for_format("static"))
+        self.assertIsNone(logo.static_png())
 
 
 class PublishFormatLogoFirst(unittest.TestCase):
@@ -135,6 +127,40 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 # cids map with offset 1 (item0 -> position1, item1 -> position2).
                 self.assertEqual(cat.get(keys[0]).custom_emoji_id, f"{set_name}-1")
                 self.assertEqual(cat.get(keys[1]).custom_emoji_id, f"{set_name}-2")
+
+    def test_static_logo_leads_an_animated_set(self):
+        # The key fix: a STATIC logo is the first emoji even of an animated set
+        # (mixed-format sets are allowed since Bot API 7.2).
+        with tempfile.TemporaryDirectory() as t:
+            data = Path(t)
+            # Two "animated" catalog items (media validity for animated is not
+            # probed by publish_format, so any real file works here).
+            keys = []
+            with Catalog(data / "catalog.db") as cat:
+                for i in range(2):
+                    p = data / "media" / "animated" / f"a{i}.tgs"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_bytes(b"\x1f\x8b" + b"x" * 50)  # gzip-magic dummy
+                    key = f"a:item{i:030d}"
+                    cat.add(content_key=key, fmt="animated", file_path=p,
+                            emojis=["😀"], keywords=[f"a{i}"])
+                    keys.append(key)
+            logo_png = data / "logo.png"
+            _make_png(logo_png, color=(0, 200, 0, 255))
+            tg = FakeTelegram("GodVerifyEmojiMapperbot")
+            logo = bc.BrandLogo(str(logo_png), data)
+            state = {"base": "pk", "sets": [], "sent": []}
+            with Catalog(data / "catalog.db") as cat:
+                bc.publish_format(tg, cat, fmt="animated", plan_keys=keys,
+                                  base="pk", title="Pack", user_id=1,
+                                  default_emoji="😀", per_set=200, data_dir=data,
+                                  state=state, bot="GodVerifyEmojiMapperbot", logo=logo)
+            stickers = tg.sets["pka1_by_GodVerifyEmojiMapperbot"]
+            self.assertEqual(len(stickers), 3)             # logo + 2 animated
+            self.assertEqual(stickers[0]["fmt"], "static")  # logo is static...
+            self.assertEqual(stickers[0]["emojis"], [bc.BRAND_LOGO_EMOJI])
+            self.assertEqual(stickers[1]["fmt"], "animated")  # ...items are animated
+            self.assertEqual(stickers[2]["fmt"], "animated")
 
     def test_no_logo_when_disabled(self):
         with tempfile.TemporaryDirectory() as t:
