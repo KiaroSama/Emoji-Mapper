@@ -65,9 +65,10 @@ function Write-Log ($level, $msg) {
 $script:E = [char]27
 function Paint ($code, $text) { "$($script:E)[${code}m$text$($script:E)[0m" }
 
-# Palette (mirrors the FFmWiz sample launcher vibe).
-$script:CTitle   = '1;38;2;255;50;115'   # bold pink-red banner title + rule
-$script:CLogNote = '38;5;229'            # soft yellow "Logging to:" line
+# Palette (exact FFmWiz colors where applicable).
+$script:CTitle   = '1;38;2;255;50;115'   # bold pink-red banner title + rule (WIZARD_TITLE)
+$script:CLogNote = '38;5;227'            # NOTE_YELLOW "Logging to:" line
+$script:CHeading = '38;5;123'            # cyan action/screen titles (like the sample)
 $script:CBuild   = '38;5;222'            # Build section header (amber)
 $script:CColl    = '38;5;123'            # Collection section header (cyan)
 $script:CBot     = '38;5;219'            # Bot section header (pink/magenta)
@@ -75,16 +76,31 @@ $script:CKeyA    = '38;5;154'            # Build keys (chartreuse)
 $script:CKeyB    = '38;5;87'             # Collection keys (aqua)
 $script:CKeyC    = '38;5;209'            # Bot keys (coral)
 $script:CText    = '38;5;252'            # menu item text (near-white)
-$script:CDim     = '38;5;244'            # quit / dim
-$script:CPrompt  = '38;5;117'            # "Select" prompt
+$script:CDim     = '38;5;244'            # dim / separators
+$script:CPrompt  = '38;5;117'            # prompt label
+$script:CBack    = '38;5;166'            # BACK_PROMPT (orange)
+$script:CQuit    = '38;5;32'             # EXIT_PROMPT (blue)
+$script:CExample = '38;5;117'            # LIGHT_BLUE example/hint text
+
+# Colored "{back=0, quit=exit}" hint, mirroring FFmWiz back_text().
+function Nav-Hint ([switch]$NoBack) {
+    $parts = @()
+    if (-not $NoBack) { $parts += (Paint $script:CBack 'back=0') }
+    $parts += (Paint $script:CQuit 'quit=exit')
+    '{' + ($parts -join (Paint $script:CDim ', ')) + '}'
+}
 
 # --- Consistent color + log helpers ---------------------------------------
-function Write-Title  ($m) { Write-Host ""; Write-Host " $m " -ForegroundColor Black -BackgroundColor Cyan; Write-Log 'INFO' "== $m ==" }
+# Screen/action title: cyan text (no background), matching the preferred sample.
+function Write-Title  ($m) { Write-Host ''; Write-Host (Paint $script:CHeading $m); Write-Log 'INFO' "== $m ==" }
 function Write-Info   ($m) { Write-Host "[*] $m" -ForegroundColor Cyan;    Write-Log 'INFO' $m }
 function Write-Ok     ($m) { Write-Host "[OK] $m" -ForegroundColor Green;  Write-Log 'INFO' "OK: $m" }
 function Write-Warn   ($m) { Write-Host "[!] $m" -ForegroundColor Yellow;  Write-Log 'WARNING' $m }
 function Write-Err    ($m) { Write-Host "[X] $m" -ForegroundColor Red;     Write-Log 'ERROR' $m }
 function Write-Step   ($m) { Write-Host "==> $m" -ForegroundColor Magenta; Write-Log 'INFO' "step: $m" }
+
+# Quiet OK: goes to the log only (keeps the console clean at startup).
+function Log-Ok       ($m) { Write-Log 'INFO' "OK: $m" }
 
 function Show-Banner {
     $title = 'Emoji Mapper'
@@ -95,6 +111,25 @@ function Show-Banner {
     Write-Host ((' ' * $pad) + (Paint $script:CTitle $title))
     Write-Host (Paint $script:CTitle ('=' * $width))
     if ($script:LogFile) { Write-Host (Paint $script:CLogNote "Logging to: $script:LogFile") }
+}
+
+# Run a Python entry point, logging the command (no secrets) and its exit code.
+function Invoke-Py ($py, [string[]]$Argv) {
+    Write-Log 'INFO' ("run: python " + ($Argv -join ' '))
+    & $py @Argv
+    $code = $LASTEXITCODE
+    Write-Log 'INFO' ("exit $code (" + $Argv[0] + ")")
+    return $code
+}
+
+# Read input with a colored {back=0, quit=exit} hint. Typing 0 aborts the action
+# (back to menu); typing exit/quit ends the launcher. Returns the raw answer.
+function Read-Nav ($label, [switch]$NoBack) {
+    $ans = Read-Host ("$label " + (Nav-Hint -NoBack:$NoBack))
+    $t = if ($null -ne $ans) { $ans.Trim() } else { '' }
+    if (-not $NoBack -and $t -eq '0') { throw 'NAV_BACK' }
+    if ($t -match '^(exit|quit)$')    { throw 'NAV_QUIT' }
+    return $ans
 }
 
 # --- Prefer Windows Terminal + PowerShell 7 (single relaunch, loop-safe) ---
@@ -189,7 +224,7 @@ function Check-Env ($py) {
         Write-Warn ".env not found. Copy .env.example to .env and fill in tokens."
         return
     }
-    Write-Ok ".env present."
+    Log-Ok ".env present."   # quiet: log only, keep the console clean
 }
 
 function Test-Ffmpeg {
@@ -198,32 +233,34 @@ function Test-Ffmpeg {
 }
 
 # --- Actions --------------------------------------------------------------
+# Every input prompt supports {back=0, quit=exit}: 0 aborts to the menu, exit
+# quits. Each Python launch is logged (command + exit code) via Invoke-Py.
 function Action-BuildGeneral ($py) {
     Write-Title "Build a general emoji pack (@GodVerifyEmojiMapperbot)"
-    $inDir = Read-Host "Source image folder (e.g. input\myset)"
+    $inDir = Read-Nav "Source image folder (e.g. input\myset)"
     if ([string]::IsNullOrWhiteSpace($inDir) -or -not (Test-Path -LiteralPath $inDir)) {
         Write-Err "Folder not found: $inDir"; return
     }
-    $base  = Read-Host "Pack base name (letters/digits/_), e.g. myset"
-    $title = Read-Host "Pack title, e.g. My Emojis"
+    $base  = Read-Nav "Pack base name (letters/digits/_), e.g. myset"
+    $title = Read-Nav "Pack title, e.g. My Emojis"
     $emoji = Read-Host "Associated standard emoji (default 😀)"
     if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = '😀' }
     $build = Join-Path 'build' $base
 
     Write-Step "Converting images -> $build ..."
-    & $py make_emoji_pngs.py --in $inDir --out $build
-    if ($LASTEXITCODE -ne 0) { Write-Err "Conversion failed."; return }
-
+    if ((Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir,'--out',$build)) -ne 0) {
+        Write-Err "Conversion failed."; return
+    }
     Write-Step "Dry-run preview ..."
-    & $py build_pack.py --base $base --title $title --source-dir $build `
-        --token-env GENERAL_BOT_TOKEN --emoji $emoji --dry-run
-    if ($LASTEXITCODE -ne 0) { Write-Err "Dry-run failed (check .env / source)."; return }
-
+    if ((Invoke-Py $py @('build_pack.py','--base',$base,'--title',$title,'--source-dir',$build,
+                         '--token-env','GENERAL_BOT_TOKEN','--emoji',$emoji,'--dry-run')) -ne 0) {
+        Write-Err "Dry-run failed (check .env / source)."; return
+    }
     if (Confirm-YesDefault "Upload to Telegram now?") {
-        & $py build_pack.py --base $base --title $title --source-dir $build `
-            --token-env GENERAL_BOT_TOKEN --emoji $emoji
-        if ($LASTEXITCODE -eq 0) { Write-Ok "Pack build finished." }
-        else { Write-Err "Build failed (exit $LASTEXITCODE)." }
+        if ((Invoke-Py $py @('build_pack.py','--base',$base,'--title',$title,'--source-dir',$build,
+                             '--token-env','GENERAL_BOT_TOKEN','--emoji',$emoji)) -eq 0) {
+            Write-Ok "Pack build finished."
+        } else { Write-Err "Build failed." }
     } else {
         Write-Info "Skipped upload. Re-run when ready."
     }
@@ -231,11 +268,11 @@ function Action-BuildGeneral ($py) {
 
 function Action-ConvertOnly ($py) {
     Write-Title "Convert images to 100x100 PNGs"
-    $inDir = Read-Host "Source image folder"
+    $inDir = Read-Nav "Source image folder"
     if (-not (Test-Path -LiteralPath $inDir)) { Write-Err "Folder not found."; return }
-    $outDir = Read-Host "Output folder (blank = <folder>_emoji)"
-    if ([string]::IsNullOrWhiteSpace($outDir)) { & $py make_emoji_pngs.py --in $inDir }
-    else { & $py make_emoji_pngs.py --in $inDir --out $outDir }
+    $outDir = Read-Nav "Output folder (blank = <folder>_emoji)"
+    if ([string]::IsNullOrWhiteSpace($outDir)) { Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir) | Out-Null }
+    else { Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir,'--out',$outDir) | Out-Null }
 }
 
 function Action-CoinRebuild ($py) {
@@ -244,7 +281,7 @@ function Action-CoinRebuild ($py) {
     $script = Join-Path $ScriptRoot 'coins\rebuild_packs.py'
     if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_packs.py not found."; return }
     if (Confirm-YesDefault "Run coins/rebuild_packs.py now?") {
-        & $py $script
+        Invoke-Py $py @($script) | Out-Null
     }
 }
 
@@ -253,14 +290,14 @@ function Action-CollectPacks ($py) {
     Write-Info "Paste pack links/names (t.me/addemoji/...). Blank line to finish."
     $packs = @()
     while ($true) {
-        $line = Read-Host "Pack"
+        $line = Read-Nav "Pack (blank = done)"
         if ([string]::IsNullOrWhiteSpace($line)) { break }
         $packs += $line.Trim()
     }
     if ($packs.Count -eq 0) { Write-Warn "No packs entered."; return }
-    $tokenEnv = Read-Host "Token env var (default GENERAL_BOT_TOKEN)"
+    $tokenEnv = Read-Nav "Token env var (default GENERAL_BOT_TOKEN)"
     if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
-    & $py fetch_pack.py @packs --token-env $tokenEnv
+    Invoke-Py $py (@('fetch_pack.py') + $packs + @('--token-env',$tokenEnv)) | Out-Null
 }
 
 function Action-AddMedia ($py) {
@@ -269,26 +306,29 @@ function Action-AddMedia ($py) {
         Write-Warn "ffmpeg/ffprobe not found: video emoji (.webm) will fail."
         Write-Warn "Install with: winget install Gyan.FFmpeg"
     }
-    $inDir = Read-Host "Source folder"
+    $inDir = Read-Nav "Source folder"
     if (-not (Test-Path -LiteralPath $inDir)) { Write-Err "Folder not found."; return }
     $emoji = Read-Host "Associated standard emoji (default 😀)"
     if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = '😀' }
-    & $py add_media.py --in $inDir --emoji $emoji
+    Invoke-Py $py @('add_media.py','--in',$inDir,'--emoji',$emoji) | Out-Null
 }
 
 function Action-PublishCollection ($py) {
     Write-Title "Publish the collection into new packs (multi-format)"
-    $base  = Read-Host "Pack base name (letters/digits only), e.g. mypack"
-    $title = Read-Host "Pack title, e.g. My Collection"
-    $tokenEnv = Read-Host "Token env var (default GENERAL_BOT_TOKEN)"
+    $base  = Read-Nav "Pack base name (letters/digits only), e.g. mypack"
+    $title = Read-Nav "Pack title, e.g. My Collection"
+    $tokenEnv = Read-Nav "Token env var (default GENERAL_BOT_TOKEN)"
     if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
     Write-Step "Dry-run preview ..."
-    & $py build_collection.py --base $base --title $title --token-env $tokenEnv --dry-run
-    if ($LASTEXITCODE -ne 0) { Write-Err "Dry-run failed (run a collect/add step first?)."; return }
+    if ((Invoke-Py $py @('build_collection.py','--base',$base,'--title',$title,
+                         '--token-env',$tokenEnv,'--dry-run')) -ne 0) {
+        Write-Err "Dry-run failed (run a collect/add step first?)."; return
+    }
     if (Confirm-YesDefault "Upload to Telegram now?") {
-        & $py build_collection.py --base $base --title $title --token-env $tokenEnv
-        if ($LASTEXITCODE -eq 0) { Write-Ok "Collection published." }
-        else { Write-Err "Publish failed (exit $LASTEXITCODE)." }
+        if ((Invoke-Py $py @('build_collection.py','--base',$base,'--title',$title,
+                             '--token-env',$tokenEnv)) -eq 0) {
+            Write-Ok "Collection published."
+        } else { Write-Err "Publish failed." }
     } else {
         Write-Info "Skipped upload. Re-run when ready (resumable)."
     }
@@ -297,14 +337,14 @@ function Action-PublishCollection ($py) {
 function Action-Panel ($py) {
     Write-Title "Curate panel (pick which emoji go into the pack)"
     Write-Info "Opens a dark neon web panel; tick/untick emoji, then Save. Ctrl+C to stop."
-    & $py panel.py
+    Invoke-Py $py @('panel.py') | Out-Null
 }
 
 function Action-RunBot ($py) {
     Write-Title "Run the Emoji Mapper bot (premium-emoji ID extractor)"
     Write-Info "Send the bot a premium emoji or a post with emoji, or add it to a channel/group."
     Write-Info "Press Ctrl+C to stop the bot."
-    & $py emoji_bot.py
+    Invoke-Py $py @('emoji_bot.py') | Out-Null
 }
 
 # --- Menu -----------------------------------------------------------------
@@ -330,8 +370,6 @@ function Show-Menu {
     Write-Host (Paint $script:CBot 'Bot')
     Menu-Item $script:CKeyC 'C1' 'Run the Emoji Mapper bot (premium-emoji ID extractor)'
     Write-Host ''
-    Write-Host ("  " + (Paint $script:CDim 'q)') + " " + (Paint $script:CDim 'Quit'))
-    Write-Host ''
 }
 
 function Invoke-Choice ($choice, $py) {
@@ -344,8 +382,8 @@ function Invoke-Choice ($choice, $py) {
         'b3' { Action-PublishCollection $py }
         'b4' { Action-Panel $py }
         'c1' { Action-RunBot $py }
-        { $_ -in @('q','quit','exit') } { return $false }
-        default { Write-Warn "Unknown option: $choice  (use e.g. A1, B3, C1, or q)" }
+        { $_ -in @('q','quit','exit','0') } { return $false }
+        default { Write-Warn "Unknown option: $choice  (use e.g. A1, B3, C1, or exit)" }
     }
     return $true
 }
@@ -358,10 +396,9 @@ if (-not $py) { Write-Log 'CRITICAL' 'no Python environment; exiting'; exit 1 }
 if (-not (Test-Deps $py)) {
     if (Confirm-YesDefault "Install/repair Python dependencies?") { Install-Deps $py }
 }
-Check-Env $py
-$pyVer = (& $py --version)
-Write-Ok ("Python: " + $pyVer)
-if (Test-Ffmpeg) { Write-Ok "ffmpeg present (video emoji enabled)." }
+Check-Env $py            # logs .env status (warns only if missing)
+Log-Ok ("Python: " + (& $py --version))   # quiet: log only
+if (Test-Ffmpeg) { Log-Ok "ffmpeg present (video emoji enabled)." }  # quiet
 else { Write-Warn "ffmpeg not found: video emoji disabled (winget install Gyan.FFmpeg)." }
 
 # Non-interactive environment check ("doctor") for CI / scripted use.
@@ -377,13 +414,20 @@ if ($Check) {
 $running = $true
 while ($running) {
     Show-Menu
-    $choice = Read-Host (Paint $script:CPrompt 'Select')
+    $choice = Read-Host ((Paint $script:CPrompt 'Select') + ' ' + (Nav-Hint -NoBack))
     Write-Log 'INFO' "menu selection: '$choice'"
     try {
         $running = Invoke-Choice $choice $py
     } catch {
-        Write-Err "Action failed: $($_.Exception.Message)"
-        Write-Log 'ERROR' ("exception: " + ($_ | Out-String).Trim())
+        $msg = $_.Exception.Message
+        if ($msg -eq 'NAV_BACK') {
+            Write-Log 'INFO' 'nav: back to menu'          # 0 inside an action -> menu
+        } elseif ($msg -eq 'NAV_QUIT') {
+            $running = $false                              # exit inside an action
+        } else {
+            Write-Err "Action failed: $msg"
+            Write-Log 'ERROR' ("exception: " + ($_ | Out-String).Trim())
+        }
     }
 }
 Write-Info "Bye."
