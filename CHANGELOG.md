@@ -8,11 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Launcher (`run.ps1`)** reworked into a colored, sectioned menu with
-  per-section numbering and unique one-letter prefixes (`B`=Build, `C`=Collection,
-  `R`=Run bot; e.g. `B1`, `C3`, `R1`), and added a per-run UTC log under
-  `logs\run_<UTC>.log` (startup, prereq checks, menu selections, actions,
-  warnings/errors, shutdown; no secret values).
+- **Launcher (`run.ps1`)** reworked: a centered banner (title + full-width rule +
+  `Logging to: ...`) and an ANSI 256-colour, sectioned menu with sections
+  lettered in order (`A`=Build, `B`=Collection, `C`=Bot) each with its own
+  numbering (e.g. `A1`, `B3`, `C1`) and blank-line spacing between sections. Added
+  a per-run UTC log under `logs\run_<UTC>.log` (startup, prereq checks, menu
+  selections, actions, warnings/errors, shutdown; no secret values).
 - **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
   spacing/newlines) now returns a **single collapsed (expandable) quote** of the
   **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>` ID per line for
