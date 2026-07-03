@@ -28,16 +28,18 @@ from emojikit.logsetup import redact, setup_logging
 
 log = logging.getLogger("emoji_bot")
 
-COPY_MAX = 256          # CopyTextButton.text hard limit
-IDS_PER_COPYALL = 12    # ~19-digit ids + newline fit in COPY_MAX
-PER_ROW = 4             # inline buttons per row
+MSG_MAX = 3500          # keep well under Telegram's 4096-char message limit
 
 
 # --------------------------------------------------------------------------- #
 # Pure helpers (unit-tested)
 # --------------------------------------------------------------------------- #
 def extract_custom_emoji_ids(message: dict) -> list[str]:
-    """Ordered, de-duplicated custom_emoji_ids from a message's entities."""
+    """Ordered, de-duplicated custom_emoji_ids from a message's entities.
+
+    Every custom_emoji entity is collected in the order it appears, regardless
+    of the spaces, newlines or plain text between the emoji.
+    """
     ids: list[str] = []
     seen = set()
     for field in ("entities", "caption_entities"):
@@ -50,63 +52,76 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
     return ids
 
 
-def _chunk(seq: list[str], n: int) -> list[list[str]]:
-    return [seq[i:i + n] for i in range(0, len(seq), n)]
+def _label(labels: dict[str, str] | None, cid: str) -> str:
+    """Fallback standard-emoji char for an id, HTML-escaped (• if unknown)."""
+    em = (labels or {}).get(cid, "")
+    return html.escape(em) if em else "\u2022"
 
 
-def build_reply(ids: list[str], labels: dict[str, str] | None = None) -> tuple[str, dict]:
-    """Build (HTML text, inline_keyboard) for a set of custom_emoji_ids.
+def _batch_ids(ids: list[str], labels: dict[str, str] | None) -> list[list[str]]:
+    """Split ids so each rendered message stays under MSG_MAX characters."""
+    batches: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    overhead = 240  # headers + blockquote/label markup per message
+    for cid in ids:
+        # cost in "Format 1" (emoji + <code></code> + id + nl) plus "Format 2".
+        cost = len(_label(labels, cid)) + len(cid) * 2 + 28
+        if cur and overhead + size + cost > MSG_MAX:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append(cid)
+        size += cost
+    if cur:
+        batches.append(cur)
+    return batches
 
-    * one id  -> a single button whose label IS the id and which copies it;
-    * many    -> a numbered list in the text, per-id copy buttons, and
-      "Copy ALL" button(s) (chunked to respect the 256-char copy limit).
+
+def _render_message(ids: list[str], labels: dict[str, str] | None,
+                    grand_total: int, part: int, parts: int) -> str:
+    """Render one HTML message with both copy formats as collapsed quotes.
+
+    Format 1: ``emoji <code>id</code>`` per line — tap an id to copy just it.
+    Format 2: one <code> block of all ids — tap once to copy them all.
+    Both are expandable (collapsed) blockquotes.
     """
-    labels = labels or {}
+    head = f"Found <b>{grand_total}</b> premium emoji"
+    if parts > 1:
+        head += f" — part {part}/{parts}"
+    fmt1 = "\n".join(f"{_label(labels, c)} <code>{c}</code>" for c in ids)
+    fmt2 = "\n".join(ids)
+    return (
+        f"{head}:\n\n"
+        "<b>1) Emoji + ID</b> — tap an ID to copy it:\n"
+        f"<blockquote expandable>{fmt1}</blockquote>\n\n"
+        "<b>2) IDs only</b> — tap the block to copy them all:\n"
+        f"<blockquote expandable><code>{fmt2}</code></blockquote>"
+    )
+
+
+def build_messages(ids: list[str], labels: dict[str, str] | None = None) -> list[str]:
+    """Build the HTML reply message(s) for a set of custom_emoji_ids.
+
+    Returns one message when everything fits, or several when the id list is too
+    large for a single Telegram message. No inline keyboard is used: copying is
+    done by tapping the <code> ids (Telegram's built-in tap-to-copy).
+    """
     if not ids:
-        return ("No premium (custom) emoji found in that message. Send one, or a "
-                "post that contains premium emoji.", {"inline_keyboard": []})
-
-    if len(ids) == 1:
-        cid = ids[0]
-        em = labels.get(cid, "")
-        text = (f"Premium emoji {em}\nID: <code>{html.escape(cid)}</code>\n\n"
-                "Tap the button to copy the ID.").strip()
-        kb = [[{"text": f"📋 {cid}", "copy_text": {"text": cid}}]]
-        return text, {"inline_keyboard": kb}
-
-    lines = [f"Found <b>{len(ids)}</b> premium emoji:"]
-    for i, cid in enumerate(ids, 1):
-        em = labels.get(cid, "")
-        lines.append(f"{i}. {em} <code>{html.escape(cid)}</code>".strip())
-    text = "\n".join(lines)
-
-    kb: list[list[dict]] = []
-    # Per-emoji copy buttons (each copies that single id).
-    row: list[dict] = []
-    for i, cid in enumerate(ids, 1):
-        row.append({"text": f"#{i}", "copy_text": {"text": cid}})
-        if len(row) == PER_ROW:
-            kb.append(row); row = []
-    if row:
-        kb.append(row)
-    # "Copy ALL" button(s); chunked so each stays within the 256-char limit.
-    chunks = _chunk(ids, IDS_PER_COPYALL)
-    if len(chunks) == 1:
-        kb.append([{"text": f"📋 Copy all {len(ids)} IDs",
-                    "copy_text": {"text": "\n".join(ids)}}])
-    else:
-        for k, ch in enumerate(chunks, 1):
-            lo = (k - 1) * IDS_PER_COPYALL + 1
-            hi = lo + len(ch) - 1
-            kb.append([{"text": f"📋 Copy IDs {lo}-{hi}",
-                        "copy_text": {"text": "\n".join(ch)}}])
-    return text, {"inline_keyboard": kb}
+        return ["No premium (custom) emoji found in that message. Send me one or "
+                "more premium emoji in a row (spaces/newlines don't matter), or a "
+                "post that contains premium emoji."]
+    batches = _batch_ids(ids, labels)
+    return [_render_message(b, labels, len(ids), i + 1, len(batches))
+            for i, b in enumerate(batches)]
 
 
 START_TEXT = (
     "<b>Emoji Mapper</b> — premium custom-emoji ID extractor\n\n"
-    "• Send me a <b>premium emoji</b> → I reply with its ID on a tap-to-copy button.\n"
-    "• Send or forward a <b>post with premium emoji</b> → I list every ID; tap to copy.\n"
+    "• Send me one or more <b>premium emoji</b> in a row (spaces/newlines don't "
+    "matter) → I reply in two collapsed quotes:\n"
+    "   1) <i>emoji + ID</i> — tap an ID to copy just it;\n"
+    "   2) <i>IDs only</i> — tap the block to copy them all at once.\n"
+    "• Send or forward a <b>post with premium emoji</b> → same two-format reply.\n"
     "• <b>Add me to a channel/group</b> (as admin) → I DM you the premium emoji IDs "
     "from new posts there.\n\n"
     "Note: I can only read posts I receive after joining (Telegram doesn't let bots "
@@ -136,14 +151,15 @@ def enrich_labels(tg: Telegram, ids: list[str]) -> dict[str, str]:
 def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | None = None,
                header: str | None = None) -> None:
     labels = enrich_labels(tg, ids) if ids else {}
-    text, kb = build_reply(ids, labels)
-    if header:
-        text = header + "\n\n" + text
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-            "reply_markup": json.dumps(kb)}
-    if reply_to:
-        data["reply_to_message_id"] = reply_to
-    tg._call("sendMessage", data=data)
+    messages = build_messages(ids, labels)
+    for i, text in enumerate(messages):
+        if header and i == 0:
+            text = header + "\n\n" + text
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                "disable_web_page_preview": True}
+        if reply_to and i == 0:
+            data["reply_to_message_id"] = reply_to
+        tg._call("sendMessage", data=data)
 
 
 def handle_update(tg: Telegram, owner_id: int, upd: dict) -> None:

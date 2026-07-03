@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
+  spacing/newlines) now returns two collapsed (expandable) quotes — (1) emoji +
+  `<code>` ID per line for individual tap-to-copy, and (2) one `<code>` block of
+  all IDs for one-tap copy-all. Native `<code>` copy replaces inline buttons;
+  huge lists split across messages.
+- **`build_collection.py`** now places the **YourBrand logo as the first emoji
+  of every set** built with `@YourEmojiBot` (format-matched:
+  static→PNG, video→WEBM; animated needs a Lottie logo or is skipped). The coin
+  bot is exempt. New `--brand-logo` / `--no-brand-logo` flags.
 - Renamed the project from `CoinEmojiMapper` to **Emoji Mapper** across the
   codebase, documentation and launcher.
 - Generalized the engine so `make_emoji_pngs.py` + `build_pack.py` build emoji
