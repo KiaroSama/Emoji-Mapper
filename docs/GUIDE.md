@@ -262,18 +262,13 @@ Long-polling bot (run it and leave it running; only one instance at a time):
 ```
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
-  don't matter) → it replies in **two formats**:
-  1. **Emoji + ID** — a **collapsed (expandable) quote**: tap it to expand and
-     see every line, where each shows the **actual premium emoji** (rendered via
-     a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`; tap an ID to
-     copy just that one (mobile). (Collapsed by height, so long lists show a few
-     lines until expanded — this is expected, not missing data.)
-  2. **IDs only** — also a collapsed (expandable) quote of the IDs, plus a
-     **“Copy all” inline button** (`copy_text`) that copies every ID in one tap
-     on any platform. (A `<pre>` block has a copy button but can't collapse, and
-     an expandable quote can't host a copy button — so the button provides the
-     one-click copy-all while both quotes stay collapsed. Long lists get a few
-     “Copy a-b” buttons to respect the 256-char button limit.)
+  don't matter) → it replies with a **single collapsed (expandable) quote** of
+  `emoji + ID` (each line shows the **actual premium emoji** via a `<tg-emoji>`
+  custom-emoji entity next to `<code>id</code>`; tap an ID to copy just that one
+  on mobile), plus a **“Copy all” inline button** (`copy_text`) that copies every
+  ID in one tap on any platform (desktop included). Long lists get a few
+  “Copy a-b” buttons to respect the 256-char button limit. (Collapsed by height,
+  so long lists show a few lines until expanded — expected, not missing data.)
 - Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
@@ -864,17 +859,13 @@ Pure, unit-tested helpers:
 - `extract_custom_emoji_ids(message)` — ordered, de-duplicated `custom_emoji_id`s
   from `entities` + `caption_entities`.
 - `build_payloads(ids, labels, rich=True)` — returns a **list of
-  `(html_text, inline_keyboard)`** payloads. Each message has two collapsed
-  (`<blockquote expandable>`) quotes:
-  1. **Emoji + ID** — a collapsed `<blockquote expandable>` where each line is
-     `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>` when `rich`
-     (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
-     Expandable collapses by height, so long lists show a few lines until tapped
-     (expected behaviour).
-  2. **IDs only** — a collapsed `<blockquote expandable>` of `<code>id</code>`
-     lines, plus a `copy_text` **“Copy all” inline button** (`_copy_keyboard`)
-     that copies every id in one tap on every platform (chunked into “Copy a-b”
-     buttons when the 256-char `copy_text` limit is exceeded).
+  `(html_text, inline_keyboard)`** payloads. Each message has a single collapsed
+  `<blockquote expandable>` where every line is
+  `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>` when `rich`
+  (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
+  Copy-all is provided by a `copy_text` **“Copy all” inline button**
+  (`_copy_keyboard`), chunked into “Copy a-b” buttons when the 256-char
+  `copy_text` limit is exceeded.
   `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
   stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
   multi-message replies are labelled "part i/n". `send_reply` sends the rich

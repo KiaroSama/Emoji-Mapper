@@ -44,20 +44,21 @@ class TestBuildPayloads(unittest.TestCase):
         text, _ = b.build_payloads(["5899"], {"5899": "👋"}, rich=True)[0]
         self.assertIn('<tg-emoji emoji-id="5899">👋</tg-emoji> <code>5899</code>', text)
 
-    def test_both_formats_are_collapsed_quotes(self):
+    def test_single_collapsed_quote_only(self):
         text, _ = b.build_payloads(["1", "2"], {})[0]
-        # Both sections are collapsed (expandable) blockquotes.
-        self.assertEqual(text.count("<blockquote expandable>"), 2)
+        # Only ONE collapsed quote now (Format 2 was removed); no <pre>.
+        self.assertEqual(text.count("<blockquote expandable>"), 1)
         self.assertNotIn("<pre>", text)
+        self.assertNotIn("IDs only", text)
 
     def test_copy_all_button_copies_every_id(self):
         ids = [str(1000 + i) for i in range(5)]
         text, kb = b.build_payloads(ids)[0]
         btn = kb["inline_keyboard"][-1][0]
         self.assertEqual(btn["copy_text"]["text"], "\n".join(ids))
-        # Each id also appears as a <code> in both quotes (view + per-id copy).
+        # Each id appears once as a <code> in the single quote.
         for cid in ids:
-            self.assertEqual(text.count(f"<code>{cid}</code>"), 2)
+            self.assertEqual(text.count(f"<code>{cid}</code>"), 1)
 
     def test_copy_buttons_chunked_under_limit(self):
         ids = [str(10**18 + i) for i in range(30)]  # 19-digit ids > 256 chars
@@ -83,10 +84,10 @@ class TestBuildPayloads(unittest.TestCase):
         for text, _ in payloads:
             self.assertLessEqual(len(text), 4096)          # within Telegram's limit
         self.assertIn("part 1/", payloads[0][0])
-        # Every id appears exactly once across all messages' Format 2 quotes.
+        # Every id appears exactly once across all messages' quotes.
         joined = "\n".join(t for t, _ in payloads)
         for cid in ids:
-            self.assertEqual(joined.count(f"<code>{cid}</code>"), 2)  # fmt1 + fmt2
+            self.assertEqual(joined.count(f"<code>{cid}</code>"), 1)
 
     def test_rich_and_plain_batch_alignment(self):
         # Rich and plain must split into the SAME batches so a per-message

@@ -94,17 +94,12 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
     if parts > 1:
         head += f" — part {part}/{parts}"
     fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
-    fmt2 = "\n".join(f"<code>{c}</code>" for c in ids)
-    # Both formats are COLLAPSED (expandable) quotes. One-click copy-all is done
-    # by the "Copy all" inline button (see _copy_keyboard) which works on every
-    # platform, because an expandable quote itself has no copy button and a <pre>
-    # (which does) is not collapsible.
+    # A single COLLAPSED (expandable) quote of emoji + ID. Tap an ID to copy just
+    # it (mobile); use the "Copy all" inline button below to copy every ID in one
+    # tap on any platform (see _copy_keyboard).
     return (
-        f"{head}:\n\n"
-        "<b>1) Emoji + ID</b> — tap to expand; tap an ID to copy it:\n"
-        f"<blockquote expandable>{fmt1}</blockquote>\n\n"
-        "<b>2) IDs only</b> — tap “Copy all” below to copy them all:\n"
-        f"<blockquote expandable>{fmt2}</blockquote>"
+        f"{head} — tap to expand; tap an ID to copy it, or use “Copy all” below:\n"
+        f"<blockquote expandable>{fmt1}</blockquote>"
     )
 
 
@@ -153,10 +148,9 @@ def build_payloads(ids: list[str], labels: dict[str, str] | None = None,
 START_TEXT = (
     "<b>Emoji Mapper</b> — premium custom-emoji ID extractor\n\n"
     "• Send me one or more <b>premium emoji</b> in a row (spaces/newlines don't "
-    "matter) → I reply in two collapsed quotes:\n"
-    "   1) <i>emoji + ID</i> — tap an ID to copy just it;\n"
-    "   2) <i>IDs only</i> — tap the block to copy them all at once.\n"
-    "• Send or forward a <b>post with premium emoji</b> → same two-format reply.\n"
+    "matter) → I reply with a collapsed quote of <i>emoji + ID</i> (tap an ID to "
+    "copy just it) and a <b>Copy all</b> button to copy every ID at once.\n"
+    "• Send or forward a <b>post with premium emoji</b> → same reply.\n"
     "• <b>Add me to a channel/group</b> (as admin) → I DM you the premium emoji IDs "
     "from new posts there.\n\n"
     "Note: I can only read posts I receive after joining (Telegram doesn't let bots "
