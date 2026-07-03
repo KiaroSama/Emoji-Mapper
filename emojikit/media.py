@@ -203,24 +203,18 @@ _VF = (
 )
 
 
-def to_video_webm(src: Path, out: Path, *, max_bytes: int = WEBM_MAX_BYTES,
-                  loop_still: bool = False, seconds: float = WEBM_MAX_SECONDS) -> Path:
+def to_video_webm(src: Path, out: Path, *, max_bytes: int = WEBM_MAX_BYTES) -> Path:
     """Encode any animation/video/image into a Telegram-compliant VP9 WEBM emoji.
 
     Output is 100x100, <=3 s, 30 fps, no audio, transparent-padded, VP9 with
     alpha. CRF is escalated until the file fits ``max_bytes``.
-
-    Set ``loop_still=True`` when the source is a still image (e.g. a logo PNG):
-    the image is looped for ``seconds`` so the result is a valid, non-zero
-    duration video emoji rather than a single zero-length frame.
     """
     ff = ffmpeg_path()
     out.parent.mkdir(parents=True, exist_ok=True)
     last_size = -1
     for crf in (32, 40, 48, 56, 63):
-        pre = ["-loop", "1"] if loop_still else []
         cmd = [
-            ff, "-y", *pre, "-t", str(seconds), "-i", str(src),
+            ff, "-y", "-t", str(WEBM_MAX_SECONDS), "-i", str(src),
             "-an", "-vf", _VF,
             "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
             "-b:v", "0", "-crf", str(crf),
