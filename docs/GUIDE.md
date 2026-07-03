@@ -268,9 +268,9 @@ Long-polling bot (run it and leave it running; only one instance at a time):
      a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`; tap an ID to
      copy just that one (mobile). (Collapsed by height, so long lists show a few
      lines until expanded — this is expected, not missing data.)
-  2. **IDs only** — a `<pre>` code block of every ID; Telegram shows a **Copy
-     button** on it, so one click copies all IDs at once (works on desktop too).
-     Left un-collapsed so its Copy button is always reachable.
+  2. **IDs only** — a `<pre>` code block of every ID **inside a collapsed
+     (expandable) quote**; Telegram shows a **Copy button** on the `<pre>`, so
+     one click copies all IDs at once (even while collapsed; works on desktop).
 - Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
@@ -867,8 +867,10 @@ Pure, unit-tested helpers:
      (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
      Expandable collapses by height, so long lists show a few lines until tapped
      (expected behaviour).
-  2. **IDs only** — a `<pre>` block of all ids (un-collapsed); Telegram renders a
-     Copy button on it, so one click copies every id at once (desktop + mobile).
+  2. **IDs only** — a `<pre>` block of all ids nested inside a
+     `<blockquote expandable>` (so it is collapsed too); Telegram renders a Copy
+     button on the `<pre>`, so one click copies every id at once even while the
+     quote is collapsed (desktop + mobile).
   `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
   stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
   multi-message replies are labelled "part i/n". No inline keyboard is used —

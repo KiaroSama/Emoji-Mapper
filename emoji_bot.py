@@ -93,17 +93,16 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
         head += f" — part {part}/{parts}"
     fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
     fmt2 = "\n".join(ids)
-    # Format 1: a COLLAPSED (expandable) quote — tap it to expand and see every
-    #   emoji+ID line, tap an ID to copy just it.
-    # Format 2: a <pre> block, which Telegram renders with a one-click Copy
-    #   button that copies ALL ids at once (works on desktop and mobile). It is
-    #   left un-collapsed so its Copy button is always reachable.
+    # Both formats are COLLAPSED (expandable) quotes. Format 2 nests a <pre>
+    # block inside the quote: the <pre> keeps its one-click Copy button (which
+    # copies ALL ids, even while collapsed), while the quote gives the collapsed
+    # look. Long lists collapse; short ones just show in full.
     return (
         f"{head}:\n\n"
         "<b>1) Emoji + ID</b> — tap to expand; tap an ID to copy it:\n"
         f"<blockquote expandable>{fmt1}</blockquote>\n\n"
         "<b>2) IDs only</b> — use the Copy button to copy them all:\n"
-        f"<pre>{fmt2}</pre>"
+        f"<blockquote expandable><pre>{fmt2}</pre></blockquote>"
     )
 
 
