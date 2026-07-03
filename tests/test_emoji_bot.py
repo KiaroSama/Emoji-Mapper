@@ -43,12 +43,10 @@ class TestBuildMessages(unittest.TestCase):
         text = msgs[0]
         self.assertIn('<tg-emoji emoji-id="5899">👋</tg-emoji> <code>5899</code>', text)
 
-    def test_format1_is_not_expandable(self):
-        # Non-collapsed quote so every emoji+ID line stays visible (no hidden
-        # lines that made Format 1 look shorter than Format 2).
+    def test_format1_is_collapsed_expandable_quote(self):
+        # Format 1 is a collapsed (expandable) blockquote, as requested.
         text = b.build_messages(["1", "2"], {})[0]
-        self.assertIn("<blockquote>", text)
-        self.assertNotIn("<blockquote expandable>", text)
+        self.assertIn("<blockquote expandable>", text)
 
     def test_format2_is_pre_block_with_all_ids(self):
         ids = [str(1000 + i) for i in range(5)]
