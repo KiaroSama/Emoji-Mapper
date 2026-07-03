@@ -37,14 +37,22 @@ class TestBuildMessages(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("No premium", msgs[0])
 
-    def test_single_has_both_formats_and_copyable_code(self):
-        msgs = b.build_messages(["5899"], {"5899": "👋"})
-        self.assertEqual(len(msgs), 1)
+    def test_rich_renders_real_premium_emoji(self):
+        # Format 1 must render the ACTUAL premium emoji via <tg-emoji>.
+        msgs = b.build_messages(["5899"], {"5899": "👋"}, rich=True)
         text = msgs[0]
-        # Format 1: emoji + <code>id</code> ; Format 2: <code> block with the id.
-        self.assertIn("👋 <code>5899</code>", text)
-        self.assertIn("<code>5899</code>", text)
+        self.assertIn('<tg-emoji emoji-id="5899">👋</tg-emoji> <code>5899</code>', text)
         self.assertEqual(text.count("<blockquote expandable>"), 2)
+
+    def test_plain_uses_fallback_char_only(self):
+        msgs = b.build_messages(["5899"], {"5899": "👋"}, rich=False)
+        text = msgs[0]
+        self.assertIn("👋 <code>5899</code>", text)
+        self.assertNotIn("tg-emoji", text)
+
+    def test_rich_default_and_missing_label_uses_star(self):
+        msgs = b.build_messages(["777"], {})  # rich defaults True, no label
+        self.assertIn('<tg-emoji emoji-id="777">\u2b50</tg-emoji>', msgs[0])
 
     def test_many_single_message_copy_all_block(self):
         ids = [str(1000 + i) for i in range(5)]
@@ -59,7 +67,7 @@ class TestBuildMessages(unittest.TestCase):
 
     def test_large_list_splits_into_multiple_messages(self):
         ids = [str(10**18 + i) for i in range(400)]  # 19-digit ids
-        msgs = b.build_messages(ids)
+        msgs = b.build_messages(ids, rich=True)
         self.assertGreater(len(msgs), 1)          # had to split
         for m in msgs:
             self.assertLessEqual(len(m), 4096)    # each within Telegram's limit
@@ -69,9 +77,13 @@ class TestBuildMessages(unittest.TestCase):
         for cid in ids:
             self.assertEqual(joined.count(f"<code>{cid}</code>"), 1)
 
-    def test_unknown_label_uses_bullet(self):
-        msgs = b.build_messages(["777"], {})
-        self.assertIn("\u2022 <code>777</code>", msgs[0])
+    def test_rich_and_plain_batch_alignment(self):
+        # Rich and plain must split into the SAME batches so a per-message
+        # fallback (rich[i] -> plain[i]) always covers the same ids.
+        ids = [str(10**18 + i) for i in range(400)]
+        rich = b.build_messages(ids, rich=True)
+        plain = b.build_messages(ids, rich=False)
+        self.assertEqual(len(rich), len(plain))
 
 
 if __name__ == "__main__":

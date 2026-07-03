@@ -263,8 +263,9 @@ Long-polling bot (run it and leave it running; only one instance at a time):
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
   don't matter) → it replies with **two collapsed (expandable) quotes**:
-  1. **Emoji + ID** — each line is `emoji <code>id</code>`; tap an ID to copy
-     just that one.
+  1. **Emoji + ID** — each line shows the **actual premium emoji** (rendered via
+     a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`; tap an ID to
+     copy just that one.
   2. **IDs only** — one `<code>` block of every ID (one per line); tap it once
      to copy them all.
 - Send/forward a **post with premium emoji** → same two-format reply.
@@ -856,15 +857,20 @@ Pure, unit-tested helpers:
 
 - `extract_custom_emoji_ids(message)` — ordered, de-duplicated `custom_emoji_id`s
   from `entities` + `caption_entities`.
-- `build_messages(ids, labels)` — returns a **list of HTML messages**. Each
-  message has two collapsed (`<blockquote expandable>`) quotes:
-  1. **Emoji + ID** — `emoji <code>id</code>` per line; each `<code>` is
+- `build_messages(ids, labels, rich=True)` — returns a **list of HTML messages**.
+  Each message has two collapsed (`<blockquote expandable>`) quotes:
+  1. **Emoji + ID** — `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>`
+     per line when `rich` (renders the **real premium emoji**); each `<code>` is
      tap-to-copy for that single id.
   2. **IDs only** — one `<code>` block of all ids (one per line); tapping copies
      them all at once.
-  `_batch_ids` splits the list so every message stays under `MSG_MAX` (3500)
-  chars; multi-message replies are labelled "part i/n". No inline keyboard is
-  used — copying relies on Telegram's native `<code>` tap-to-copy.
+  `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
+  stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
+  multi-message replies are labelled "part i/n". No inline keyboard is used —
+  copying relies on Telegram's native `<code>` tap-to-copy. `send_reply` sends
+  the rich version and, if a message is rejected (a custom emoji the bot can't
+  render), automatically re-sends that message with `rich=False` (fallback
+  chars only).
 - `enrich_labels(tg, ids)` — `getCustomEmojiStickers` (≤200/call) → `id → emoji char`.
 
 Behaviour by chat type:
