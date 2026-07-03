@@ -52,43 +52,46 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
     return ids
 
 
-def _label(labels: dict[str, str] | None, cid: str) -> str:
-    """Fallback standard-emoji char for an id, HTML-escaped (• if unknown)."""
+DEFAULT_FALLBACK = "\u2b50"   # ⭐ shown if a custom emoji has no associated char
+PER_ID_COST = 110             # worst-case chars per id (rich <tg-emoji> + code)
+
+
+def _fallback_char(labels: dict[str, str] | None, cid: str) -> str:
     em = (labels or {}).get(cid, "")
-    return html.escape(em) if em else "\u2022"
+    return em or DEFAULT_FALLBACK
 
 
-def _batch_ids(ids: list[str], labels: dict[str, str] | None) -> list[list[str]]:
-    """Split ids so each rendered message stays under MSG_MAX characters."""
-    batches: list[list[str]] = []
-    cur: list[str] = []
-    size = 0
-    overhead = 240  # headers + blockquote/label markup per message
-    for cid in ids:
-        # cost in "Format 1" (emoji + <code></code> + id + nl) plus "Format 2".
-        cost = len(_label(labels, cid)) + len(cid) * 2 + 28
-        if cur and overhead + size + cost > MSG_MAX:
-            batches.append(cur)
-            cur, size = [], 0
-        cur.append(cid)
-        size += cost
-    if cur:
-        batches.append(cur)
-    return batches
+def _emoji_span(labels: dict[str, str] | None, cid: str, rich: bool) -> str:
+    """The emoji cell for Format 1.
+
+    rich=True renders the ACTUAL premium emoji via a custom_emoji entity
+    (``<tg-emoji emoji-id=...>fallback</tg-emoji>``); rich=False shows just the
+    fallback standard-emoji char (used if a rich send is rejected).
+    """
+    fb = html.escape(_fallback_char(labels, cid))
+    if rich:
+        return f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
+    return fb
+
+
+def _batch_ids(ids: list[str]) -> list[list[str]]:
+    """Split ids into batches that keep each message under MSG_MAX (mode-agnostic)."""
+    per_msg = max(1, (MSG_MAX - 260) // PER_ID_COST)
+    return [ids[i:i + per_msg] for i in range(0, len(ids), per_msg)]
 
 
 def _render_message(ids: list[str], labels: dict[str, str] | None,
-                    grand_total: int, part: int, parts: int) -> str:
+                    grand_total: int, part: int, parts: int, rich: bool) -> str:
     """Render one HTML message with both copy formats as collapsed quotes.
 
-    Format 1: ``emoji <code>id</code>`` per line — tap an id to copy just it.
+    Format 1: ``<premium emoji> <code>id</code>`` per line — tap an id to copy it.
     Format 2: one <code> block of all ids — tap once to copy them all.
     Both are expandable (collapsed) blockquotes.
     """
     head = f"Found <b>{grand_total}</b> premium emoji"
     if parts > 1:
         head += f" — part {part}/{parts}"
-    fmt1 = "\n".join(f"{_label(labels, c)} <code>{c}</code>" for c in ids)
+    fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
     fmt2 = "\n".join(ids)
     return (
         f"{head}:\n\n"
@@ -99,19 +102,22 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
     )
 
 
-def build_messages(ids: list[str], labels: dict[str, str] | None = None) -> list[str]:
+def build_messages(ids: list[str], labels: dict[str, str] | None = None,
+                   rich: bool = True) -> list[str]:
     """Build the HTML reply message(s) for a set of custom_emoji_ids.
 
     Returns one message when everything fits, or several when the id list is too
     large for a single Telegram message. No inline keyboard is used: copying is
-    done by tapping the <code> ids (Telegram's built-in tap-to-copy).
+    done by tapping the <code> ids (Telegram's built-in tap-to-copy). When
+    ``rich`` is true, Format 1 renders the real premium emoji via ``<tg-emoji>``.
+    Batching is mode-independent so rich and plain renders align 1:1.
     """
     if not ids:
         return ["No premium (custom) emoji found in that message. Send me one or "
                 "more premium emoji in a row (spaces/newlines don't matter), or a "
                 "post that contains premium emoji."]
-    batches = _batch_ids(ids, labels)
-    return [_render_message(b, labels, len(ids), i + 1, len(batches))
+    batches = _batch_ids(ids)
+    return [_render_message(b, labels, len(ids), i + 1, len(batches), rich)
             for i, b in enumerate(batches)]
 
 
@@ -151,15 +157,25 @@ def enrich_labels(tg: Telegram, ids: list[str]) -> dict[str, str]:
 def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | None = None,
                header: str | None = None) -> None:
     labels = enrich_labels(tg, ids) if ids else {}
-    messages = build_messages(ids, labels)
-    for i, text in enumerate(messages):
-        if header and i == 0:
-            text = header + "\n\n" + text
-        data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-                "disable_web_page_preview": True}
-        if reply_to and i == 0:
-            data["reply_to_message_id"] = reply_to
-        tg._call("sendMessage", data=data)
+    rich = build_messages(ids, labels, rich=True)
+    plain: list[str] | None = None
+    for i, text in enumerate(rich):
+        def _payload(body: str) -> dict:
+            body = (header + "\n\n" + body) if (header and i == 0) else body
+            d = {"chat_id": chat_id, "text": body, "parse_mode": "HTML",
+                 "disable_web_page_preview": True}
+            if reply_to and i == 0:
+                d["reply_to_message_id"] = reply_to
+            return d
+        try:
+            tg._call("sendMessage", data=_payload(text))
+        except Exception as exc:  # noqa: BLE001 - a bad custom_emoji must not drop the reply
+            # Retry without <tg-emoji> (some ids may not be renderable by the bot).
+            log.warning("rich reply failed (%s); retrying with plain fallback chars",
+                        redact(str(exc)))
+            if plain is None:
+                plain = build_messages(ids, labels, rich=False)
+            tg._call("sendMessage", data=_payload(plain[i]))
 
 
 def handle_update(tg: Telegram, owner_id: int, upd: dict) -> None:
