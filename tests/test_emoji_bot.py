@@ -48,11 +48,15 @@ class TestBuildMessages(unittest.TestCase):
         text = b.build_messages(["1", "2"], {})[0]
         self.assertIn("<blockquote expandable>", text)
 
-    def test_format2_is_pre_block_with_all_ids(self):
+    def test_format2_is_collapsed_pre_block_with_all_ids(self):
         ids = [str(1000 + i) for i in range(5)]
         text = b.build_messages(ids)[0]
-        # Format 2 = one <pre> block (Telegram Copy button) holding every id.
-        self.assertIn("<pre>" + "\n".join(ids) + "</pre>", text)
+        # Format 2 = a <pre> block (Copy button) inside an expandable quote so it
+        # is collapsed too, while the Copy button still copies every id.
+        self.assertIn("<blockquote expandable><pre>" + "\n".join(ids)
+                      + "</pre></blockquote>", text)
+        # Both sections are collapsed quotes.
+        self.assertEqual(text.count("<blockquote expandable>"), 2)
 
     def test_both_formats_have_same_id_count(self):
         ids = ["5472055112702629499", "6260129328881732024",
