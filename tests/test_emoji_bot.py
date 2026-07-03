@@ -42,7 +42,32 @@ class TestBuildMessages(unittest.TestCase):
         msgs = b.build_messages(["5899"], {"5899": "👋"}, rich=True)
         text = msgs[0]
         self.assertIn('<tg-emoji emoji-id="5899">👋</tg-emoji> <code>5899</code>', text)
-        self.assertEqual(text.count("<blockquote expandable>"), 2)
+
+    def test_format1_is_not_expandable(self):
+        # Non-collapsed quote so every emoji+ID line stays visible (no hidden
+        # lines that made Format 1 look shorter than Format 2).
+        text = b.build_messages(["1", "2"], {})[0]
+        self.assertIn("<blockquote>", text)
+        self.assertNotIn("<blockquote expandable>", text)
+
+    def test_format2_is_pre_block_with_all_ids(self):
+        ids = [str(1000 + i) for i in range(5)]
+        text = b.build_messages(ids)[0]
+        # Format 2 = one <pre> block (Telegram Copy button) holding every id.
+        self.assertIn("<pre>" + "\n".join(ids) + "</pre>", text)
+
+    def test_both_formats_have_same_id_count(self):
+        ids = ["5472055112702629499", "6260129328881732024",
+               "5215313353706057331", "5215670591905869044"]
+        text = b.build_messages(ids)[0]
+        pre = text.split("<pre>")[1].split("</pre>")[0]
+        # Format 1: one <code>id</code> per id; Format 2: id present in <pre>.
+        for cid in ids:
+            self.assertEqual(text.count(f"<code>{cid}</code>"), 1)
+            self.assertIn(cid, pre)
+        # Same number of ids in each section (4 and 4).
+        self.assertEqual(len([c for c in ids if f"<code>{c}</code>" in text]), 4)
+        self.assertEqual(len(pre.strip().splitlines()), 4)
 
     def test_plain_uses_fallback_char_only(self):
         msgs = b.build_messages(["5899"], {"5899": "👋"}, rich=False)
@@ -53,17 +78,6 @@ class TestBuildMessages(unittest.TestCase):
     def test_rich_default_and_missing_label_uses_star(self):
         msgs = b.build_messages(["777"], {})  # rich defaults True, no label
         self.assertIn('<tg-emoji emoji-id="777">\u2b50</tg-emoji>', msgs[0])
-
-    def test_many_single_message_copy_all_block(self):
-        ids = [str(1000 + i) for i in range(5)]
-        msgs = b.build_messages(ids)
-        self.assertEqual(len(msgs), 1)
-        text = msgs[0]
-        # Format 2 contains every id joined by newlines inside one <code> block.
-        self.assertIn("<code>" + "\n".join(ids) + "</code>", text)
-        # Format 1 lists each id in its own <code>.
-        for cid in ids:
-            self.assertIn(f"<code>{cid}</code>", text)
 
     def test_large_list_splits_into_multiple_messages(self):
         ids = [str(10**18 + i) for i in range(400)]  # 19-digit ids
