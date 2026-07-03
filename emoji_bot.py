@@ -54,6 +54,8 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
 
 DEFAULT_FALLBACK = "\u2b50"   # ⭐ shown if a custom emoji has no associated char
 PER_ID_COST = 110             # worst-case chars per id (rich <tg-emoji> + code)
+COPY_MAX = 256                # CopyTextButton.text hard limit
+IDS_PER_COPY_BTN = 12         # ~19-digit ids + newline fit under COPY_MAX
 
 
 def _fallback_char(labels: dict[str, str] | None, cid: str) -> str:
@@ -92,37 +94,60 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
     if parts > 1:
         head += f" — part {part}/{parts}"
     fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
-    fmt2 = "\n".join(ids)
-    # Both formats are COLLAPSED (expandable) quotes. Format 2 nests a <pre>
-    # block inside the quote: the <pre> keeps its one-click Copy button (which
-    # copies ALL ids, even while collapsed), while the quote gives the collapsed
-    # look. Long lists collapse; short ones just show in full.
+    fmt2 = "\n".join(f"<code>{c}</code>" for c in ids)
+    # Both formats are COLLAPSED (expandable) quotes. One-click copy-all is done
+    # by the "Copy all" inline button (see _copy_keyboard) which works on every
+    # platform, because an expandable quote itself has no copy button and a <pre>
+    # (which does) is not collapsible.
     return (
         f"{head}:\n\n"
         "<b>1) Emoji + ID</b> — tap to expand; tap an ID to copy it:\n"
         f"<blockquote expandable>{fmt1}</blockquote>\n\n"
-        "<b>2) IDs only</b> — use the Copy button to copy them all:\n"
-        f"<blockquote expandable><pre>{fmt2}</pre></blockquote>"
+        "<b>2) IDs only</b> — tap “Copy all” below to copy them all:\n"
+        f"<blockquote expandable>{fmt2}</blockquote>"
     )
 
 
-def build_messages(ids: list[str], labels: dict[str, str] | None = None,
-                   rich: bool = True) -> list[str]:
-    """Build the HTML reply message(s) for a set of custom_emoji_ids.
+def _copy_keyboard(ids: list[str]) -> dict:
+    """Inline keyboard whose button(s) copy every id in one tap (all platforms).
 
-    Returns one message when everything fits, or several when the id list is too
-    large for a single Telegram message. No inline keyboard is used: copying is
-    done by tapping the <code> ids (Telegram's built-in tap-to-copy). When
+    copy_text is capped at 256 chars, so long lists are split into a few
+    "Copy a-b" buttons; short lists get a single "Copy all N IDs" button.
+    """
+    chunks = [ids[i:i + IDS_PER_COPY_BTN] for i in range(0, len(ids), IDS_PER_COPY_BTN)]
+    kb: list[list[dict]] = []
+    if len(chunks) <= 1:
+        kb.append([{"text": f"📋 Copy all {len(ids)} IDs",
+                    "copy_text": {"text": "\n".join(ids)}}])
+    else:
+        for k, ch in enumerate(chunks, 1):
+            lo = (k - 1) * IDS_PER_COPY_BTN + 1
+            hi = lo + len(ch) - 1
+            kb.append([{"text": f"📋 Copy {lo}-{hi}",
+                        "copy_text": {"text": "\n".join(ch)}}])
+    return {"inline_keyboard": kb}
+
+
+def build_payloads(ids: list[str], labels: dict[str, str] | None = None,
+                   rich: bool = True) -> list[tuple[str, dict]]:
+    """Build (HTML text, inline_keyboard) message payload(s) for the ids.
+
+    Both formats are collapsed (expandable) quotes; a "Copy all" copy_text button
+    provides reliable one-click copy-all on every platform. Large id lists are
+    split into several messages, each under Telegram's 4096-char limit. When
     ``rich`` is true, Format 1 renders the real premium emoji via ``<tg-emoji>``.
     Batching is mode-independent so rich and plain renders align 1:1.
     """
     if not ids:
-        return ["No premium (custom) emoji found in that message. Send me one or "
-                "more premium emoji in a row (spaces/newlines don't matter), or a "
-                "post that contains premium emoji."]
+        return [("No premium (custom) emoji found in that message. Send me one or "
+                 "more premium emoji in a row (spaces/newlines don't matter), or a "
+                 "post that contains premium emoji.", {"inline_keyboard": []})]
     batches = _batch_ids(ids)
-    return [_render_message(b, labels, len(ids), i + 1, len(batches), rich)
-            for i, b in enumerate(batches)]
+    out: list[tuple[str, dict]] = []
+    for i, b in enumerate(batches):
+        text = _render_message(b, labels, len(ids), i + 1, len(batches), rich)
+        out.append((text, _copy_keyboard(b)))
+    return out
 
 
 START_TEXT = (
@@ -161,25 +186,25 @@ def enrich_labels(tg: Telegram, ids: list[str]) -> dict[str, str]:
 def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | None = None,
                header: str | None = None) -> None:
     labels = enrich_labels(tg, ids) if ids else {}
-    rich = build_messages(ids, labels, rich=True)
-    plain: list[str] | None = None
-    for i, text in enumerate(rich):
-        def _payload(body: str) -> dict:
+    rich = build_payloads(ids, labels, rich=True)
+    plain: list[tuple[str, dict]] | None = None
+    for i, (text, kb) in enumerate(rich):
+        def _data(body: str) -> dict:
             body = (header + "\n\n" + body) if (header and i == 0) else body
             d = {"chat_id": chat_id, "text": body, "parse_mode": "HTML",
-                 "disable_web_page_preview": True}
+                 "disable_web_page_preview": True, "reply_markup": json.dumps(kb)}
             if reply_to and i == 0:
                 d["reply_to_message_id"] = reply_to
             return d
         try:
-            tg._call("sendMessage", data=_payload(text))
+            tg._call("sendMessage", data=_data(text))
         except Exception as exc:  # noqa: BLE001 - a bad custom_emoji must not drop the reply
             # Retry without <tg-emoji> (some ids may not be renderable by the bot).
             log.warning("rich reply failed (%s); retrying with plain fallback chars",
                         redact(str(exc)))
             if plain is None:
-                plain = build_messages(ids, labels, rich=False)
-            tg._call("sendMessage", data=_payload(plain[i]))
+                plain = build_payloads(ids, labels, rich=False)
+            tg._call("sendMessage", data=_data(plain[i][0]))
 
 
 def handle_update(tg: Telegram, owner_id: int, upd: dict) -> None:
