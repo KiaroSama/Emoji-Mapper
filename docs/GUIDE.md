@@ -191,7 +191,8 @@ adjacently. Click **Save** → writes the `included` flag to the catalog.
 ```
 
 Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>` (video),
-`<base>a<n>` (animated) — Telegram cannot mix formats in one set. Each finished
+`<base>a<n>` (animated) — split by format for organization (since Bot API 7.2 a
+set *may* mix formats, so this is a choice, not a requirement). Each finished
 pack DMs the owner its `t.me/addemoji/...` link, and a per-pack manifest
 (`collection/manifests/<set>.md`: name + emoji ID) is written.
 
@@ -485,11 +486,10 @@ published. Per-format sets, drift-proof resume, per-pack manifests.
 **Brand logo (first emoji of every set).** When publishing with the
 `@YourEmojiBot` bot, the YourBrand logo is inserted as the **first
 emoji of every set** (`--brand-logo`, default
-`F:\documents\My Logo\YourBrand\YourBrand Emoji Logo.png`). It is converted to
-match each set's format: static→PNG, video→looped WEBM. Animated (`.tgs`) sets
-need a Lottie logo (`.tgs`/`.json`) next to the PNG; without one they are
-published **without** the logo (a raster image can't become a vector `.tgs`) and
-a warning is logged. The `@YourCoinEmojiBot` coin bot is exempt.
+`F:\documents\My Logo\YourBrand\YourBrand Emoji Logo.png`). Since Bot API 7.2
+(March 2024) a single custom-emoji set may contain **mixed formats**, so the
+logo is always a **static** 100x100 PNG and leads a static, video *or* animated
+set alike (verified live). The `@YourCoinEmojiBot` coin bot is exempt.
 Disable with `--no-brand-logo`. The logo occupies position 0, so item
 `custom_emoji_id`s are read from position 1 onward (handled automatically).
 
@@ -968,9 +968,12 @@ finished pack's `t.me/addemoji/...` link.
 Only to Telegram, via your bots. `collection/`, `logs/`, `.env`, `secrets.md`
 stay local and are gitignored.
 
-**Q: Can I run two formats in one pack?**
-No — Telegram forbids mixing formats; `build_collection` makes separate
-`s`/`v`/`a` sets automatically.
+**Q: Can one set hold both static and animated emoji?**
+Yes — since Bot API 7.2 (March 2024) a single custom-emoji set may mix static,
+video and animated stickers (each `InputSticker` carries its own `format`;
+verified live). `build_collection` still splits into `s`/`v`/`a` sets by default
+for organization, but the static brand logo is added as the first emoji of every
+set regardless of the set's format.
 
 ---
 

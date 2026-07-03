@@ -2,8 +2,11 @@
 
 Reads pending emoji from the content-addressed catalog and uploads them into
 fresh custom-emoji sets owned by the configured user, with a new base name and
-title. Static, animated and video emoji are published into SEPARATE sets,
-because Telegram does not allow mixing formats within one set.
+title. Static, animated and video emoji are published into SEPARATE sets by
+default for organization/clarity. NOTE: since Bot API 7.2 (March 2024) a single
+set MAY contain mixed formats, so this split is a choice, not a requirement --
+the brand logo (static) is added as the first emoji of every set regardless of
+the set's format.
 
 Duplicate-proof & resumable:
 
@@ -54,73 +57,38 @@ BRAND_LOGO_KW = ["yourbrand", "logo"]
 
 
 class BrandLogo:
-    """Provides a format-matched copy of the brand logo for a set's first emoji.
+    """The brand logo (YourBrand) used as the FIRST emoji of every set.
 
-    The source is a raster PNG. It is converted on demand and cached under
-    ``<data_dir>/brand/``:
-
-    * ``static``   -> ``logo.png``  (fit to 100x100)
-    * ``video``    -> ``logo.webm`` (looped still, VP9/alpha, <=256 KB)
-    * ``animated`` -> ``logo.tgs``  ONLY if a Lottie (.tgs/.json) source sits
-      next to the PNG; a raster image cannot be turned into a vector .tgs, so
-      animated sets are skipped (with a one-time warning) when none exists.
+    Since Bot API 7.2 (March 2024) a single custom-emoji set may contain mixed
+    formats, so the logo is always a **static** 100x100 PNG and can lead a
+    static, video OR animated set alike. Prepared once and cached under
+    ``<data_dir>/brand/logo.png``.
     """
 
     def __init__(self, src: str, data_dir: Path) -> None:
         self.src = Path(src) if src else None
         self.dir = data_dir / "brand"
-        self._cache: dict[str, Path | None] = {}
-        self._warned: set[str] = set()
+        self._png: Path | None = None
 
     def available(self) -> bool:
         return bool(self.src and self.src.is_file())
 
-    def _lottie_source(self) -> Path | None:
-        if not self.src:
-            return None
-        for ext in (".tgs", ".json"):
-            cand = self.src.with_suffix(ext)
-            if cand.is_file():
-                return cand
-        return None
-
-    def for_format(self, fmt: str) -> Path | None:
-        """Return a ready-to-upload logo path for *fmt*, or None if impossible."""
+    def static_png(self) -> Path | None:
+        """Return a ready 100x100 PNG logo path, or None if unavailable."""
         if not self.available():
             return None
-        if fmt in self._cache:
-            return self._cache[fmt]
+        if self._png and self._png.is_file():
+            return self._png
         from emojikit import media
-        result: Path | None = None
+        out = self.dir / "logo.png"
         try:
-            if fmt == "static":
-                out = self.dir / "logo.png"
-                if not out.is_file():
-                    media.to_static_png(self.src, out)
-                result = out
-            elif fmt == "video":
-                out = self.dir / "logo.webm"
-                if not out.is_file():
-                    media.to_video_webm(self.src, out, loop_still=True, seconds=1.5)
-                result = out
-            elif fmt == "animated":
-                lottie = self._lottie_source()
-                if lottie:
-                    out = self.dir / "logo.tgs"
-                    if not out.is_file():
-                        media.to_animated_tgs(lottie, out)
-                    result = out
-                elif "animated" not in self._warned:
-                    log.warning("brand logo: no Lottie (.tgs/.json) next to %s; "
-                                "animated packs will NOT get the logo first "
-                                "(a raster image can't become a vector .tgs).",
-                                self.src.name)
-                    self._warned.add("animated")
+            if not out.is_file():
+                media.to_static_png(self.src, out)
+            self._png = out
+            return out
         except Exception as exc:  # noqa: BLE001 - logo is best-effort, never fatal
-            log.warning("brand logo for %s failed: %s", fmt, exc)
-            result = None
-        self._cache[fmt] = result
-        return result
+            log.warning("brand logo prepare failed: %s", exc)
+            return None
 
 
 def _static_is_blank(path: Path, min_visible: int = 8) -> bool:
@@ -308,22 +276,24 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 set_index += 1
                 set_name = f"{base}{FMT_TAG[fmt]}{set_index}_by_{bot}"
                 set_title = f"{title} {FMT_WORD[fmt]} {set_index}"
-                logo_path = logo.for_format(fmt) if logo else None
-                if logo_path:
-                    # Brand logo is ALWAYS the first emoji of the set.
-                    tg.create_emoji_set(user_id, set_name, set_title, logo_path,
-                                        fmt, [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
+                logo_png = logo.static_png() if logo else None
+                if logo_png:
+                    # Brand logo is ALWAYS the first emoji of the set. Mixed-format
+                    # sets are allowed (Bot API 7.2+), so a STATIC logo can lead a
+                    # static, video or animated set alike.
+                    tg.create_emoji_set(user_id, set_name, set_title, logo_png,
+                                        "static", [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
                 else:
                     tg.create_emoji_set(user_id, set_name, set_title, path, fmt,
                                         emojis, item.keywords)
                 fmt_sets.append({"fmt": fmt, "index": set_index, "name": set_name,
-                                 "title": set_title, "live": 1 if logo_path else 0,
-                                 "logo": bool(logo_path), "keys": []})
+                                 "title": set_title, "live": 1 if logo_png else 0,
+                                 "logo": bool(logo_png), "keys": []})
                 state["sets"].append(fmt_sets[-1])
                 save_json(_state_path(data_dir, base), state)
                 log.info("[%s set %d] created %s%s", fmt, set_index, set_name,
-                         " (brand logo first)" if logo_path else "")
-                if logo_path:
+                         " (brand logo first)" if logo_png else "")
+                if logo_png:
                     # Set now exists with the logo at position 0; protect it from
                     # index rollback, then place this item as the second sticker.
                     in_set = 1
