@@ -96,10 +96,11 @@ not 3.12, so the project targets 3.11 and CI runs on 3.11.
 ## 4. The launcher (`run.ps1`)
 
 Right-click → *Run with PowerShell*, or `.\run.ps1`. It shows a centered banner
-(title + full-width rule + `Logging to: ...`), bootstraps `.venv`, checks deps +
-ffmpeg, then shows a **colored, sectioned** menu. Sections are lettered in order
+(pink title + full-width rule + yellow `Logging to: ...`), quietly prepares
+`.venv` (env/Python/ffmpeg OK lines go to the **log only**, keeping the console
+clean), then shows a **colored, sectioned** menu. Sections are lettered in order
 (**A** = Build, **B** = Collection, **C** = Bot) and each has its own numbering,
-so keys stay unique — type e.g. `A1`, `B3`, `C1` (or `q`):
+so keys stay unique — type e.g. `A1`, `B3`, `C1`:
 
 ```
                               Emoji Mapper
@@ -120,10 +121,14 @@ Collection (multi-format, duplicate-proof)
 Bot
   C1) Run the Emoji Mapper bot (premium-emoji ID extractor)
 
-  q) Quit
+Select {quit=exit}:
 ```
 
-The menu is ANSI 256-colour (renders in Windows Terminal / PowerShell 7).
+Navigation follows the FFmWiz style: every input prompt shows a colored
+`{back=0, quit=exit}` hint — type **0** to abort back to the menu, **exit**
+(or **quit**) to leave. Screen titles are cyan text (ANSI 256-colour; renders in
+Windows Terminal / PowerShell 7). Each launched Python command and its exit code
+are recorded in the launcher log.
 
 Every run writes a UTC log to `logs\run_<YYYY-MM-DD_HH-mm-ss>_UTC.log` (startup,
 prereq checks, menu selections, actions, warnings/errors, shutdown — no secret
