@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
-  spacing/newlines) now returns two formats — (1) a non-collapsed quote of the
-  **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>` ID per line for
-  individual tap-to-copy, and (2) a `<pre>` block of all IDs with Telegram's
-  Copy button for reliable one-click copy-all (desktop + mobile). Format 1 is no
-  longer expandable (the height-based collapse was hiding lines and made it look
-  shorter than Format 2); huge lists split across messages; a rejected custom
-  emoji falls back to plain fallback chars.
+  spacing/newlines) now returns two formats — (1) a **collapsed (expandable)**
+  quote of the **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>`
+  ID per line for individual tap-to-copy, and (2) a `<pre>` block of all IDs with
+  Telegram's Copy button for reliable one-click copy-all (desktop + mobile). The
+  `<pre>` copy block replaced the in-quote code so copy-all works on desktop;
+  huge lists split across messages; a rejected custom emoji falls back to plain
+  fallback chars.
 - **`build_collection.py`** now places the **YourBrand logo as the first emoji
   of every set** built with `@YourEmojiBot`. Since Bot API 7.2 a
   single set may contain mixed formats, so the logo is always a static 100x100

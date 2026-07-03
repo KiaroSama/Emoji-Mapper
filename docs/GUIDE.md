@@ -263,12 +263,14 @@ Long-polling bot (run it and leave it running; only one instance at a time):
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
   don't matter) → it replies in **two formats**:
-  1. **Emoji + ID** — a quote where each line shows the **actual premium emoji**
-     (rendered via a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`;
-     tap an ID to copy just that one (mobile). The quote is *not* collapsed, so
-     every line is always visible.
+  1. **Emoji + ID** — a **collapsed (expandable) quote**: tap it to expand and
+     see every line, where each shows the **actual premium emoji** (rendered via
+     a `<tg-emoji>` custom-emoji entity) next to `<code>id</code>`; tap an ID to
+     copy just that one (mobile). (Collapsed by height, so long lists show a few
+     lines until expanded — this is expected, not missing data.)
   2. **IDs only** — a `<pre>` code block of every ID; Telegram shows a **Copy
      button** on it, so one click copies all IDs at once (works on desktop too).
+     Left un-collapsed so its Copy button is always reachable.
 - Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
@@ -860,13 +862,13 @@ Pure, unit-tested helpers:
   from `entities` + `caption_entities`.
 - `build_messages(ids, labels, rich=True)` — returns a **list of HTML messages**.
   Each message has two collapsed (`<blockquote expandable>`) quotes:
-  1. **Emoji + ID** — a plain (non-collapsed) `<blockquote>` where each line is
+  1. **Emoji + ID** — a collapsed `<blockquote expandable>` where each line is
      `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>` when `rich`
      (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
-     Non-collapsed so all lines stay visible (an expandable quote collapsed by
-     height and hid lines, making Format 1 look shorter than Format 2).
-  2. **IDs only** — a `<pre>` block of all ids; Telegram renders a Copy button on
-     it, so one click copies every id at once (reliable on desktop and mobile).
+     Expandable collapses by height, so long lists show a few lines until tapped
+     (expected behaviour).
+  2. **IDs only** — a `<pre>` block of all ids (un-collapsed); Telegram renders a
+     Copy button on it, so one click copies every id at once (desktop + mobile).
   `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
   stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
   multi-message replies are labelled "part i/n". No inline keyboard is used —
