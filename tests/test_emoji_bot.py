@@ -30,6 +30,53 @@ class TestExtract(unittest.TestCase):
         m = {"caption_entities": [{"type": "custom_emoji", "custom_emoji_id": "9"}]}
         self.assertEqual(b.extract_custom_emoji_ids(m), ["9"])
 
+    def test_quote_entities_are_scanned(self):
+        # Per the Bot API, when a reply quotes part of the original message,
+        # only bold/italic/.../custom_emoji entities survive inside
+        # message.quote (a TextQuote). Multiple premium emoji in a manually
+        # quoted excerpt must ALL be extracted, not just the first one.
+        m = {
+            "text": "reply text",
+            "quote": {
+                "text": "wave warn stop",
+                "position": 0,
+                "entities": [
+                    {"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "111"},
+                    {"type": "custom_emoji", "offset": 5, "length": 2, "custom_emoji_id": "222"},
+                    {"type": "custom_emoji", "offset": 10, "length": 2, "custom_emoji_id": "333"},
+                ],
+            },
+        }
+        self.assertEqual(b.extract_custom_emoji_ids(m), ["111", "222", "333"])
+
+    def test_external_reply_quote_entities_are_scanned(self):
+        # Same TextQuote mechanism, but for a reply to a message from another
+        # chat (external_reply.quote instead of quote).
+        m = {
+            "external_reply": {
+                "quote": {
+                    "text": "aa bb",
+                    "entities": [
+                        {"type": "custom_emoji", "custom_emoji_id": "444"},
+                        {"type": "custom_emoji", "custom_emoji_id": "555"},
+                    ],
+                }
+            }
+        }
+        self.assertEqual(b.extract_custom_emoji_ids(m), ["444", "555"])
+
+    def test_quote_plus_own_entities_dedup_and_order(self):
+        # Repeated real emoji across quote + own entities must be listed once,
+        # in first-seen order.
+        m = {
+            "entities": [{"type": "custom_emoji", "custom_emoji_id": "111"}],
+            "quote": {"entities": [
+                {"type": "custom_emoji", "custom_emoji_id": "222"},
+                {"type": "custom_emoji", "custom_emoji_id": "111"},  # duplicate
+            ]},
+        }
+        self.assertEqual(b.extract_custom_emoji_ids(m), ["111", "222"])
+
 
 class TestBuildPayloads(unittest.TestCase):
     def test_empty(self):
