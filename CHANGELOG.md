@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Emoji Mapper bot**: id batching now follows the message-length limit again
+  (not the smaller `copy_text` button limit), so a 50-id reply is 2 messages as
+  before, not 5. Telegram's `copy_text` button is still hard-capped at 256 chars
+  (~12 ids), so a message with more ids than that shows a few chunked
+  "Copy a-b" buttons together covering every id in that message — Telegram
+  itself has no single-tap way to copy an arbitrarily large id list, and a
+  single message is capped at 4096 chars (a 50-id message would need ~4500+),
+  so very large results still need more than one message.
 - **Emoji Mapper bot**: a manually quoted reply (the highlighted `>` excerpt
   above a reply) containing multiple premium emoji only surfaced **one** ID.
   Root cause: per the Bot API, custom_emoji entities inside a quoted excerpt

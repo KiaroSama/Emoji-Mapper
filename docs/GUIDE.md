@@ -290,10 +290,12 @@ Long-polling bot (run it and leave it running; only one instance at a time):
   don't matter) → it replies with a **single collapsed (expandable) quote** of
   `emoji + ID` (each line shows the **actual premium emoji** via a `<tg-emoji>`
   custom-emoji entity next to `<code>id</code>`; tap an ID to copy just that one
-  on mobile), plus a **“Copy all” inline button** (`copy_text`) that copies every
-  ID in one tap on any platform (desktop included). Long lists get a few
-  “Copy a-b” buttons to respect the 256-char button limit. (Collapsed by height,
-  so long lists show a few lines until expanded — expected, not missing data.)
+  on mobile), plus one or more **“Copy”/“Copy a-b” inline buttons** (`copy_text`)
+  covering that message's IDs (each button is capped at 256 chars, ~12 IDs, by
+  Telegram itself). As many IDs as fit in one message (~4096-char Telegram limit)
+  are batched together, so a 50-id result is ~2 messages, not one-message-per-12.
+  (The quote is collapsed by height, so long lists show a few lines until
+  expanded — expected, not missing data.)
 - Send/forward a **post with premium emoji** → same two-format reply.
 - **Add it to a channel/group** (as admin) → DMs the owner the premium-emoji IDs
   from *new* posts (Bot API cannot read past channel history).
@@ -895,14 +897,18 @@ Pure, unit-tested helpers:
   `<blockquote expandable>` where every line is
   `<tg-emoji emoji-id=id>fallback</tg-emoji> <code>id</code>` when `rich`
   (renders the **real premium emoji**); each `<code>` is tap-to-copy (mobile).
-  Copy-all is provided by a `copy_text` **“Copy all” inline button**
-  (`_copy_keyboard`), chunked into “Copy a-b” buttons when the 256-char
-  `copy_text` limit is exceeded.
-  `_batch_ids` splits the list (mode-independent, ~110 chars/id) so every message
-  stays under `MSG_MAX` (3500) chars and rich/plain renders align 1:1;
-  multi-message replies are labelled "part i/n". `send_reply` sends the rich
-  version and, if a message is rejected (a custom emoji the bot can't render),
-  automatically re-sends that message with `rich=False` (fallback chars only).
+  Copy is provided by `copy_text` **“Copy”/“Copy a-b” inline button(s)**
+  (`_copy_keyboard`) covering that message's ids; Telegram caps each button at
+  256 chars (~12 ids), so a message with more ids gets several chunked buttons
+  that together cover all of it.
+  `_batch_ids` splits the id list by the **message**-length budget
+  (`MSG_MAX`=3500 chars, mode-independent ~110 chars/id) so as many ids as
+  possible share one message — batching by the smaller button limit was tried
+  and reverted because it fragmented a 50-id reply into 5 short messages instead
+  of ~2; rich/plain renders still align 1:1 batch-for-batch. Multi-message
+  replies are labelled "part i/n". `send_reply` sends the rich version and, if a
+  message is rejected (a custom emoji the bot can't render), automatically
+  re-sends that message with `rich=False` (fallback chars only).
 - `enrich_labels(tg, ids)` — `getCustomEmojiStickers` (≤200/call) → `id → emoji char`.
 
 Behaviour by chat type:
