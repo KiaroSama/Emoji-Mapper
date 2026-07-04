@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
+  with a trailing newline, so pasting the copied IDs leaves a blank line after
+  the last one.
+
 ### Fixed
 - **Emoji Mapper bot**: id batching now follows the message-length limit again
   (not the smaller `copy_text` button limit), so a 50-id reply is 2 messages as
