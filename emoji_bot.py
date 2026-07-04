@@ -95,7 +95,14 @@ def _emoji_span(labels: dict[str, str] | None, cid: str, rich: bool) -> str:
 
 
 def _batch_ids(ids: list[str]) -> list[list[str]]:
-    """Split ids into batches that keep each message under MSG_MAX (mode-agnostic)."""
+    """Split ids into per-MESSAGE batches (mode-agnostic; keeps messages few).
+
+    Batches by the message-length limit, not the copy_text button limit, so as
+    many ids as possible land in ONE message (e.g. 50 ids -> 1 message, not 5).
+    Telegram's copy_text button is separately capped at 256 chars (~12 ids), so
+    a message with more ids than that gets several "Copy a-b" buttons -- see
+    _copy_keyboard -- covering the whole message between them.
+    """
     per_msg = max(1, (MSG_MAX - 260) // PER_ID_COST)
     return [ids[i:i + per_msg] for i in range(0, len(ids), per_msg)]
 
@@ -113,10 +120,11 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
         head += f" — part {part}/{parts}"
     fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
     # A single COLLAPSED (expandable) quote of emoji + ID. Tap an ID to copy just
-    # it (mobile); use the "Copy all" inline button below to copy every ID in one
-    # tap on any platform (see _copy_keyboard).
+    # it (mobile); use the "Copy ..." button(s) below to copy this message's IDs
+    # in one or a few taps on any platform (see _copy_keyboard).
     return (
-        f"{head} — tap to expand; tap an ID to copy it, or use “Copy all” below:\n"
+        f"{head} — tap to expand; tap an ID to copy it, or use the "
+        "“Copy” button(s) below:\n"
         f"<blockquote expandable>{fmt1}</blockquote>"
     )
 
