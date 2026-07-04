@@ -38,17 +38,35 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
     """Ordered, de-duplicated custom_emoji_ids from a message's entities.
 
     Every custom_emoji entity is collected in the order it appears, regardless
-    of the spaces, newlines or plain text between the emoji.
+    of the spaces, newlines or plain text between the emoji, and regardless of
+    how many times the same emoji repeats (each real id is listed once).
+
+    Scans, in order:
+    - ``entities`` / ``caption_entities`` -- the message's own text/caption.
+    - ``quote.entities`` -- per the Bot API, when a reply *quotes part of* the
+      original message, only bold/italic/underline/strikethrough/spoiler and
+      **custom_emoji** entities are preserved in that quoted excerpt (``quote``
+      is a ``TextQuote``). Without this, premium emoji inside a manually quoted
+      reply (visible as the highlighted "> ..." block above the reply) were
+      silently dropped.
+    - ``external_reply.quote.entities`` -- the same quoting, but for a reply to
+      a message from another chat (e.g. quoting a forwarded/external post).
     """
     ids: list[str] = []
     seen = set()
-    for field in ("entities", "caption_entities"):
-        for ent in message.get(field, []) or []:
+
+    def _collect(ents) -> None:
+        for ent in ents or []:
             if ent.get("type") == "custom_emoji":
                 cid = str(ent.get("custom_emoji_id", ""))
                 if cid and cid not in seen:
                     seen.add(cid)
                     ids.append(cid)
+
+    _collect(message.get("entities"))
+    _collect(message.get("caption_entities"))
+    _collect((message.get("quote") or {}).get("entities"))
+    _collect(((message.get("external_reply") or {}).get("quote") or {}).get("entities"))
     return ids
 
 

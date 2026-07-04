@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Emoji Mapper bot**: a manually quoted reply (the highlighted `>` excerpt
+  above a reply) containing multiple premium emoji only surfaced **one** ID.
+  Root cause: per the Bot API, custom_emoji entities inside a quoted excerpt
+  live in `message.quote.entities` (a `TextQuote`), not in the reply's own
+  `entities`. `extract_custom_emoji_ids` now also scans `quote.entities` and
+  `external_reply.quote.entities`, so every premium emoji in the quote is
+  listed; repeated emoji (in the quote, the reply text, or both) still collapse
+  to a single ID/copy entry.
+
 ### Changed
 - **Launcher (`run.ps1`)** reworked to match the FFmWiz style: a centered pink
   banner (title + full-width rule + yellow `Logging to: ...`), quiet startup
