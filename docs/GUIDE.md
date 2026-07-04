@@ -882,7 +882,14 @@ dies on a single bad message.
 Pure, unit-tested helpers:
 
 - `extract_custom_emoji_ids(message)` — ordered, de-duplicated `custom_emoji_id`s
-  from `entities` + `caption_entities`.
+  from `entities`, `caption_entities`, **and `quote.entities` /
+  `external_reply.quote.entities`**. The `quote` field (Bot API `TextQuote`) is
+  set when the user manually quotes part of a message they're replying to; per
+  the Bot API, only bold/italic/underline/strikethrough/spoiler and
+  **custom_emoji** entities are preserved inside that quote. Without scanning
+  `quote.entities`, premium emoji inside a quoted reply were silently dropped
+  (only entities on the reply's own text were seen). Repeats (same id, whether
+  inside the quote, the reply text, or both) are de-duplicated to one occurrence.
 - `build_payloads(ids, labels, rich=True)` — returns a **list of
   `(html_text, inline_keyboard)`** payloads. Each message has a single collapsed
   `<blockquote expandable>` where every line is
