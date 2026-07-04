@@ -7,6 +7,9 @@ secrets.md
 # Private AI explanation file (must always remain local-only)
 explain-AI.md
 
+# Local working/reference notes (prompt + edit history, local-only)
+reference.md
+
 # Strictly local-only protected directories/files (any depth)
 .ignoreme
 **/.ignoreme
