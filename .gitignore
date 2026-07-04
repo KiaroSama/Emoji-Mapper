@@ -10,6 +10,9 @@ explain-AI.md
 # Local working/reference notes (prompt + edit history, local-only)
 reference.md
 
+# graphify knowledge-graph outputs (generated; contains machine-specific paths)
+graphify-out/
+
 # Strictly local-only protected directories/files (any depth)
 .ignoreme
 **/.ignoreme
