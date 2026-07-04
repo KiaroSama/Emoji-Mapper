@@ -102,7 +102,8 @@ class TestBuildPayloads(unittest.TestCase):
         ids = [str(1000 + i) for i in range(5)]
         text, kb = b.build_payloads(ids)[0]
         btn = kb["inline_keyboard"][-1][0]
-        self.assertEqual(btn["copy_text"]["text"], "\n".join(ids))
+        # Trailing newline so pasting the ids is followed by a blank line.
+        self.assertEqual(btn["copy_text"]["text"], "\n".join(ids) + "\n")
         # Each id appears once as a <code> in the single quote.
         for cid in ids:
             self.assertEqual(text.count(f"<code>{cid}</code>"), 1)
@@ -123,7 +124,8 @@ class TestBuildPayloads(unittest.TestCase):
             for row in btn_rows:
                 piece = row[0]["copy_text"]["text"]
                 self.assertLessEqual(len(piece), b.COPY_MAX)
-                msg_ids.extend(piece.split("\n"))
+                self.assertTrue(piece.endswith("\n"))  # trailing blank line
+                msg_ids.extend(piece.rstrip("\n").split("\n"))
             for cid in msg_ids:
                 self.assertIn(f"<code>{cid}</code>", text)  # buttons match the message
             covered.extend(msg_ids)
