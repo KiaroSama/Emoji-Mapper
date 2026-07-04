@@ -125,10 +125,13 @@ Select {quit=exit}:
 ```
 
 Navigation follows the FFmWiz style: every input prompt shows a colored
-`{back=0, quit=exit}` hint — type **0** to abort back to the menu, **exit**
-(or **quit**) to leave. Screen titles are cyan text (ANSI 256-colour; renders in
-Windows Terminal / PowerShell 7). Each launched Python command and its exit code
-are recorded in the launcher log.
+`{back=0, quit=exit}` hint. Typing **0** steps back **one** prompt (e.g. from the
+token prompt back to the title prompt); from the first prompt it returns to the
+menu. Typing **exit** (or **quit**) leaves the launcher from anywhere. Multi-step
+actions are wizards (`Run-Wizard`): each step can go back, re-ask on bad input,
+or advance. Screen titles are cyan text (ANSI 256-colour; renders in Windows
+Terminal / PowerShell 7). Each launched Python command and its exit code are
+recorded in the launcher log.
 
 Every run writes a UTC log to `logs\run_<YYYY-MM-DD_HH-mm-ss>_UTC.log` (startup,
 prereq checks, menu selections, actions, warnings/errors, shutdown — no secret

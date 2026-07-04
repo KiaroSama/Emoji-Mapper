@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   black-on-cyan bar), and an ANSI 256-colour sectioned menu with sections
   lettered in order (`A`=Build, `B`=Collection, `C`=Bot), each with its own
   numbering (e.g. `A1`, `B3`, `C1`) and blank-line spacing. Removed the `q) Quit`
-  row in favour of a colored `{back=0, quit=exit}` hint on every prompt (0 =
-  back to menu, exit = quit). Per-run UTC log under `logs\run_<UTC>.log` now also
-  records each launched Python command and its exit code (no secret values).
+  row in favour of a colored `{back=0, quit=exit}` hint on every prompt. Actions
+  are now step wizards (`Run-Wizard`) so **`0` steps back exactly one prompt**
+  (only the first prompt returns to the menu), and `exit`/`quit` leaves from
+  anywhere. Per-run UTC log under `logs\run_<UTC>.log` also records each launched
+  Python command and its exit code (no secret values).
 - **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
   spacing/newlines) now returns a **single collapsed (expandable) quote** of the
   **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>` ID per line for
