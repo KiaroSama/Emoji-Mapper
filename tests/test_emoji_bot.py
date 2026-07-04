@@ -107,6 +107,28 @@ class TestBuildPayloads(unittest.TestCase):
         for cid in ids:
             self.assertEqual(text.count(f"<code>{cid}</code>"), 1)
 
+    def test_50_ids_batched_by_message_limit_not_button_limit(self):
+        # Batching follows the (larger) message-length limit, not the smaller
+        # copy_text button limit, so as many ids as possible land per message
+        # (e.g. 50 ids -> 2 messages, not 5). Each message's copy button(s)
+        # together cover exactly that message's ids, in order, once each.
+        ids = [str(10**18 + i) for i in range(50)]
+        payloads = b.build_payloads(ids)
+        self.assertLess(len(payloads), 5)  # far fewer messages than the old bug
+        covered = []
+        for text, kb in payloads:
+            btn_rows = [r for r in kb["inline_keyboard"] if r and "copy_text" in r[0]]
+            self.assertGreaterEqual(len(btn_rows), 1)
+            msg_ids = []
+            for row in btn_rows:
+                piece = row[0]["copy_text"]["text"]
+                self.assertLessEqual(len(piece), b.COPY_MAX)
+                msg_ids.extend(piece.split("\n"))
+            for cid in msg_ids:
+                self.assertIn(f"<code>{cid}</code>", text)  # buttons match the message
+            covered.extend(msg_ids)
+        self.assertEqual(covered, ids)  # every id covered, in order, exactly once
+
     def test_copy_buttons_chunked_under_limit(self):
         ids = [str(10**18 + i) for i in range(30)]  # 19-digit ids > 256 chars
         _, kb = b.build_payloads(ids)[0]
