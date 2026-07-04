@@ -122,14 +122,39 @@ function Invoke-Py ($py, [string[]]$Argv) {
     return $code
 }
 
-# Read input with a colored {back=0, quit=exit} hint. Typing 0 aborts the action
-# (back to menu); typing exit/quit ends the launcher. Returns the raw answer.
-function Read-Nav ($label, [switch]$NoBack) {
-    $ans = Read-Host ("$label " + (Nav-Hint -NoBack:$NoBack))
+# Ask for text with a colored {back=0, quit=exit} hint. Returns the raw answer;
+# the caller (a wizard step) treats '0' as "go back one step". Typing exit/quit
+# ends the launcher from anywhere.
+function Ask ($label) {
+    $ans = Read-Host ("$label " + (Nav-Hint))
     $t = if ($null -ne $ans) { $ans.Trim() } else { '' }
-    if (-not $NoBack -and $t -eq '0') { throw 'NAV_BACK' }
-    if ($t -match '^(exit|quit)$')    { throw 'NAV_QUIT' }
+    if ($t -match '^(exit|quit)$') { throw 'NAV_QUIT' }
     return $ans
+}
+
+# Yes/No with the same nav. Returns $true / $false, or the string 'back' for 0.
+function Ask-YesNo ($label) {
+    $ans = Read-Host ("$label [Y/n] " + (Nav-Hint))
+    $t = if ($null -ne $ans) { $ans.Trim() } else { '' }
+    if ($t -match '^(exit|quit)$') { throw 'NAV_QUIT' }
+    if ($t -eq '0') { return 'back' }
+    return ([string]::IsNullOrWhiteSpace($t) -or $t -match '^(y|yes)$')
+}
+
+# Step engine: run ordered step scriptblocks. Each returns 'ok' (advance),
+# 'back' (previous step), or 'stay' (re-ask this step). 'back' from the first
+# step returns $false (caller aborts to the menu) — i.e. back always moves ONE
+# screen back, and the screen before step 0 is the menu.
+function Run-Wizard ($steps) {
+    $i = 0
+    while ($i -lt $steps.Count) {
+        switch (& $steps[$i]) {
+            'back' { $i--; if ($i -lt 0) { return $false } }
+            'stay' { }
+            default { $i++ }
+        }
+    }
+    return $true
 }
 
 # --- Prefer Windows Terminal + PowerShell 7 (single relaunch, loop-safe) ---
@@ -237,42 +262,52 @@ function Test-Ffmpeg {
 # quits. Each Python launch is logged (command + exit code) via Invoke-Py.
 function Action-BuildGeneral ($py) {
     Write-Title "Build a general emoji pack (@GodVerifyEmojiMapperbot)"
-    $inDir = Read-Nav "Source image folder (e.g. input\myset)"
-    if ([string]::IsNullOrWhiteSpace($inDir) -or -not (Test-Path -LiteralPath $inDir)) {
-        Write-Err "Folder not found: $inDir"; return
-    }
-    $base  = Read-Nav "Pack base name (letters/digits/_), e.g. myset"
-    $title = Read-Nav "Pack title, e.g. My Emojis"
-    $emoji = Read-Host "Associated standard emoji (default 😀)"
-    if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = '😀' }
-    $build = Join-Path 'build' $base
-
-    Write-Step "Converting images -> $build ..."
-    if ((Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir,'--out',$build)) -ne 0) {
-        Write-Err "Conversion failed."; return
-    }
-    Write-Step "Dry-run preview ..."
-    if ((Invoke-Py $py @('build_pack.py','--base',$base,'--title',$title,'--source-dir',$build,
-                         '--token-env','GENERAL_BOT_TOKEN','--emoji',$emoji,'--dry-run')) -ne 0) {
-        Write-Err "Dry-run failed (check .env / source)."; return
-    }
-    if (Confirm-YesDefault "Upload to Telegram now?") {
-        if ((Invoke-Py $py @('build_pack.py','--base',$base,'--title',$title,'--source-dir',$build,
-                             '--token-env','GENERAL_BOT_TOKEN','--emoji',$emoji)) -eq 0) {
-            Write-Ok "Pack build finished."
-        } else { Write-Err "Build failed." }
-    } else {
-        Write-Info "Skipped upload. Re-run when ready."
-    }
+    $st = @{ emoji = '😀' }
+    $steps = @(
+        { $v = Ask "Source image folder (e.g. input\myset)"; if ($v -eq '0') { return 'back' }
+          if ([string]::IsNullOrWhiteSpace($v) -or -not (Test-Path -LiteralPath $v)) {
+              Write-Err "Folder not found: $v"; return 'stay' }
+          $st.inDir = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Pack base name (letters/digits/_), e.g. myset"; if ($v -eq '0') { return 'back' }
+          if ([string]::IsNullOrWhiteSpace($v)) { Write-Err "Base name required."; return 'stay' }
+          $st.base = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Pack title, e.g. My Emojis"; if ($v -eq '0') { return 'back' }
+          if ([string]::IsNullOrWhiteSpace($v)) { Write-Err "Title required."; return 'stay' }
+          $st.title = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Associated standard emoji (default 😀)"; if ($v -eq '0') { return 'back' }
+          if (-not [string]::IsNullOrWhiteSpace($v)) { $st.emoji = $v }; 'ok' }.GetNewClosure(),
+        { $yn = Ask-YesNo "Convert + dry-run + upload now?"; if ($yn -eq 'back') { return 'back' }
+          if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
+          $build = Join-Path 'build' $st.base
+          Write-Step "Converting images -> $build ..."
+          if ((Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir,'--out',$build)) -ne 0) {
+              Write-Err "Conversion failed."; return 'ok' }
+          Write-Step "Dry-run preview ..."
+          if ((Invoke-Py $py @('build_pack.py','--base',$st.base,'--title',$st.title,'--source-dir',$build,
+                               '--token-env','GENERAL_BOT_TOKEN','--emoji',$st.emoji,'--dry-run')) -ne 0) {
+              Write-Err "Dry-run failed (check .env / source)."; return 'ok' }
+          if ((Invoke-Py $py @('build_pack.py','--base',$st.base,'--title',$st.title,'--source-dir',$build,
+                               '--token-env','GENERAL_BOT_TOKEN','--emoji',$st.emoji)) -eq 0) {
+              Write-Ok "Pack build finished." } else { Write-Err "Build failed." }
+          'ok' }.GetNewClosure()
+    )
+    Run-Wizard $steps | Out-Null
 }
 
 function Action-ConvertOnly ($py) {
     Write-Title "Convert images to 100x100 PNGs"
-    $inDir = Read-Nav "Source image folder"
-    if (-not (Test-Path -LiteralPath $inDir)) { Write-Err "Folder not found."; return }
-    $outDir = Read-Nav "Output folder (blank = <folder>_emoji)"
-    if ([string]::IsNullOrWhiteSpace($outDir)) { Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir) | Out-Null }
-    else { Invoke-Py $py @('make_emoji_pngs.py','--in',$inDir,'--out',$outDir) | Out-Null }
+    $st = @{}
+    $steps = @(
+        { $v = Ask "Source image folder"; if ($v -eq '0') { return 'back' }
+          if (-not (Test-Path -LiteralPath $v)) { Write-Err "Folder not found."; return 'stay' }
+          $st.inDir = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Output folder (blank = <folder>_emoji)"; if ($v -eq '0') { return 'back' }
+          $st.outDir = $v
+          if ([string]::IsNullOrWhiteSpace($st.outDir)) { Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir) | Out-Null }
+          else { Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir,'--out',$st.outDir) | Out-Null }
+          'ok' }.GetNewClosure()
+    )
+    Run-Wizard $steps | Out-Null
 }
 
 function Action-CoinRebuild ($py) {
@@ -280,24 +315,30 @@ function Action-CoinRebuild ($py) {
     Write-Warn "This uses the crypto-coin bot and the coins/ component."
     $script = Join-Path $ScriptRoot 'coins\rebuild_packs.py'
     if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_packs.py not found."; return }
-    if (Confirm-YesDefault "Run coins/rebuild_packs.py now?") {
-        Invoke-Py $py @($script) | Out-Null
-    }
+    $yn = Ask-YesNo "Run coins/rebuild_packs.py now?"
+    if ($yn -eq 'back' -or -not $yn) { return }   # back or no -> return to menu
+    Invoke-Py $py @($script) | Out-Null
 }
 
 function Action-CollectPacks ($py) {
     Write-Title "Collect emoji from existing Telegram packs"
-    Write-Info "Paste pack links/names (t.me/addemoji/...). Blank line to finish."
-    $packs = @()
-    while ($true) {
-        $line = Read-Nav "Pack (blank = done)"
-        if ([string]::IsNullOrWhiteSpace($line)) { break }
-        $packs += $line.Trim()
-    }
-    if ($packs.Count -eq 0) { Write-Warn "No packs entered."; return }
-    $tokenEnv = Read-Nav "Token env var (default GENERAL_BOT_TOKEN)"
-    if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
-    Invoke-Py $py (@('fetch_pack.py') + $packs + @('--token-env',$tokenEnv)) | Out-Null
+    Write-Info "Paste pack links/names (t.me/addemoji/...). Blank line to finish; 0 removes the last one."
+    $st = @{ packs = @() }
+    $steps = @(
+        { $line = Ask "Pack (blank = done)"
+          if ($line -eq '0') {
+              if ($st.packs.Count -gt 0) { $st.packs = @($st.packs[0..($st.packs.Count-2)]); Write-Info "Removed last." }
+              return 'stay' }                       # 0 = undo last entry (one step)
+          if ([string]::IsNullOrWhiteSpace($line)) {
+              if ($st.packs.Count -eq 0) { Write-Warn "No packs entered."; return 'back' }
+              return 'ok' }
+          $st.packs += $line.Trim(); return 'stay' }.GetNewClosure(),
+        { $v = Ask "Token env var (default GENERAL_BOT_TOKEN)"; if ($v -eq '0') { return 'back' }
+          $tokenEnv = if ([string]::IsNullOrWhiteSpace($v)) { 'GENERAL_BOT_TOKEN' } else { $v }
+          Invoke-Py $py (@('fetch_pack.py') + $st.packs + @('--token-env',$tokenEnv)) | Out-Null
+          'ok' }.GetNewClosure()
+    )
+    Run-Wizard $steps | Out-Null
 }
 
 function Action-AddMedia ($py) {
@@ -306,32 +347,43 @@ function Action-AddMedia ($py) {
         Write-Warn "ffmpeg/ffprobe not found: video emoji (.webm) will fail."
         Write-Warn "Install with: winget install Gyan.FFmpeg"
     }
-    $inDir = Read-Nav "Source folder"
-    if (-not (Test-Path -LiteralPath $inDir)) { Write-Err "Folder not found."; return }
-    $emoji = Read-Host "Associated standard emoji (default 😀)"
-    if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = '😀' }
-    Invoke-Py $py @('add_media.py','--in',$inDir,'--emoji',$emoji) | Out-Null
+    $st = @{ emoji = '😀' }
+    $steps = @(
+        { $v = Ask "Source folder"; if ($v -eq '0') { return 'back' }
+          if (-not (Test-Path -LiteralPath $v)) { Write-Err "Folder not found."; return 'stay' }
+          $st.inDir = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Associated standard emoji (default 😀)"; if ($v -eq '0') { return 'back' }
+          if (-not [string]::IsNullOrWhiteSpace($v)) { $st.emoji = $v }
+          Invoke-Py $py @('add_media.py','--in',$st.inDir,'--emoji',$st.emoji) | Out-Null
+          'ok' }.GetNewClosure()
+    )
+    Run-Wizard $steps | Out-Null
 }
 
 function Action-PublishCollection ($py) {
     Write-Title "Publish the collection into new packs (multi-format)"
-    $base  = Read-Nav "Pack base name (letters/digits only), e.g. mypack"
-    $title = Read-Nav "Pack title, e.g. My Collection"
-    $tokenEnv = Read-Nav "Token env var (default GENERAL_BOT_TOKEN)"
-    if ([string]::IsNullOrWhiteSpace($tokenEnv)) { $tokenEnv = 'GENERAL_BOT_TOKEN' }
-    Write-Step "Dry-run preview ..."
-    if ((Invoke-Py $py @('build_collection.py','--base',$base,'--title',$title,
-                         '--token-env',$tokenEnv,'--dry-run')) -ne 0) {
-        Write-Err "Dry-run failed (run a collect/add step first?)."; return
-    }
-    if (Confirm-YesDefault "Upload to Telegram now?") {
-        if ((Invoke-Py $py @('build_collection.py','--base',$base,'--title',$title,
-                             '--token-env',$tokenEnv)) -eq 0) {
-            Write-Ok "Collection published."
-        } else { Write-Err "Publish failed." }
-    } else {
-        Write-Info "Skipped upload. Re-run when ready (resumable)."
-    }
+    $st = @{}
+    $steps = @(
+        { $v = Ask "Pack base name (letters/digits only), e.g. mypack"; if ($v -eq '0') { return 'back' }
+          if ([string]::IsNullOrWhiteSpace($v)) { Write-Err "Base name required."; return 'stay' }
+          $st.base = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Pack title, e.g. My Collection"; if ($v -eq '0') { return 'back' }
+          if ([string]::IsNullOrWhiteSpace($v)) { Write-Err "Title required."; return 'stay' }
+          $st.title = $v; 'ok' }.GetNewClosure(),
+        { $v = Ask "Token env var (default GENERAL_BOT_TOKEN)"; if ($v -eq '0') { return 'back' }
+          $st.tokenEnv = if ([string]::IsNullOrWhiteSpace($v)) { 'GENERAL_BOT_TOKEN' } else { $v }; 'ok' }.GetNewClosure(),
+        { $yn = Ask-YesNo "Dry-run then upload now?"; if ($yn -eq 'back') { return 'back' }
+          if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
+          Write-Step "Dry-run preview ..."
+          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+                               '--token-env',$st.tokenEnv,'--dry-run')) -ne 0) {
+              Write-Err "Dry-run failed (run a collect/add step first?)."; return 'ok' }
+          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+                               '--token-env',$st.tokenEnv)) -eq 0) {
+              Write-Ok "Collection published." } else { Write-Err "Publish failed." }
+          'ok' }.GetNewClosure()
+    )
+    Run-Wizard $steps | Out-Null
 }
 
 function Action-Panel ($py) {
@@ -420,10 +472,9 @@ while ($running) {
         $running = Invoke-Choice $choice $py
     } catch {
         $msg = $_.Exception.Message
-        if ($msg -eq 'NAV_BACK') {
-            Write-Log 'INFO' 'nav: back to menu'          # 0 inside an action -> menu
-        } elseif ($msg -eq 'NAV_QUIT') {
-            $running = $false                              # exit inside an action
+        if ($msg -eq 'NAV_QUIT') {
+            $running = $false                              # 'exit' typed inside an action
+            Write-Log 'INFO' 'nav: quit from action'
         } else {
             Write-Err "Action failed: $msg"
             Write-Log 'ERROR' ("exception: " + ($_ | Out-String).Trim())
