@@ -120,6 +120,14 @@ class Catalog:
             self.db.execute("ALTER TABLE items ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Migrate older databases that predate the 'position' column (manual
+        # publish order, editable from the curate panel). Seed existing rows to
+        # their insertion order (rowid) so ordering is stable and NULL-free.
+        try:
+            self.db.execute("ALTER TABLE items ADD COLUMN position INTEGER")
+            self.db.execute("UPDATE items SET position = rowid WHERE position IS NULL")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self.db.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -200,12 +208,14 @@ class Catalog:
             self.db.commit()
             return canonical, False
 
+        next_pos = self.db.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM items").fetchone()[0]
         self.db.execute(
             "INSERT INTO items(content_key, format, file_path, emojis, keywords, "
-            "sources, phash, uploaded, created_utc) VALUES(?,?,?,?,?,?,?,0,?)",
+            "sources, phash, uploaded, created_utc, position) VALUES(?,?,?,?,?,?,?,0,?,?)",
             (content_key, fmt, str(file_path), json.dumps(emojis),
              json.dumps(keywords), json.dumps([source] if source else []),
-             _phash_to_db(phash), _now()),
+             _phash_to_db(phash), _now(), next_pos),
         )
         if file_unique_id:
             self._record_seen(file_unique_id, content_key)
@@ -234,24 +244,60 @@ class Catalog:
         if fmt:
             rows = self.db.execute(
                 "SELECT * FROM items WHERE uploaded=0 AND included=1 AND format=? "
-                "ORDER BY content_key", (fmt,),
+                "ORDER BY position, content_key", (fmt,),
             ).fetchall()
         else:
             rows = self.db.execute(
                 "SELECT * FROM items WHERE uploaded=0 AND included=1 "
-                "ORDER BY format, content_key"
+                "ORDER BY position, content_key"
             ).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def all_items(self, fmt: str | None = None) -> list[Item]:
-        """Every catalog item (any state), deterministic order. For the panel."""
+        """Every catalog item (any state) in the manual publish order (position).
+
+        The curate panel shows and lets you drag-reorder items in this order;
+        the same order drives publishing (per-format sets keep this relative
+        order). ``content_key`` is a stable tiebreak.
+        """
         if fmt:
             rows = self.db.execute(
-                "SELECT * FROM items WHERE format=? ORDER BY content_key", (fmt,)).fetchall()
+                "SELECT * FROM items WHERE format=? ORDER BY position, content_key",
+                (fmt,)).fetchall()
         else:
             rows = self.db.execute(
-                "SELECT * FROM items ORDER BY format, content_key").fetchall()
+                "SELECT * FROM items ORDER BY position, content_key").fetchall()
         return [_row_to_item(r) for r in rows]
+
+    def set_order(self, ordered_keys: list[str]) -> int:
+        """Persist a manual order: position = index for each given content_key.
+
+        Keys not present are ignored; items not listed keep their old position
+        but are pushed after the listed ones (their position is offset). Returns
+        the number of items whose position was set.
+        """
+        n = 0
+        for i, key in enumerate(ordered_keys):
+            cur = self.db.execute(
+                "UPDATE items SET position=? WHERE content_key=?", (i, key))
+            n += cur.rowcount
+        # Any item not in the list goes after, preserving its relative order.
+        base = len(ordered_keys)
+        self.db.execute(
+            "UPDATE items SET position = position + ? "
+            "WHERE content_key NOT IN (%s)" % (",".join("?" * len(ordered_keys)) or "''"),
+            [base] + list(ordered_keys) if ordered_keys else [base],
+        )
+        self.db.commit()
+        return n
+
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", (key, value))
+        self.db.commit()
 
     def set_inclusion(self, excluded_keys: set[str]) -> tuple[int, int]:
         """Mark the given keys as excluded (included=0) and all others included=1.
