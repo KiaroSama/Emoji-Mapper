@@ -133,19 +133,22 @@ def _copy_keyboard(ids: list[str]) -> dict:
     """Inline keyboard whose button(s) copy every id in one tap (all platforms).
 
     copy_text is capped at 256 chars, so long lists are split into a few
-    "Copy a-b" buttons; short lists get a single "Copy all N IDs" button.
+    "Copy a-b" buttons; short lists get a single "Copy all N IDs" button. Each
+    button's copied text ends with a trailing newline, so pasting the ids is
+    immediately followed by a blank line (handy when pasting several button
+    copies in sequence, or pasting an id above other text).
     """
     chunks = [ids[i:i + IDS_PER_COPY_BTN] for i in range(0, len(ids), IDS_PER_COPY_BTN)]
     kb: list[list[dict]] = []
     if len(chunks) <= 1:
         kb.append([{"text": f"📋 Copy all {len(ids)} IDs",
-                    "copy_text": {"text": "\n".join(ids)}}])
+                    "copy_text": {"text": "\n".join(ids) + "\n"}}])
     else:
         for k, ch in enumerate(chunks, 1):
             lo = (k - 1) * IDS_PER_COPY_BTN + 1
             hi = lo + len(ch) - 1
             kb.append([{"text": f"📋 Copy {lo}-{hi}",
-                        "copy_text": {"text": "\n".join(ch)}}])
+                        "copy_text": {"text": "\n".join(ch) + "\n"}}])
     return {"inline_keyboard": kb}
 
 
