@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
+from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import Catalog
 from emojikit.logsetup import setup_logging
 from emojikit.media import hamming
@@ -36,6 +37,7 @@ log = logging.getLogger("panel")
 _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
          ".webm": "video/webm", ".tgs": "application/gzip"}
 FMT_ORDER = {"static": 0, "video": 1, "animated": 2}
+LOGO_KEY = "__brand_logo__"  # pseudo content_key: preview-only, never saved/counted
 
 
 def order_by_similarity(items: list) -> list:
@@ -62,10 +64,22 @@ def order_by_similarity(items: list) -> list:
     return out
 
 
-def build_view(cat: Catalog) -> tuple[list[dict], dict]:
+def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
     items = order_by_similarity(cat.all_items())
     view = []
     by_key: dict[str, Path] = {}
+
+    logo_path = Path(BRAND_LOGO_DEFAULT)
+    if bot_username.lower() in BRAND_LOGO_BOTS and logo_path.is_file():
+        # Preview-only: shows where the brand logo will be inserted on publish.
+        # It is NOT part of the catalog, is never counted in the totals, is not
+        # clickable/toggleable, and is never sent to /api/save.
+        view.append({
+            "key": LOGO_KEY, "fmt": "static", "label": "Brand logo (auto-added on publish)",
+            "emoji": "", "included": True, "isLogo": True,
+        })
+        by_key[LOGO_KEY] = logo_path
+
     for it in items:
         label = (it.keywords[0] if it.keywords else
                  (it.emojis[0] if it.emojis else it.content_key[2:10]))
@@ -215,6 +229,10 @@ body.bg-gray  .thumb{background:#808a96}
 .badge{position:absolute;top:8px;left:8px;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
   border-radius:6px;padding:2px 6px}
+.card.logo{cursor:default;border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2455,0 0 16px #fbbf2433}
+.card.logo:hover{border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2477,0 0 18px #fbbf2455}
+.card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
+.card.logo .lbl{color:#fbbf24}
 .tick{position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a}
@@ -248,6 +266,7 @@ let lastIdx = null;
 const grid = document.getElementById('grid');
 
 function thumb(it){
+  if(it.isLogo) return `<div class="thumb"><img loading="lazy" src="/img/${encodeURIComponent(it.key)}" alt="${it.label}"></div>`;
   if(it.fmt==='static') return `<div class="thumb"><img loading="lazy" src="/img/${encodeURIComponent(it.key)}" alt="${it.label}"></div>`;
   if(it.fmt==='video') return `<div class="thumb"><video src="/img/${encodeURIComponent(it.key)}" muted loop autoplay playsinline preload="metadata"></video></div>`;
   return `<div class="thumb lottie" data-key="${encodeURIComponent(it.key)}"><span class="ph">${it.emoji||'▶'}</span></div>`;
@@ -275,20 +294,30 @@ function cleanupLottie(){ anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims
 function observeLottie(){ document.querySelectorAll('.thumb.lottie').forEach(d=>io.observe(d)); }
 function render(){
   cleanupLottie();
-  grid.innerHTML = ITEMS.map((it,i)=>`
-    <div class="card ${it.included?'on':'off'}" data-i="${i}">
+  grid.innerHTML = ITEMS.map((it,i)=>{
+    if(it.isLogo){
+      return `<div class="card logo" data-i="${i}">
+        <span class="badge">logo</span>
+        ${thumb(it)}
+        <div class="lbl">${(it.label||'').toString().replace(/</g,'&lt;')}</div>
+        <div class="sub">always first, not part of the catalog</div>
+      </div>`;
+    }
+    return `<div class="card ${it.included?'on':'off'}" data-i="${i}">
       <span class="badge">${it.fmt}</span>
       <span class="tick">${it.included?'✓':'✕'}</span>
       ${thumb(it)}
       <div class="lbl">${(it.label||'').toString().replace(/</g,'&lt;')}</div>
       <div class="sub">${it.key.slice(0,10)}…</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   updateCount();
   observeLottie();
 }
 function updateCount(){
-  document.getElementById('selCount').textContent = ITEMS.filter(x=>x.included).length;
-  document.getElementById('totCount').textContent = ITEMS.length;
+  const real = ITEMS.filter(x=>!x.isLogo);
+  document.getElementById('selCount').textContent = real.filter(x=>x.included).length;
+  document.getElementById('totCount').textContent = real.length;
 }
 function setCard(i){
   const el = grid.querySelector(`.card[data-i="${i}"]`);
@@ -299,18 +328,19 @@ function setCard(i){
 grid.addEventListener('click',e=>{
   const card = e.target.closest('.card'); if(!card) return;
   const i = +card.dataset.i;
+  if(ITEMS[i].isLogo) return;   // preview-only card: not toggleable
   if(e.shiftKey && lastIdx!==null){
     const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
     const val = !ITEMS[i].included;
-    for(let k=a;k<=b;k++){ITEMS[k].included=val;setCard(k);}
+    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; ITEMS[k].included=val;setCard(k); }
   } else {
     ITEMS[i].included=!ITEMS[i].included; setCard(i);
   }
   lastIdx=i; updateCount();
 });
-document.getElementById('all').onclick=()=>{ITEMS.forEach(x=>x.included=true);render();};
-document.getElementById('none').onclick=()=>{ITEMS.forEach(x=>x.included=false);render();};
-document.getElementById('inv').onclick=()=>{ITEMS.forEach(x=>x.included=!x.included);render();};
+document.getElementById('all').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=true;});render();};
+document.getElementById('none').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=false;});render();};
+document.getElementById('inv').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=!x.included;});render();};
 // Preview backdrop switcher: makes black / hollow / faint emoji visible.
 const BGS=['checker','light','dark','gray'];
 const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};
@@ -326,7 +356,7 @@ document.getElementById('bg').onclick=()=>{
 };
 applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){return 'checker';}})());
 document.getElementById('save').onclick=async()=>{
-  const excluded = ITEMS.filter(x=>!x.included).map(x=>x.key);
+  const excluded = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
   const r = await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({excluded})});
   const j = await r.json();
@@ -337,6 +367,24 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;
 render();
 </script>
 </body></html>"""
+
+
+def _detect_bot_username() -> str:
+    """Best-effort: which bot's token is configured, so the panel can preview
+    the brand logo only when it would actually be added on publish (i.e. the
+    Emoji Mapper bot, never the coin bot). Never raises -- on any error
+    (missing .env, no network, bad token) the logo preview is simply skipped.
+    """
+    try:
+        from build_pack import Telegram, load_env
+        load_env()
+        token = os.environ.get("GENERAL_BOT_TOKEN", "")
+        if not token:
+            return ""
+        return Telegram(token).get_me().get("username", "")
+    except Exception as exc:  # noqa: BLE001 - preview-only, never fatal
+        log.debug("bot username detection failed: %s", exc)
+        return ""
 
 
 def main() -> int:
@@ -353,9 +401,11 @@ def main() -> int:
         log.error("no catalog at %s (run fetch_pack.py / add_media.py first).", db_path)
         return 2
 
+    bot_username = _detect_bot_username()
+
     cat = Catalog(db_path)
     try:
-        view, by_key = build_view(cat)
+        view, by_key = build_view(cat, bot_username)
     finally:
         cat.close()
     log.info("loaded %d emoji from %s", len(view), db_path)

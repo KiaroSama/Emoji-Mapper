@@ -530,6 +530,16 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 | `--port` | `8765` | Local port. |
 | `--no-open` | off | Don't auto-open the browser. |
 
+**Brand logo preview.** If `GENERAL_BOT_TOKEN` resolves to
+`@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
+`build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
+first card** labelled "Brand logo (auto-added on publish)" so you can see where
+it will land *before* publishing. This card is preview-only: it's not clickable,
+not counted in the included/excluded totals, and never sent to `/api/save` — the
+logo itself is never part of the catalog and is only actually inserted by
+`build_collection.py` at publish time (see §12.5). For the coin bot, or if the
+logo file is missing, the card is simply not shown.
+
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Curate panel**: a distinct gold "Brand logo" preview card now appears first
+  when the configured bot is `@YourEmojiBot` and the logo file
+  exists, showing where the mandatory logo will be inserted on publish. It's
+  preview-only (not clickable, not counted, never sent to `/api/save`) since
+  the logo is only actually added by `build_collection.py` at publish time.
+
 ### Changed
 - **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
   with a trailing newline, so pasting the copied IDs leaves a blank line after
