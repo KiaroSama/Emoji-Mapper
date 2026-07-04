@@ -388,7 +388,7 @@ function Action-PublishCollection ($py) {
 
 function Action-Panel ($py) {
     Write-Title "Curate panel (pick which emoji go into the pack)"
-    Write-Info "Opens a dark neon web panel; tick/untick emoji, then Save. Ctrl+C to stop."
+    Write-Info "Opening the web panel in your browser... (Ctrl+C here to stop it)"
     Invoke-Py $py @('panel.py') | Out-Null
 }
 
@@ -417,7 +417,7 @@ function Show-Menu {
     Menu-Item $script:CKeyB 'B1' 'Collect emoji from existing packs (download)'
     Menu-Item $script:CKeyB 'B2' 'Add media from a folder (build from scratch)'
     Menu-Item $script:CKeyB 'B3' 'Publish the collection into new packs'
-    Menu-Item $script:CKeyB 'B4' 'Curate panel - pick which emoji to include (web)'
+    Menu-Item $script:CKeyB 'B4' 'Open web panel to pick & reorder emoji (browser)'
     Write-Host ''
     Write-Host (Paint $script:CBot 'Bot')
     Menu-Item $script:CKeyC 'C1' 'Run the Emoji Mapper bot (premium-emoji ID extractor)'
