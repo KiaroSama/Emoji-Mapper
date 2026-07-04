@@ -8,13 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Curate panel — drag to reorder.** Emoji can now be dragged to set the
+  **publish order**. The order is persisted to a new `items.position` column
+  (`Catalog.set_order`, POST `/api/order`) and drives both the panel and
+  `build_collection` (each per-format set publishes in this relative order). On
+  first open the order is seeded to the look-alike similarity grouping.
 - **Curate panel**: a distinct gold "Brand logo" preview card now appears first
   when the configured bot is `@GodVerifyEmojiMapperbot` and the logo file
   exists, showing where the mandatory logo will be inserted on publish. It's
-  preview-only (not clickable, not counted, never sent to `/api/save`) since
-  the logo is only actually added by `build_collection.py` at publish time.
+  preview-only (not clickable, not counted, never reordered, never sent to
+  `/api/save`) since the logo is only actually added by `build_collection.py`
+  at publish time.
 
 ### Changed
+- **Curate panel performance**: animated `.tgs` are now shown as a **static
+  first frame** and only play on **hover** (were all autoplaying+looping at
+  once, which hung the page on large collections). Off-screen Lottie players are
+  destroyed. Launcher menu label clarified to "Open web panel to pick & reorder
+  emoji (browser)" and its start message shortened.
+- **Curate panel**: benign browser disconnects while scrolling no longer spam
+  the log with `ConnectionAbortedError` tracebacks (handled in the request
+  handler and server `handle_error`).
+- **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
+  with a trailing newline, so pasting the copied IDs leaves a blank line after
+  the last one.
 - **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
   with a trailing newline, so pasting the copied IDs leaves a blank line after
   the last one.
