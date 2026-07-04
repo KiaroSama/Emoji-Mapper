@@ -147,8 +147,10 @@ def freeze_plan(cat: Catalog, data_dir: Path, base: str, formats: list[str]) -> 
 
 def _all_items(cat: Catalog, fmt: str):
     """All catalog items of a format in deterministic order (uploaded or not)."""
+    # Publish in the manual curate-panel order (position), content_key as a
+    # stable tiebreak, so each format's set follows the order you arranged.
     rows = cat.db.execute(
-        "SELECT * FROM items WHERE format=? ORDER BY content_key", (fmt,)
+        "SELECT * FROM items WHERE format=? ORDER BY position, content_key", (fmt,)
     ).fetchall()
     from emojikit.catalog import _row_to_item  # local import to avoid cycle noise
     return [_row_to_item(r) for r in rows]

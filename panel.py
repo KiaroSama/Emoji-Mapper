@@ -19,6 +19,7 @@ import html
 import json
 import logging
 import os
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -65,7 +66,15 @@ def order_by_similarity(items: list) -> list:
 
 
 def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
-    items = order_by_similarity(cat.all_items())
+    # First time only: seed the manual order with the look-alike-grouped
+    # similarity order (a nice starting point). After that, always use the saved
+    # position order so the user's drag-drop arrangement is what shows/publishes.
+    if cat.get_meta("order_seeded") != "1":
+        seeded = order_by_similarity(cat.all_items())
+        cat.set_order([it.content_key for it in seeded])
+        cat.set_meta("order_seeded", "1")
+    items = cat.all_items()  # saved manual/seeded order (by position)
+
     view = []
     by_key: dict[str, Path] = {}
 
@@ -102,11 +111,24 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
             pass
 
         def _send(self, code, body: bytes, ctype="application/json"):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            # Swallow benign disconnects (browser navigated away / cancelled a
+            # media request): these raise ConnectionAbortedError/BrokenPipeError
+            # on Windows and only spam the log with harmless tracebacks.
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
+
+        def handle_one_request(self):
+            # Same for header/parse-level disconnects.
+            try:
+                super().handle_one_request()
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                self.close_connection = True
 
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/index"):
@@ -148,21 +170,43 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
-            if self.path != "/api/save":
-                self._send(404, b"{}")
-                return
             n = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(n) or b"{}")
-            excluded = set(payload.get("excluded", []))
-            with lock:
-                cat = Catalog(db_path)
-                try:
-                    inc, exc = cat.set_inclusion(excluded)
-                finally:
-                    cat.close()
-                for v in view:
-                    v["included"] = v["key"] not in excluded
-            self._send(200, json.dumps({"ok": True, "included": inc, "excluded": exc}).encode())
+            try:
+                payload = json.loads(self.rfile.read(n) or b"{}")
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                return
+
+            if self.path == "/api/save":
+                excluded = set(payload.get("excluded", []))
+                with lock:
+                    cat = Catalog(db_path)
+                    try:
+                        inc, exc = cat.set_inclusion(excluded)
+                    finally:
+                        cat.close()
+                    for v in view:
+                        v["included"] = v["key"] not in excluded
+                self._send(200, json.dumps({"ok": True, "included": inc, "excluded": exc}).encode())
+                return
+
+            if self.path == "/api/order":
+                # Persist the manual drag-drop order. The logo preview key is
+                # ignored (it's not a catalog item).
+                keys = [k for k in payload.get("order", []) if k != LOGO_KEY]
+                with lock:
+                    cat = Catalog(db_path)
+                    try:
+                        cat.set_order(keys)
+                        cat.set_meta("order_seeded", "1")
+                    finally:
+                        cat.close()
+                    # Reorder the in-memory view to match (keep the logo first).
+                    pos = {k: i for i, k in enumerate(keys)}
+                    view.sort(key=lambda v: (not v.get("isLogo"), pos.get(v["key"], 1 << 30)))
+                self._send(200, json.dumps({"ok": True, "count": len(keys)}).encode())
+                return
+
+            self._send(404, b"{}")
 
     return Handler
 
@@ -229,6 +273,9 @@ body.bg-gray  .thumb{background:#808a96}
 .badge{position:absolute;top:8px;left:8px;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
   border-radius:6px;padding:2px 6px}
+.card{cursor:grab}
+.card.drag{opacity:.5;cursor:grabbing}
+.card.over{border-color:#a78bfa;box-shadow:0 0 0 2px #a78bfa88,0 0 18px #a78bfa55}
 .card.logo{cursor:default;border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2455,0 0 16px #fbbf2433}
 .card.logo:hover{border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2477,0 0 18px #fbbf2455}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
@@ -249,7 +296,8 @@ body.bg-gray  .thumb{background:#808a96}
 <body class="bg-checker">
 <header>
   <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
-  <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected</span>
+  <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
+    <span style="color:#8aa0b8">· click = toggle · drag = reorder · hover = play</span></span>
   <span class="spacer"></span>
   <button id="all">Select all</button>
   <button id="none">Deselect all</button>
@@ -272,24 +320,33 @@ function thumb(it){
   return `<div class="thumb lottie" data-key="${encodeURIComponent(it.key)}"><span class="ph">${it.emoji||'▶'}</span></div>`;
 }
 const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Performance: animated .tgs are rendered with the lightweight CANVAS renderer
+// and shown as a STATIC first frame at rest (near-zero CPU). Only the card you
+// hover actually plays — so hundreds of emoji no longer melt the CPU / hang the
+// page the way autoplay+loop SVG did. Off-screen players are destroyed.
 const anims = new Map();
+function playAnim(div){ const a=anims.get(div); if(a && !RM){ try{a.play();}catch(_){}}}
+function stopAnim(div){ const a=anims.get(div); if(a){ try{a.goToAndStop(0,true);}catch(_){}}}
 const io = new IntersectionObserver(entries=>{
   for(const e of entries){
     const div = e.target, key = div.dataset.key;
     if(e.isIntersecting){
       if(!anims.has(div) && window.lottie){
         const ph = div.querySelector('.ph'); if(ph) ph.remove();
-        const a = lottie.loadAnimation({container:div,renderer:'svg',loop:true,
-          autoplay:!RM, path:'/lottie/'+key});
-        if(RM) a.addEventListener('DOMLoaded',()=>a.goToAndStop(0,true));
+        // SVG renderer (the only one in the vendored build). The key to not
+        // melting the CPU is NOT autoplaying: we render the first frame and
+        // stop, so no requestAnimationFrame runs until you hover this card.
+        const a = lottie.loadAnimation({container:div, renderer:'svg', loop:true,
+          autoplay:false, path:'/lottie/'+key});
+        a.addEventListener('DOMLoaded',()=>{ try{a.goToAndStop(0,true);}catch(_){}});
         anims.set(div,a);
       }
     } else {
       const a = anims.get(div);
-      if(a){ try{a.destroy();}catch(_){} anims.delete(div); div.innerHTML=''; }
+      if(a){ try{a.destroy();}catch(_){} anims.delete(div); div.innerHTML='<span class="ph">▶</span>'; }
     }
   }
-},{root:null, rootMargin:'250px'});
+},{root:null, rootMargin:'120px'});
 function cleanupLottie(){ anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims.clear(); io.disconnect(); }
 function observeLottie(){ document.querySelectorAll('.thumb.lottie').forEach(d=>io.observe(d)); }
 function render(){
@@ -303,7 +360,7 @@ function render(){
         <div class="sub">always first, not part of the catalog</div>
       </div>`;
     }
-    return `<div class="card ${it.included?'on':'off'}" data-i="${i}">
+    return `<div class="card ${it.included?'on':'off'}" data-i="${i}" draggable="true">
       <span class="badge">${it.fmt}</span>
       <span class="tick">${it.included?'✓':'✕'}</span>
       ${thumb(it)}
@@ -313,6 +370,12 @@ function render(){
   }).join('');
   updateCount();
   observeLottie();
+  // Play the hovered emoji only; keep the rest as static first frames.
+  grid.querySelectorAll('.thumb.lottie').forEach(div=>{
+    const card = div.closest('.card');
+    card.addEventListener('mouseenter',()=>playAnim(div));
+    card.addEventListener('mouseleave',()=>stopAnim(div));
+  });
 }
 function updateCount(){
   const real = ITEMS.filter(x=>!x.isLogo);
@@ -338,6 +401,56 @@ grid.addEventListener('click',e=>{
   }
   lastIdx=i; updateCount();
 });
+
+// --- Drag & drop reordering (sets the publish order) --------------------
+let dragFrom = null;
+let orderTimer = null;
+function saveOrder(){
+  clearTimeout(orderTimer);
+  orderTimer = setTimeout(async ()=>{
+    const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
+    try{
+      await fetch('/api/order',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({order})});
+      toast('Order saved ✓');
+    }catch(_){ toast('Could not save order'); }
+  }, 400);
+}
+grid.addEventListener('dragstart',e=>{
+  const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
+  const i=+card.dataset.i;
+  if(ITEMS[i].isLogo){ e.preventDefault(); return; }   // logo is fixed first
+  dragFrom=i; card.classList.add('drag');
+  e.dataTransfer.effectAllowed='move';
+  try{e.dataTransfer.setData('text/plain',String(i));}catch(_){}
+});
+grid.addEventListener('dragover',e=>{
+  if(dragFrom===null) return;
+  e.preventDefault(); e.dataTransfer.dropEffect='move';
+  const card=e.target.closest('.card');
+  grid.querySelectorAll('.card.over').forEach(c=>c.classList.remove('over'));
+  if(card && !ITEMS[+card.dataset.i].isLogo) card.classList.add('over');
+});
+grid.addEventListener('drop',e=>{
+  if(dragFrom===null) return;
+  e.preventDefault();
+  const card=e.target.closest('.card');
+  let to = card ? +card.dataset.i : ITEMS.length-1;
+  const firstMovable = ITEMS.findIndex(x=>!x.isLogo);
+  if(to < firstMovable) to = firstMovable;            // never before the logo
+  if(to!==dragFrom){
+    const [moved]=ITEMS.splice(dragFrom,1);
+    ITEMS.splice(to,0,moved);
+    render();
+    saveOrder();
+  }
+  dragFrom=null;
+});
+grid.addEventListener('dragend',()=>{
+  dragFrom=null;
+  grid.querySelectorAll('.card.over,.card.drag').forEach(c=>c.classList.remove('over','drag'));
+});
+
 document.getElementById('all').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=true;});render();};
 document.getElementById('none').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=false;});render();};
 document.getElementById('inv').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=!x.included;});render();};
@@ -411,7 +524,17 @@ def main() -> int:
     log.info("loaded %d emoji from %s", len(view), db_path)
 
     handler = make_handler(view, by_key, db_path)
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+
+    class QuietServer(ThreadingHTTPServer):
+        # Don't dump a traceback when a browser simply drops a connection
+        # (very common while scrolling a media-heavy grid on Windows).
+        def handle_error(self, request, client_address):
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+                return
+            super().handle_error(request, client_address)
+
+    httpd = QuietServer(("127.0.0.1", args.port), handler)
     url = f"http://127.0.0.1:{args.port}/"
     log.info("Panel at %s  (Ctrl+C to stop)", url)
     print(f"Emoji curate panel: {url}", flush=True)

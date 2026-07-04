@@ -530,6 +530,24 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 | `--port` | `8765` | Local port. |
 | `--no-open` | off | Don't auto-open the browser. |
 
+Interactions: **click** a card to toggle include/exclude, **drag** a card to
+reorder (this is the publish order), **hover** an animated emoji to play it.
+
+**Order = publish order.** The panel shows items in the saved manual order
+(`items.position`). On first open it is seeded to the look-alike similarity
+order; after that, drag-and-drop reordering is saved (POST `/api/order` →
+`Catalog.set_order`) and drives both the panel and `build_collection` (each
+per-format set publishes in this relative order). The brand-logo preview card
+is fixed first and is never reordered/counted/saved.
+
+**Performance.** Animated `.tgs` use the vendored Lottie **SVG** renderer but
+are **not** autoplayed: each is rendered as a static first frame
+(`goToAndStop(0)`) and only the card you hover actually animates. Off-screen
+players are destroyed (IntersectionObserver). This keeps a 200-emoji grid
+responsive instead of running hundreds of looping animations at once (which
+previously hung the page). Benign browser disconnects while scrolling are
+swallowed server-side (no `ConnectionAbortedError` traceback spam).
+
 **Brand logo preview.** If `GENERAL_BOT_TOKEN` resolves to
 `@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
 `build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
