@@ -24,6 +24,14 @@ graphify-out/
 **/.kiro/
 **/.claude/
 **/.codex/
+/.cursor/
+/.cline/
+/.agents/
+/CLAUDE.md
+/AGENTS.md
+
+# Portable AI working memory (local-only)
+/.ai/
 
 # ---------------------------------------------------------------------------
 # Environment / secrets
