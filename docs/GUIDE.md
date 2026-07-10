@@ -158,6 +158,17 @@ Guarantees (root-cause fixes — do not regress these):
 - **No mapping drift**: publishing records the *actual* upload order and marks
   each row uploaded (committed per item), so resuming after a skip/crash can
   never re-upload or scramble IDs.
+- **No double-upload on network failures**: `addStickerToSet` /
+  `createNewStickerSet` are NOT idempotent, so a timeout after Telegram already
+  applied the call is never blindly re-sent. `Telegram._call` verifies the live
+  set first (applied → success; not applied → safe retry; unknown →
+  `AmbiguousUploadError`), and `build_collection` reconciles every unrecorded
+  live sticker back to its catalog item (by `file_unique_id`, else by
+  downloaded content) before computing what is still pending. Upload payloads
+  are sent as bytes so a retried request re-sends the full file.
+- **Published copies are remembered**: after publishing, each uploaded copy's
+  `file_unique_id` is recorded in `seen_files`, so fetching your own published
+  packs (or ids inside them) never downloads anything again.
 - **Idempotent / resumable**: re-running fetch or publish is safe and cheap.
 - **Curation**: each row has an `included` flag (default 1). The Curate panel
   toggles it; `build_collection` only publishes `included` rows.
@@ -346,7 +357,11 @@ Git: work is committed in small logical commits and pushed to `main` on
    drift, idempotent). If you add a format or ingest path, route it through
    `catalog.add(...)` with a proper `content_key` and a blank check.
 4. **Publishing**: keep the per-item committed `uploaded` flag + recorded upload
-   order; never reintroduce position-offset resume logic.
+   order; never reintroduce position-offset resume logic. Never blind-retry a
+   non-idempotent Bot API call: go through `Telegram.add_emoji`/`add_sticker`
+   with `expected_before=<live count>` (verified retry) and let
+   `build_collection.reconcile_set` attribute anything ambiguous from the live
+   set before uploading more.
 5. **Curation**: respect the `included` flag in any new publish path.
 6. **UI changes** (panel): keep the dark neon-blue style, Inter font, visible
    focus, `prefers-reduced-motion`, lazy media (IntersectionObserver) so large
