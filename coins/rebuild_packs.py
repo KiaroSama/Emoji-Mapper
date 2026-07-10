@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from build_pack import Telegram, _sticker_json, load_env
+from build_pack import AmbiguousUploadError, Telegram, _sticker_json, load_env
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -139,7 +139,8 @@ def build(tg: Telegram) -> None:
             placed = False
             if in_set != 0:
                 try:
-                    tg.add_sticker(USER_ID, set_name, png, EMOJI_CHAR, kw)
+                    tg.add_sticker(USER_ID, set_name, png, EMOJI_CHAR, kw,
+                                   expected_before=in_set)
                     placed = True
                 except RuntimeError as exc:
                     if "STICKERS_TOO_MUCH" not in str(exc):
@@ -153,6 +154,25 @@ def build(tg: Telegram) -> None:
                 state["sets"].append({"index": set_index, "name": set_name, "title": title})
                 save_state(state)
                 print(f"[set {set_index}] created {set_name}", flush=True)
+        except AmbiguousUploadError as exc:
+            # Never blind-retry a maybe-applied call (that duplicates emoji in
+            # the pack). Adopt a create that verifiably landed; anything else
+            # is healed by the live-count reconcile on the next run.
+            if not placed and in_set == 0:
+                known, sset = tg.probe_sticker_set(set_name)
+                if known and sset is not None and len(sset.get("stickers", [])) == 1:
+                    state["sets"].append({"index": set_index, "name": set_name,
+                                          "title": title})
+                    save_state(state)
+                    print(f"[set {set_index}] adopted {set_name} after ambiguous "
+                          f"create", flush=True)
+                else:
+                    set_index -= 1
+                    print(f"  {ticker}: {exc}; reconciled on next run", flush=True)
+                    continue
+            else:
+                print(f"  {ticker}: {exc}; reconciled on next run", flush=True)
+                continue
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1

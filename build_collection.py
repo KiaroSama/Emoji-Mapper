@@ -33,7 +33,8 @@ import re
 import time
 from pathlib import Path
 
-from build_pack import Telegram, load_env
+from build_pack import AmbiguousUploadError, Telegram, load_env
+from emojikit import media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact, setup_logging
 from PIL import Image
@@ -156,11 +157,93 @@ def _all_items(cat: Catalog, fmt: str):
     return [_row_to_item(r) for r in rows]
 
 
-def live_count(tg: Telegram, name: str) -> int:
-    try:
-        return len(tg.get_sticker_set(name).get("stickers", []))
+def _try_get_set(tg, name: str) -> dict | None:
+    """The live StickerSet, or None if it is missing or state is unknown.
+
+    Prefers the non-retrying probe (getStickerSet via ``_call`` treats
+    STICKERSET_INVALID as a name-release lock and sleeps minutes, which a
+    lookup of a possibly-nonexistent set must never do)."""
+    probe = getattr(tg, "probe_sticker_set", None)
+    if probe is not None:
+        known, sset = probe(name)
+        return sset if known else None
+    try:  # test fakes without the probe
+        return tg.get_sticker_set(name)
     except Exception:  # noqa: BLE001
-        return 0
+        return None
+
+
+def live_count(tg: Telegram, name: str) -> int:
+    sset = _try_get_set(tg, name)
+    return len(sset.get("stickers", [])) if sset else 0
+
+
+def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | None:
+    """Map a LIVE sticker back to its catalog content_key.
+
+    Fast path: its ``file_unique_id`` was recorded (ingest or a previous
+    publish). Slow path: download the sticker and content-hash it. Returns
+    None if it cannot be attributed to any catalog item."""
+    fuid = str(st.get("file_unique_id") or "")
+    if fuid:
+        known = cat.seen_file_unique_id(fuid)
+        if known and cat.get(known) is not None:
+            return known
+    file_id = st.get("file_id")
+    if not file_id or not hasattr(tg, "download_file"):
+        return None
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_dir / f"reconcile_{fuid or 'unknown'}.dl"
+    try:
+        tg.download_file(file_id, tmp)
+        key = media.content_key(tmp, media.telegram_sticker_format(st))
+    except Exception as exc:  # noqa: BLE001 - unattributable, not fatal
+        log.warning("reconcile download failed (%s): %s", fuid or file_id,
+                    redact(str(exc)))
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+    if cat.get(key) is None:
+        return None
+    if fuid:
+        cat.record_file_unique_id(fuid, key)
+    return key
+
+
+def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path) -> int:
+    """Sync one set's records with its LIVE stickers; returns the live count.
+
+    Any live sticker beyond what the state recorded is an upload a previous
+    run (or an ambiguous network failure in this run) applied without
+    recording it. Each one is attributed back to its catalog item by
+    file_unique_id or downloaded content and marked uploaded, so pending
+    computations can NEVER upload it a second time."""
+    sset = _try_get_set(tg, s["name"])
+    if sset is None:
+        return int(s.get("live") or 0)
+    live = sset.get("stickers", [])
+    keys = s.setdefault("keys", [])
+    offset = 1 if s.get("logo") else 0
+    for st in live[offset + len(keys):]:
+        key = _resolve_sticker_key(tg, cat, st, data_dir / "tmp")
+        if key is None:
+            # keys are positional (cid mapping): never attribute past a
+            # sticker we cannot recognize (e.g. added manually by the owner).
+            log.warning("[%s] unrecognized live sticker in %s at position %d; "
+                        "stopping attribution there", s.get("fmt", "?"),
+                        s["name"], offset + len(keys))
+            break
+        item = cat.get(key)
+        if item is not None and not item.uploaded:
+            log.info("[%s] reconciled from live: %s was already uploaded to %s",
+                     s.get("fmt", "?"), key, s["name"])
+        cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None)
+        fuid = str(st.get("file_unique_id") or "")
+        if fuid:
+            cat.record_file_unique_id(fuid, key)
+        keys.append(key)
+    s["live"] = len(live)
+    return len(live)
 
 
 def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
@@ -229,9 +312,14 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     fmt_sets = [s for s in state["sets"] if s["fmt"] == fmt]
     skipped = set(state.setdefault("skipped", []))
 
-    # Active (last, non-full) set: reconcile its capacity from the LIVE count.
+    # Reconcile the ACTIVE (last, non-full) set against its LIVE content
+    # before anything else: uploads applied by a previous run but never
+    # recorded (crash or ambiguous network failure) are attributed back to
+    # their catalog items here, so the pending computation below can never
+    # upload them a second time. This also refreshes the live capacity.
     if fmt_sets:
-        fmt_sets[-1]["live"] = live_count(tg, fmt_sets[-1]["name"])
+        reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+        save_json(_state_path(data_dir, base), state)
     if fmt_sets and fmt_sets[-1]["live"] < per_set:
         cur = fmt_sets[-1]
         set_index, set_name, in_set = cur["index"], cur["name"], cur["live"]
@@ -256,6 +344,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     n = 0
     for key in pending:
         item = cat.get(key)
+        if item is None or item.uploaded:
+            continue  # attributed by an in-run reconcile after an ambiguous failure
         path = Path(item.file_path)
         if not path.is_file() or path.stat().st_size == 0:
             skip(key, "missing/empty media")
@@ -268,7 +358,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             placed = False
             if in_set != 0:
                 try:
-                    tg.add_emoji(user_id, set_name, path, fmt, emojis, item.keywords)
+                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                                 item.keywords, expected_before=in_set)
                     placed = True
                 except RuntimeError as exc:
                     if "STICKERS_TOO_MUCH" not in str(exc):
@@ -279,27 +370,67 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 set_name = f"{base}{FMT_TAG[fmt]}{set_index}_by_{bot}"
                 set_title = f"{title} {FMT_WORD[fmt]} {set_index}"
                 logo_png = logo.static_png() if logo else None
-                if logo_png:
-                    # Brand logo is ALWAYS the first emoji of the set. Mixed-format
-                    # sets are allowed (Bot API 7.2+), so a STATIC logo can lead a
-                    # static, video or animated set alike.
-                    tg.create_emoji_set(user_id, set_name, set_title, logo_png,
-                                        "static", [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
-                else:
-                    tg.create_emoji_set(user_id, set_name, set_title, path, fmt,
-                                        emojis, item.keywords)
+                adopted = False
+                try:
+                    if logo_png:
+                        # Brand logo is ALWAYS the first emoji of the set. Mixed-format
+                        # sets are allowed (Bot API 7.2+), so a STATIC logo can lead a
+                        # static, video or animated set alike.
+                        tg.create_emoji_set(user_id, set_name, set_title, logo_png,
+                                            "static", [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
+                    else:
+                        tg.create_emoji_set(user_id, set_name, set_title, path, fmt,
+                                            emojis, item.keywords)
+                except RuntimeError as exc:
+                    # If an earlier attempt of THIS name actually landed (network
+                    # failure after apply, or a leftover from a crashed run), the
+                    # set exists: adopt it instead of erroring forever on
+                    # "name is already occupied" or re-creating it.
+                    if not (isinstance(exc, AmbiguousUploadError)
+                            or "occupied" in str(exc).lower()):
+                        raise
+                    if _try_get_set(tg, set_name) is None:
+                        raise
+                    adopted = True
                 fmt_sets.append({"fmt": fmt, "index": set_index, "name": set_name,
                                  "title": set_title, "live": 1 if logo_png else 0,
                                  "logo": bool(logo_png), "keys": []})
                 state["sets"].append(fmt_sets[-1])
                 save_json(_state_path(data_dir, base), state)
-                log.info("[%s set %d] created %s%s", fmt, set_index, set_name,
+                log.info("[%s set %d] %s %s%s", fmt, set_index,
+                         "adopted" if adopted else "created", set_name,
                          " (brand logo first)" if logo_png else "")
-                if logo_png:
+                if adopted:
+                    # Attribute whatever the set already contains (the earlier
+                    # create put SOMETHING there), then re-check this item.
+                    in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+                    save_json(_state_path(data_dir, base), state)
+                    if cat.get(key).uploaded:
+                        continue  # this very item was the set's first sticker
+                    if in_set > (1 if logo_png else 0) + len(fmt_sets[-1]["keys"]):
+                        log.warning("[%s] %s has unattributed live stickers; not "
+                                    "adding %s yet (will retry)", fmt, set_name, key)
+                        continue
+                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                                 item.keywords, expected_before=in_set)
+                elif logo_png:
                     # Set now exists with the logo at position 0; protect it from
                     # index rollback, then place this item as the second sticker.
                     in_set = 1
-                    tg.add_emoji(user_id, set_name, path, fmt, emojis, item.keywords)
+                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                                 item.keywords, expected_before=in_set)
+        except AmbiguousUploadError as exc:
+            # The add/create may or may not be live. NEVER blind-retry (that is
+            # exactly how the same emoji lands in a pack twice) -- reconcile the
+            # live set now; if the item did land it gets marked uploaded, and
+            # if not it stays pending for a later run.
+            log.warning("[%s] %s for %s; reconciling live set", fmt, exc, key)
+            if not placed and in_set == 0:
+                set_index -= 1  # the create never registered a set
+            elif fmt_sets:
+                in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+                save_json(_state_path(data_dir, base), state)
+            continue
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
@@ -349,6 +480,12 @@ def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict]) -> None:
             j = i + offset
             if j < len(live):
                 cat.mark_uploaded(key, str(live[j].get("custom_emoji_id")))
+                # Remember the uploaded copy's file_unique_id: a later fetch of
+                # our own published pack (or of ids inside it) is then caught by
+                # the fast pre-dedup and never downloaded again.
+                fuid = str(live[j].get("file_unique_id") or "")
+                if fuid:
+                    cat.record_file_unique_id(fuid, key)
 
 
 def valid_base(base: str) -> str:

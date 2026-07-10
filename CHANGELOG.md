@@ -37,6 +37,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the last one.
 
 ### Fixed
+- **Duplicate-proof uploads, verified end-to-end.** `addStickerToSet` /
+  `createNewStickerSet` are not idempotent, and a network timeout after
+  Telegram had already applied the call was blindly re-sent — the same emoji
+  could land in a pack twice (both in the collector and the coin flows).
+  `Telegram._call` now verifies the live set after a network failure
+  (applied → success, not applied → safe retry, unknown → new
+  `AmbiguousUploadError`), and `build_collection.publish_format` reconciles
+  every applied-but-unrecorded live sticker back to its catalog item (by
+  `file_unique_id`, else by downloaded content) before computing pending
+  items — a crash between the upload and `mark_uploaded` can no longer cause
+  a re-upload on resume. A create that landed ambiguously (or a leftover
+  "occupied" set name) is now adopted instead of wedging every later run.
+  Covered by `tests/test_publish_dedup.py`.
+- **Upload retries no longer send an empty file.** Retried upload calls
+  (flood wait or network retry) used an already-exhausted open file handle,
+  so the retry posted a zero-byte body and the sticker failed; all upload
+  methods now send the file content as bytes.
+- **Own packs are never re-downloaded.** Publishing records each uploaded
+  copy's `file_unique_id` in the catalog's `seen_files`, so a later
+  `fetch_pack.py` / `fetch_emoji_ids.py` of our own published packs is caught
+  by the fast pre-dedup and downloads nothing (previously every copy was
+  re-downloaded and, for static, could even re-enter the catalog after
+  Telegram's re-encode).
 - **Emoji Mapper bot**: id batching now follows the message-length limit again
   (not the smaller `copy_text` button limit), so a 50-id reply is 2 messages as
   before, not 5. Telegram's `copy_text` button is still hard-capped at 256 chars
