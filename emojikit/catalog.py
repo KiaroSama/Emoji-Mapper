@@ -162,6 +162,19 @@ class Catalog:
             (fuid, content_key),
         )
 
+    def record_file_unique_id(self, fuid: str, content_key: str) -> None:
+        """Record a Telegram ``file_unique_id`` for an EXISTING catalog item.
+
+        Used after publishing: the uploaded copy of an item gets its own
+        file_unique_id on Telegram. Recording it means a later fetch of our
+        own pack (or of custom-emoji ids pointing into it) is recognized by
+        the fast pre-dedup and never downloaded again.
+        """
+        if not fuid or self.get(content_key) is None:
+            return
+        self._record_seen(fuid, content_key)
+        self.db.commit()
+
     # ----- ingest -------------------------------------------------------- #
     def _find_near_duplicate(self, fmt: str, phash: int | None) -> str | None:
         """Return an existing content_key whose perceptual hash is within the

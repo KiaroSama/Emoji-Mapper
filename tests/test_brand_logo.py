@@ -48,7 +48,8 @@ class FakeTelegram:
         self.sets[name] = [{"emojis": list(emojis), "fmt": fmt,
                             "custom_emoji_id": f"{name}-0"}]
 
-    def add_emoji(self, user_id, name, path, fmt, emojis, keywords):
+    def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,
+                  expected_before=None):
         i = len(self.sets[name])
         self.sets[name].append({"emojis": list(emojis), "fmt": fmt,
                                 "custom_emoji_id": f"{name}-{i}"})
