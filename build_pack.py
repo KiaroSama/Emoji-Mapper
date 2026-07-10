@@ -80,12 +80,33 @@ def load_keywords(path: Path = KEYWORDS_CSV) -> dict[str, str]:
     return out
 
 
+class AmbiguousUploadError(RuntimeError):
+    """A state-changing call failed at the network level and the live state
+    could not be verified: the change may or may not have been applied.
+    Callers must reconcile against live Telegram state instead of re-sending
+    (re-sending a non-idempotent call such as addStickerToSet would DUPLICATE
+    its effect)."""
+
+
 class Telegram:
     def __init__(self, token: str) -> None:
         self.token = token
         self.s = requests.Session()
 
-    def _call(self, method: str, *, data=None, files=None, retries: int = 5):
+    def _call(self, method: str, *, data=None, files=None, retries: int = 5,
+              applied_check=None):
+        """POST a Bot API method with retries.
+
+        ``applied_check`` makes retries safe for NON-idempotent methods
+        (addStickerToSet / createNewStickerSet). After a network-level failure
+        (the request may have been processed even though the response never
+        arrived) it probes the live state and returns:
+          True  -> the change IS live: report success, never re-send;
+          False -> definitely not applied: safe to re-send;
+          None  -> live state unknown: raise AmbiguousUploadError so the
+                   caller reconciles instead of guessing.
+        Without a check, such methods keep the historical blind-retry behavior.
+        """
         url = f"{API_BASE}/bot{self.token}/{method}"
         for attempt in range(1, retries + 1):
             try:
@@ -110,10 +131,71 @@ class Telegram:
                     continue
                 raise RuntimeError(f"{method} failed: {desc}")
             except requests.RequestException as exc:
+                if applied_check is not None:
+                    time.sleep(2)  # let Telegram settle before probing
+                    applied = applied_check()
+                    if applied is True:
+                        print(f"  {method}: network error but the change is "
+                              f"verified live; not re-sending", flush=True)
+                        return {"verified_applied": True}
+                    if applied is None:
+                        raise AmbiguousUploadError(
+                            f"{method}: network failure and live state "
+                            f"unknown ({exc})") from exc
+                    # applied is False: definitely not applied, safe to re-send.
                 wait = min(3 * attempt, 20)
                 print(f"  net retry {attempt}/{retries} ({method}): {exc} (wait {wait}s)", flush=True)
                 time.sleep(wait)
         raise RuntimeError(f"{method} failed after {retries} attempts")
+
+    def probe_sticker_set(self, name: str) -> tuple[bool, dict | None]:
+        """Single, non-retrying live probe of a sticker set.
+
+        Returns ``(known, set)``: ``(True, dict)`` it exists, ``(True, None)``
+        it definitely does not exist, ``(False, None)`` live state unknown
+        (network/API failure). Unlike getStickerSet via ``_call`` this never
+        raises and never sleeps (``_call`` treats STICKERSET_INVALID as a
+        name-release lock and waits minutes, which a probe must not do).
+        """
+        try:
+            r = self.s.post(f"{API_BASE}/bot{self.token}/getStickerSet",
+                            data={"name": name}, timeout=30)
+            payload = r.json()
+        except (requests.RequestException, ValueError):
+            return False, None
+        if payload.get("ok"):
+            return True, payload["result"]
+        if "stickerset_invalid" in str(payload.get("description", "")).lower():
+            return True, None
+        return False, None
+
+    def _added_check(self, name: str, expected_before: int | None):
+        """applied_check for addStickerToSet: did the set grow by exactly one?"""
+        if expected_before is None:
+            return None
+
+        def check():
+            known, sset = self.probe_sticker_set(name)
+            if not known or sset is None:
+                return None  # unknown / set vanished: reconcile, don't guess
+            n = len(sset.get("stickers", []))
+            if n == expected_before + 1:
+                return True
+            if n == expected_before:
+                return False
+            return None  # count drifted: reconcile, don't guess
+
+        return check
+
+    def _created_check(self, name: str):
+        """applied_check for createNewStickerSet: does the set now exist?"""
+        def check():
+            known, sset = self.probe_sticker_set(name)
+            if not known:
+                return None
+            return sset is not None
+
+        return check
 
     def get_me(self) -> dict:
         return self._call("getMe")
@@ -123,33 +205,41 @@ class Telegram:
             "chat_id": chat_id, "text": text, "disable_web_page_preview": False,
         })
 
+    # NOTE: all upload methods pass the file CONTENT (bytes), not an open
+    # handle: a retried request must re-send the full body, and a file object
+    # is already exhausted after the first attempt (a flood-wait or network
+    # retry would silently send an empty file and fail the sticker).
+
     def upload_sticker(self, user_id: int, path: Path) -> str:
         mime = _MIME.get(path.suffix.lower(), "application/octet-stream")
-        with open(path, "rb") as fh:
-            res = self._call(
-                "uploadStickerFile",
-                data={"user_id": user_id, "sticker_format": "static"},
-                files={"sticker": (path.name, fh, mime)},
-            )
+        res = self._call(
+            "uploadStickerFile",
+            data={"user_id": user_id, "sticker_format": "static"},
+            files={"sticker": (path.name, path.read_bytes(), mime)},
+        )
         return res["file_id"]
 
     def create_set(self, user_id: int, name: str, title: str, png: Path,
                    emoji: str, keywords: str) -> None:
         # Upload the image inline via attach:// (1 request instead of 2).
-        with open(png, "rb") as fh:
-            self._call("createNewStickerSet", data={
-                "user_id": user_id, "name": name, "title": title,
-                "sticker_type": "custom_emoji",
-                "stickers": json.dumps([_sticker_json(emoji, keywords)]),
-            }, files={"file0": (png.name, fh, "image/png")})
+        self._call("createNewStickerSet", data={
+            "user_id": user_id, "name": name, "title": title,
+            "sticker_type": "custom_emoji",
+            "stickers": json.dumps([_sticker_json(emoji, keywords)]),
+        }, files={"file0": (png.name, png.read_bytes(), "image/png")},
+            applied_check=self._created_check(name))
 
     def add_sticker(self, user_id: int, name: str, png: Path,
-                    emoji: str, keywords: str) -> None:
-        with open(png, "rb") as fh:
-            self._call("addStickerToSet", data={
-                "user_id": user_id, "name": name,
-                "sticker": json.dumps(_sticker_json(emoji, keywords)),
-            }, files={"file0": (png.name, fh, "image/png")})
+                    emoji: str, keywords: str, *,
+                    expected_before: int | None = None) -> None:
+        """Add a static sticker. Pass ``expected_before`` (the live sticker
+        count the caller expects BEFORE this add) to make network retries
+        duplicate-proof; without it the historical blind retry is kept."""
+        self._call("addStickerToSet", data={
+            "user_id": user_id, "name": name,
+            "sticker": json.dumps(_sticker_json(emoji, keywords)),
+        }, files={"file0": (png.name, png.read_bytes(), "image/png")},
+            applied_check=self._added_check(name, expected_before))
 
     # ----- multi-format helpers (static / animated / video) -------------- #
     def get_sticker_set(self, name: str) -> dict:
@@ -192,21 +282,25 @@ class Telegram:
     def create_emoji_set(self, user_id: int, name: str, title: str, path: Path,
                          fmt: str, emoji_list: list[str], keywords: list[str]) -> None:
         """Create a custom-emoji set whose first emoji is ``path`` (any format)."""
-        with open(path, "rb") as fh:
-            self._call("createNewStickerSet", data={
-                "user_id": user_id, "name": name, "title": title,
-                "sticker_type": "custom_emoji",
-                "stickers": json.dumps([_input_sticker(fmt, emoji_list, keywords)]),
-            }, files={"file0": (path.name, fh, _mime_for_path(path))})
+        self._call("createNewStickerSet", data={
+            "user_id": user_id, "name": name, "title": title,
+            "sticker_type": "custom_emoji",
+            "stickers": json.dumps([_input_sticker(fmt, emoji_list, keywords)]),
+        }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
+            applied_check=self._created_check(name))
 
     def add_emoji(self, user_id: int, name: str, path: Path, fmt: str,
-                  emoji_list: list[str], keywords: list[str]) -> None:
-        """Add one emoji (any format) to an existing custom-emoji set."""
-        with open(path, "rb") as fh:
-            self._call("addStickerToSet", data={
-                "user_id": user_id, "name": name,
-                "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
-            }, files={"file0": (path.name, fh, _mime_for_path(path))})
+                  emoji_list: list[str], keywords: list[str], *,
+                  expected_before: int | None = None) -> None:
+        """Add one emoji (any format) to an existing custom-emoji set.
+
+        ``expected_before`` (the live sticker count expected BEFORE this add)
+        makes network retries duplicate-proof; see ``add_sticker``."""
+        self._call("addStickerToSet", data={
+            "user_id": user_id, "name": name,
+            "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
+        }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
+            applied_check=self._added_check(name, expected_before))
 
 
 _MIME_BY_FORMAT = {
@@ -357,6 +451,25 @@ def main() -> int:
     sets = state["sets"]
 
     pending = [p for p in sources if p.stem.lower() not in done]
+
+    # Resume safety: reconcile the ACTIVE set's count from LIVE Telegram and
+    # positionally attribute any uploads a previous run applied but never
+    # saved (crash / ambiguous network failure). The pending order is
+    # deterministic, so the first (live - counted) pending images are exactly
+    # those unrecorded uploads -- marking them done prevents re-uploading
+    # them, which would put the same emoji in the pack twice.
+    if sets:
+        known, sset = tg.probe_sticker_set(sets[-1]["name"])
+        if known and sset is not None:
+            live_n = len(sset.get("stickers", []))
+            drift = live_n - sets[-1]["count"]
+            if drift > 0:
+                for p in pending[:drift]:
+                    done.add(p.stem.lower())
+                    print(f"  reconciled from live: {p.stem} already uploaded", flush=True)
+                pending = pending[drift:]
+                sets[-1]["count"] = live_n
+
     print(f"Bot: @{bot_username}  owner_user_id={args.user_id}  "
           f"images={len(sources)}  already_done={len(done)}  pending={len(pending)}", flush=True)
 
@@ -421,7 +534,8 @@ def main() -> int:
                 placed = False
                 if in_set != 0:
                     try:
-                        tg.add_sticker(args.user_id, set_name, path, args.emoji, kw)
+                        tg.add_sticker(args.user_id, set_name, path, args.emoji, kw,
+                                       expected_before=in_set)
                         sets[-1]["count"] += 1
                         placed = True
                     except RuntimeError as exc:
@@ -438,6 +552,28 @@ def main() -> int:
                                  "index": set_index})
                     created.append(set_name)
                     print(f"[set {set_index}] created {set_name}", flush=True)
+            except AmbiguousUploadError as exc:
+                # The call may or may not be live. NEVER re-send (that is how
+                # the same emoji ends up in a pack twice); adopt a create that
+                # verifiably landed, otherwise leave it to the next-run
+                # live-count reconcile above.
+                if not placed and in_set == 0:
+                    known, sset = tg.probe_sticker_set(set_name)
+                    if known and sset is not None and len(sset.get("stickers", [])) == 1:
+                        sets.append({"name": set_name, "title": title, "count": 1,
+                                     "index": set_index})
+                        created.append(set_name)
+                        print(f"[set {set_index}] adopted {set_name} after "
+                              f"ambiguous create", flush=True)
+                    else:
+                        set_index -= 1
+                        print(f"  {ticker}: {exc}; left for next-run reconcile", flush=True)
+                        save_state()
+                        continue
+                else:
+                    print(f"  {ticker}: {exc}; left for next-run reconcile", flush=True)
+                    save_state()
+                    continue
             except RuntimeError as exc:
                 # Non-retryable error for THIS sticker (e.g. bad image): skip it.
                 if not placed and in_set == 0:

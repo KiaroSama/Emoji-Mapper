@@ -124,12 +124,21 @@ The old delete-and-rebuild churn is gone. The catalog (`collection/catalog.db`)
 deduplicates at **ingest** time, not after publishing:
 
 1. **`file_unique_id` pre-check** — a sticker already ingested is never
-   downloaded again.
+   downloaded again. Publishing also records the uploaded copies'
+   `file_unique_id`s, so re-fetching your **own** published packs downloads
+   nothing.
 2. **Normalized content hash** — identical media from different packs collapse
    into one entry (their emoji/keywords/sources merge).
-3. **Perceptual hash (dHash)** — near-identical logos merge within a threshold.
-4. **Idempotent publish** — uploaded items are tracked; resuming reconciles from
-   live Telegram counts, so interruptions can never create duplicates.
+3. **Perceptual hash (dHash)** — near-identical logos merge within a threshold
+   (opt-in via `--phash-threshold`; off by default so distinct look-alikes
+   survive).
+4. **Idempotent publish** — uploaded items are tracked per item; before
+   uploading, the live set is reconciled and any applied-but-unrecorded sticker
+   is attributed back to its catalog item, so interruptions can never create
+   duplicates.
+5. **Verified network retries** — a timeout after Telegram already processed an
+   `addStickerToSet` is detected against the live set and never re-sent, so the
+   same emoji can't land in a pack twice.
 
 ### Commands
 
