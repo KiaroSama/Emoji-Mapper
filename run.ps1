@@ -313,9 +313,9 @@ function Action-ConvertOnly ($py) {
 function Action-CoinRebuild ($py) {
     Write-Title "Crypto-coin pack rebuild (TELEGRAM_BOT_TOKEN)"
     Write-Warn "This uses the crypto-coin bot and the coins/ component."
-    $script = Join-Path $ScriptRoot 'coins\rebuild_packs.py'
-    if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_packs.py not found."; return }
-    $yn = Ask-YesNo "Run coins/rebuild_packs.py now?"
+    $script = Join-Path $ScriptRoot 'coins\rebuild_dedup.py'
+    if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_dedup.py not found."; return }
+    $yn = Ask-YesNo "Run coins/rebuild_dedup.py now? (duplicate-proof: build + map + links)"
     if ($yn -eq 'back' -or -not $yn) { return }   # back or no -> return to menu
     Invoke-Py $py @($script) | Out-Null
 }
