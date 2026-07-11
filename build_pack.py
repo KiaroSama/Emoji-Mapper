@@ -57,7 +57,6 @@ _MIME = {".png": "image/png", ".webp": "image/webp"}
 API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 DEFAULT_EMOJI = "\U0001FA99"  # ߞ coin
 PER_SET = 400
-SET_CREATE_BATCH = 1          # stickers passed to createNewStickerSet (1..50)
 
 
 def load_env() -> None:
@@ -352,21 +351,10 @@ def _input_sticker(fmt: str, emoji_list: list[str], keywords: list[str]) -> dict
 
 
 def _sticker_json(emoji: str, keywords: str) -> dict:
-    # Telegram limits the total keyword length per sticker (~64 chars). Keep the
-    # ticker (first) and add as many remaining keywords as fit the budget.
-    parts = [k.strip() for k in keywords.split(",") if k.strip()]
-    kw: list[str] = []
-    total = 0
-    for k in parts:
-        k = k[:48]
-        if kw and total + len(k) + 1 > 60:
-            break
-        kw.append(k)
-        total += len(k) + 1
-        if len(kw) >= 20:
-            break
+    """Static InputSticker from a comma-separated keyword string."""
     return {"sticker": "attach://file0", "format": "static",
-            "emoji_list": [emoji], "keywords": kw}
+            "emoji_list": [emoji],
+            "keywords": _trim_keywords(keywords.split(","))}
 
 
 def main() -> int:
