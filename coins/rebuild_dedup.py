@@ -12,7 +12,7 @@ Design:
     distinct image hash, in a fixed order. This is the canonical upload list, so
     resume is deterministic and can never create a duplicate.
   - Progress is reconciled from LIVE Telegram counts (sum of stickers actually
-    present), exactly like rebuild_packs.py -> duplicate-proof across restarts.
+    present), so interrupting and resuming can never create a duplicate.
   - New pack base name 'gvce' (the old 'gvcryptoemoji' names are being deleted;
     a fresh base avoids name-reuse conflicts). Titles: '@GodVerify Crypto Emoji N'.
 
