@@ -203,7 +203,7 @@ the shared engine at the project root (`build_pack.py`) and the coin bot
 - `coins/fetch_logos.py` — download coin logos from CoinGecko + write `coins/keywords.csv`
 - `coins/fetch_paprika.py` / `coins/fetch_cmc.py` — fill remaining coins from CoinPaprika / CoinMarketCap
 - `coins/build_keywords.py` — (re)build `coins/keywords.csv` from logos on disk
-- `coins/rebuild_packs.py` / `coins/rebuild_dedup.py` — duplicate-proof full rebuild + inventory fill
+- `coins/rebuild_dedup.py` — duplicate-proof full rebuild + inventory fill
 - `coins/check_all_packs.py` — audit every pack for blank/duplicate stickers
 - `coins/run_convert.ps1` / `coins/run_rebuild_loop.ps1` — watchdog drivers for long runs
 
@@ -242,7 +242,7 @@ Emoji Mapper/                  # the whole project
   coins/                       # ONE component: the crypto-coin emoji tool
     fetch_*.py                 # coin logo fetchers (CoinGecko/Paprika/CMC)
     build_keywords.py
-    rebuild_packs.py rebuild_dedup.py   # duplicate-proof rebuild + inventory fill
+    rebuild_dedup.py           # duplicate-proof rebuild + inventory fill
     check_all_packs.py         # pack integrity audit
     run_convert.ps1 run_rebuild_loop.ps1
     keywords.csv               # coin ticker -> keywords (data)

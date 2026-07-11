@@ -588,7 +588,6 @@ collapsed quotes (emoji+ID, and IDs-only) using tap-to-copy `<code>` (see §8/§
 | `coins\fetch_cmc.py` | Fill remaining coins from CoinMarketCap (needs `CMC_API_KEY`). |
 | `coins\build_keywords.py` | (Re)build `keywords.csv` from logos on disk. |
 | `coins\rebuild_dedup.py [map\|links\|build]` | Duplicate-proof rebuild; `map` re-derives the id map; `links` resends links; `build` uploads only. |
-| `coins\rebuild_packs.py [map]` | Older non-dedup rebuild (kept for reference). |
 | `coins\remap_ids.py --emoji-dir DIR [--apply] [--max-distance N]` | Rebuild `ticker_to_id.json` by image content (drift-proof). |
 | `coins\verify_logos.py --emoji-dir DIR [--fix --only a,b]` | Review logos vs official; fix only listed tickers. |
 | `coins\check_all_packs.py` | Audit all packs for blank/duplicate stickers. |
