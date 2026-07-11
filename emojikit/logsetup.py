@@ -14,11 +14,8 @@ Features
   including exception tracebacks. Nothing token-shaped reaches a file.
 * **Rich file format** — UTC time, level, logger, ``module:line`` and the run id;
   a concise (optionally colored) console format.
-* **Optional JSONL sidecar** — machine-readable ``.jsonl`` next to the log.
 * **Uncaught-exception capture** — ``sys.excepthook`` and the threading hook log
   full tracebacks as CRITICAL.
-* **Timing + call helpers** — :func:`log_duration` context manager and
-  :func:`logcall` decorator.
 * **Run summary** — at interpreter exit, a summary line reports duration and the
   number of warnings/errors/criticals plus the log path.
 * **Quiet third parties** — ``urllib3``/``requests``/``PIL`` are turned down so
@@ -37,10 +34,7 @@ import secrets
 import sys
 import threading
 import time
-import traceback
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from functools import wraps
 from pathlib import Path
 
 # Project root = parent of this package directory.
@@ -93,14 +87,6 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "script"
 
 
-def get_run_id() -> str | None:
-    return _RUN["id"]
-
-
-def get_log_path() -> Path | None:
-    return _RUN["log_path"]
-
-
 # --------------------------------------------------------------------------- #
 # Formatters / handlers
 # --------------------------------------------------------------------------- #
@@ -125,30 +111,6 @@ class _HumanFormatter(logging.Formatter):
         return s
 
 
-class _JsonFormatter(logging.Formatter):
-    """Redacted JSON-lines formatter for the optional sidecar."""
-
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    def format(self, record: logging.LogRecord) -> str:
-        import json
-        obj = {
-            "ts": self.formatTime(record),
-            "run_id": _RUN["id"],
-            "level": record.levelname,
-            "logger": record.name,
-            "module": record.module,
-            "line": record.lineno,
-            "func": record.funcName,
-            "msg": redact(record.getMessage()),
-        }
-        if record.exc_info:
-            obj["exc"] = redact("".join(traceback.format_exception(*record.exc_info)))
-        return json.dumps(obj, ensure_ascii=False)
-
-
 class _CounterHandler(logging.Handler):
     """Counts WARNING/ERROR/CRITICAL records for the end-of-run summary."""
 
@@ -161,14 +123,11 @@ class _CounterHandler(logging.Handler):
 # Setup
 # --------------------------------------------------------------------------- #
 def setup_logging(script_name: str, *, console_level: int = logging.INFO,
-                  file_level: int = logging.DEBUG, json_sidecar: bool = False,
+                  file_level: int = logging.DEBUG,
                   color: bool | None = None) -> logging.Logger:
     """Configure root logging (console + fresh UTC file). Idempotent per process.
 
-    Parameters
-    ----------
-    json_sidecar : also write a machine-readable ``.jsonl`` next to the log.
-    color : force ANSI colors on/off for the console (default: auto by TTY).
+    ``color`` forces ANSI colors on/off for the console (default: auto by TTY).
     """
     logger = logging.getLogger()
     if getattr(logger, "_emojikit_configured", False):
@@ -209,11 +168,6 @@ def setup_logging(script_name: str, *, console_level: int = logging.INFO,
         fileh.setFormatter(file_fmt)
         logger.addHandler(fileh)
         _RUN["log_path"] = path
-        if json_sidecar:
-            jh = logging.FileHandler(path.with_suffix(".jsonl"), encoding="utf-8")
-            jh.setLevel(file_level)
-            jh.setFormatter(_JsonFormatter())
-            logger.addHandler(jh)
     except OSError as exc:
         logger.warning("File logging unavailable (%s); console only.", exc)
 
@@ -265,43 +219,3 @@ def _install_summary(logger: logging.Logger) -> None:
                     _RUN["id"], dur, c["WARNING"], c["ERROR"], c["CRITICAL"])
         logging.shutdown()
     atexit.register(summary)
-
-
-# --------------------------------------------------------------------------- #
-# Helpers for scripts
-# --------------------------------------------------------------------------- #
-@contextmanager
-def log_duration(label: str, *, logger: logging.Logger | None = None,
-                 level: int = logging.INFO):
-    """Log ``label`` start/finish with elapsed seconds (and failure on error)."""
-    lg = logger or logging.getLogger("emojikit.timing")
-    lg.log(level, "%s: started", label)
-    t0 = time.time()
-    try:
-        yield
-    except Exception:
-        lg.error("%s: FAILED after %.2fs", label, time.time() - t0)
-        raise
-    else:
-        lg.log(level, "%s: done in %.2fs", label, time.time() - t0)
-
-
-def logcall(fn=None, *, level: int = logging.DEBUG):
-    """Decorator: log a function's entry, exit, duration and exceptions."""
-    def deco(func):
-        lg = logging.getLogger(func.__module__)
-
-        @wraps(func)
-        def wrapper(*a, **k):
-            lg.log(level, "-> %s()", func.__qualname__)
-            t0 = time.time()
-            try:
-                r = func(*a, **k)
-                lg.log(level, "<- %s() in %.3fs", func.__qualname__, time.time() - t0)
-                return r
-            except Exception as exc:  # noqa: BLE001
-                lg.exception("xx %s() raised %s after %.3fs",
-                             func.__qualname__, type(exc).__name__, time.time() - t0)
-                raise
-        return wrapper
-    return deco(fn) if fn else deco
