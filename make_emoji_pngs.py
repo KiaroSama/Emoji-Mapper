@@ -104,7 +104,7 @@ def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:
     alpha = img.split()[3]
     if alpha.getbbox() is None:
         return True
-    visible = sum(1 for a in alpha.getdata() if a > 10)
+    visible = sum(1 for a in alpha.get_flattened_data() if a > 10)
     return visible <= min_visible
 
 

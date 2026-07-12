@@ -62,7 +62,7 @@ def analyze(data: bytes) -> tuple[str, bool]:
     bbox = alpha.getbbox()
     if bbox is None:
         return h, True
-    visible = sum(1 for p in alpha.getdata() if p > VISIBLE_ALPHA)
+    visible = sum(1 for p in alpha.get_flattened_data() if p > VISIBLE_ALPHA)
     return h, visible <= BLANK_MAX_PX
 
 

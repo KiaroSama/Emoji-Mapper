@@ -101,7 +101,7 @@ def _static_is_blank(path: Path, min_visible: int = 8) -> bool:
     alpha = im.split()[3]
     if alpha.getbbox() is None:
         return True
-    return sum(1 for v in alpha.getdata() if v > 10) <= min_visible
+    return sum(1 for v in alpha.get_flattened_data() if v > 10) <= min_visible
 
 
 def _state_path(data_dir: Path, base: str) -> Path:
@@ -271,7 +271,7 @@ def _media_ok(path: Path, fmt: str) -> bool:
             a = im.convert("RGBA").split()[3]
             if a.getbbox() is None:
                 return False
-            return sum(1 for v in a.getdata() if v > 10) > 8
+            return sum(1 for v in a.get_flattened_data() if v > 10) > 8
         except Exception:  # noqa: BLE001 - probing failed; let the upload decide
             return True
     return True  # animated (.tgs) validity is enforced at creation time

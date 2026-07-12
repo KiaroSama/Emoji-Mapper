@@ -77,7 +77,7 @@ def is_blank(path: Path, min_visible: int = 8) -> bool:
         return True
     if alpha.getbbox() is None:
         return True
-    return sum(1 for v in alpha.getdata() if v > 10) <= min_visible
+    return sum(1 for v in alpha.get_flattened_data() if v > 10) <= min_visible
 
 
 def load_keywords() -> dict[str, str]:
