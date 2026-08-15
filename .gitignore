@@ -125,3 +125,6 @@ launch_test.txt
 !/.env.sample
 !/.env.template
 !/.env.dist
+
+# Local assistant tooling state (never project content).
+/skills-lock.json
