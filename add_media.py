@@ -29,6 +29,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from build_pack import ingest_exit_code
 from emojikit import media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
 from emojikit.logsetup import setup_logging
@@ -158,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
           flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
-    return 0
+    return ingest_exit_code(counts["new"] + counts["dedup"], counts["failed"])
 
 
 if __name__ == "__main__":

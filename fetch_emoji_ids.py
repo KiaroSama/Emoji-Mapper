@@ -30,7 +30,7 @@ import os
 import re
 from pathlib import Path
 
-from build_pack import Telegram, load_env
+from build_pack import Telegram, ingest_exit_code, load_env
 from emojikit import media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
 from emojikit.logsetup import redact, setup_logging
@@ -251,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
           f"failed={counts['failed']} missing={counts['missing']}", flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
-    return 0
+    # A requested id Telegram could not resolve is a real miss, not a success.
+    return ingest_exit_code(counts["new"] + counts["dedup"],
+                            counts["failed"] + counts["missing"])
 
 
 if __name__ == "__main__":

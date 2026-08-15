@@ -250,6 +250,65 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         self.assertEqual(seen, ["b", "c"])
 
 
+class ExitCodes(unittest.TestCase):
+    """A command that achieved nothing must not report success.
+
+    add_media/fetch_pack/fetch_emoji_ids all returned 0 unconditionally, so a
+    run where every input failed looked identical to a clean one -- launchers
+    and retry logic could not tell them apart.
+    """
+
+    def test_clean_run_is_zero(self):
+        self.assertEqual(bp.ingest_exit_code(succeeded=5, failed=0), bp.EXIT_OK)
+
+    def test_partial_run_is_retryable(self):
+        self.assertEqual(bp.ingest_exit_code(succeeded=3, failed=2), bp.EXIT_PARTIAL)
+
+    def test_total_failure_is_terminal(self):
+        self.assertEqual(bp.ingest_exit_code(succeeded=0, failed=4), bp.EXIT_FAILED)
+
+    def test_empty_run_is_not_a_failure(self):
+        self.assertEqual(bp.ingest_exit_code(succeeded=0, failed=0), bp.EXIT_OK)
+
+    def test_codes_are_distinct(self):
+        codes = {bp.EXIT_OK, bp.EXIT_USAGE, bp.EXIT_PARTIAL, bp.EXIT_FAILED}
+        self.assertEqual(len(codes), 4)
+
+
+class AddMediaExitCode(unittest.TestCase):
+    """End-to-end: the real entry point, through real image decoding."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "in"
+        self.src.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self):
+        import add_media
+        argv = ["add_media.py", "--in", str(self.src),
+                "--data-dir", str(self.dir / "data")]
+        with mock.patch.object(sys, "argv", argv):
+            return add_media.main()
+
+    def test_all_inputs_unusable_exits_failed(self):
+        (self.src / "broken.png").write_text("not a png", encoding="utf-8")
+        (self.src / "also.webp").write_text("garbage", encoding="utf-8")
+        self.assertEqual(self._run(), bp.EXIT_FAILED)
+
+    def test_some_inputs_usable_exits_partial(self):
+        (self.src / "broken.png").write_text("not a png", encoding="utf-8")
+        _png(self.src / "good.png", (0, 180, 90, 255))
+        self.assertEqual(self._run(), bp.EXIT_PARTIAL)
+
+    def test_all_inputs_usable_exits_ok(self):
+        _png(self.src / "good.png", (0, 180, 90, 255))
+        self.assertEqual(self._run(), bp.EXIT_OK)
+
+
 class SharedLogoGuard(unittest.TestCase):
     """The detector that would have caught the 129-ticker collision."""
 
