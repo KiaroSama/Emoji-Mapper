@@ -7,7 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Real credentials were committed as test fixtures.** The live
+  `GENERAL_BOT_TOKEN` and `CMC_API_KEY` were hard-coded in
+  `tests/test_logsetup.py`. They are replaced with synthetic values and
+  `TestNoCommittedSecrets` now fails if any secret-length `.env` value appears
+  in a git-tracked file. **Both credentials must be rotated** — they remain in
+  git history.
+- **Bot token could reach stdout/stderr.** The token is embedded in every
+  request URL, and a `requests` exception carries that URL; exception text is
+  now redacted before printing, and the uncaught-exception hook renders its own
+  redacted traceback instead of delegating to the default hook, which printed
+  it raw.
+- **Curate panel: stored script injection.** Catalog labels (which come from
+  downloaded packs) were embedded in an inline `<script>`; a label containing
+  `</script>` escaped the data block. Item data is now parsed from an inert
+  JSON block and written with `textContent`.
+- **Curate panel: unauthenticated mutation.** Any page in the browser could
+  POST to the localhost panel and change inclusion or publish order. Mutations
+  now require a per-run token, a loopback `Host`/`Origin`, `application/json`,
+  and a bounded body; `/api/order` must be an exact permutation.
+
+### Fixed
+- **Duplicate uploads on resume.** Resume position was derived from the live
+  sticker count, but a skipped plan entry (missing, blank or failed image)
+  consumes a plan position without producing a sticker — so each skip shifted
+  the cursor back by one and the next run re-uploaded already-published
+  entries. `build_pack.py` and `coins/rebuild_dedup.py` now resume from a
+  recorded cursor plus a write-ahead in-flight record, and refuse to continue
+  when live state and the record disagree instead of guessing.
+- **Corrupted canonical coin map.** The same drift was written into
+  `coins/ticker_to_id.json`: 4202 of 5962 entries had been rewritten and one
+  emoji id was claimed by 129 unrelated tickers. Restored from the
+  pre-corruption backup; the positional mapping fallback that produced it is
+  removed, and a duplicate-upload / oversized-shared-group guard now runs
+  before any map write.
+- **False coin aliases.** `enhance_map.py` treated a single trailing `c` as a
+  chain suffix, mapping `ghc`→`gh` and `zbc`→`zb`. The heuristic is removed;
+  the two genuine cases (`avaxc`, `bttc`) are named aliases.
+- **Animated emoji canvas.** Telegram requires a 512×512 Lottie canvas for
+  `.tgs`; the converter rewrote every animation to 100×100 by scaling the
+  top-level layer transform, which clips artwork, and the validator never
+  checked. The canvas is now preserved, other sizes are rejected, and
+  validation covers gzip packaging, frame rate, and duration.
+- **State files could be truncated.** Progress is now written atomically, and
+  unreadable state aborts instead of silently restarting from zero (which
+  re-uploaded everything).
+- **Six-minute stall on a missing set.** `STICKERSET_INVALID` was retried for
+  every method; it is now scoped to set creation with an overall deadline, and
+  no sleep follows the final attempt.
+- **Per-set default exceeded Telegram's cap** (400 vs the documented 200), and
+  `--per-set 0` reached a division by zero. Bounds are validated.
+- `TELEGRAM_API_BASE` set only in `.env` was ignored, because the base was read
+  at import time — before `load_env()` runs.
+- Rebuild deleted the old packs before checking the plan was usable.
+
+### Changed
+- **SVG rasterizing moved from svglib+reportlab to `resvg-py`.** svglib 2.x
+  requires `reportlab>=4.4.3`, which the pinned `reportlab<4` blocked; that pin
+  also parked the project on reportlab 3.6.13 (April 2023), whose `>=3.6` floor
+  can resolve to a CVE-2023-33733-vulnerable build, and reportlab 5.0 removed
+  the bundled renderPM backend outright. resvg ships a prebuilt self-contained
+  wheel, needs no system cairo, and renders straight to RGBA — deleting the
+  two-pass white/black render and the numpy alpha reconstruction, and fixing
+  the long-standing blank-gradient bug. Nothing pins Python 3.11 any more; CI
+  now runs 3.11 and 3.12.
+- **Curate panel is substantially faster** on a 199-item catalog: first paint
+  589 ms → 45 ms, and toggling a selection 13.6 ms → 1.2 ms. Selection and
+  drag no longer rebuild the whole grid, videos no longer autoplay at rest,
+  off-screen cards skip layout and paint, and the blocking webfont import is
+  gone.
+- Documentation: removed four logging helpers the guide documented but that
+  never existed (its example import failed), and corrected the SVG/dependency
+  claims.
+
 ### Added
+- Project logos in `assets/`, shown in the README and the curate panel.
 - **Curate panel — drag to reorder.** Emoji can now be dragged to set the
   **publish order**. The order is persisted to a new `items.position` column
   (`Catalog.set_order`, POST `/api/order`) and drives both the panel and
