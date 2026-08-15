@@ -8,9 +8,16 @@ Run from the repository root:
 
 **`-t .` is required.** Without it the tests directory becomes the top-level,
 modules load as `test_x` instead of `tests.test_x`, and `tests/__init__.py`
-never runs — which silently disables the guard described below.
-`SuiteIsHermetic.test_the_guard_is_installed_at_all` fails loudly if the suite
-is started without it.
+never runs — which disables the guard described below.
+`SuiteIsHermetic.test_the_guard_was_installed_before_the_test_modules` fails
+loudly if the suite is started without it, and names the correct command.
+
+That canary reads a flag sampled **while the test modules were being imported**,
+not the live state of the patch. The earlier form asked whether `socket.connect`
+was patched at assert time — but one test does `import tests`, so the package
+installed itself mid-run and the canary passed while the real `.env` values had
+already been read into the environment. A check something later can satisfy
+cannot fail at the moment it is needed.
 
 Tests use Python's stdlib `unittest` (no extra dependencies). Video tests are
 skipped automatically when `ffmpeg`/`ffprobe` are not on `PATH`.
@@ -21,6 +28,12 @@ skipped automatically when `ffmpeg`/`ffprobe` are not on `PATH`.
 token/API-key-shaped environment variable, points `TELEGRAM_API_BASE` at the
 discard port, stops `build_pack.load_env()` from reading `.env`, and refuses
 outbound sockets to anything but loopback (`NetworkAccessDenied`).
+
+The `.env` half no longer depends on that file running at all:
+`build_pack.load_env()` refuses to read `.env` whenever a test runner owns the
+process, decided from the entry point's own `__spec__`. The package-level scrub
+could only remove credential-*shaped* names and only protected what was imported
+after it, so anything else in `.env` stayed visible for a whole run.
 
 This exists because a test meant only to check a CLI usage error once reached
 live Telegram and replaced a sticker in a published pack. Inject a fake session
