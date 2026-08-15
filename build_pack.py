@@ -45,6 +45,22 @@ import requests
 ROOT = Path(__file__).resolve().parent
 
 
+# Exit codes shared by every CLI entry point, so a launcher or CI job can tell
+# "done", "bad input", "retry me" and "stop" apart. Returning 0 after total
+# failure made retry logic and menu actions treat a dead run as a success.
+EXIT_OK = 0
+EXIT_USAGE = 2       # invalid arguments or configuration
+EXIT_PARTIAL = 3     # some items succeeded, some failed -- retryable
+EXIT_FAILED = 4      # nothing succeeded, or an integrity stop
+
+
+def ingest_exit_code(succeeded: int, failed: int) -> int:
+    """Exit code for a batch that processed ``succeeded`` and ``failed`` items."""
+    if not failed:
+        return EXIT_OK
+    return EXIT_PARTIAL if succeeded else EXIT_FAILED
+
+
 def write_json_atomic(path: Path, data) -> None:
     """Write JSON so an interrupted run can never leave a truncated file.
 
