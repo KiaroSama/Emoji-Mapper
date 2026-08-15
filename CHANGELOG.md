@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — fifth audit pass (7 findings)
+
+One defect, in seven places: **a count is not an identity.** "Exactly one new
+`file_unique_id` appeared", "the live count is `expected + 1`", and "a set of
+that name exists" are all satisfied when our own request fails while one sticker
+arrives from somewhere else — and the run then bound that stranger's
+`custom_emoji_id` and `file_unique_id` to our catalog key, permanently.
+
+- **A new sticker is now proven ours by its content.** `Telegram._added_check`,
+  the restart reconciliation in `build_pack` (both in-flight ADD and in-flight
+  CREATE), `build_collection._confirm_new_upload` and the coin rebuild's CREATE
+  recovery each download the candidate and compare content keys with the source
+  image. When the comparison cannot be made the answer is UNKNOWN — never a
+  silent yes, and never a blind re-send either. The old count fallback is gone;
+  it reinstated the same bug through the error path.
+- **The rebuild's resume state must describe one walk.** `cursor=0` beside
+  `order=["aaa"]` was structurally valid and meant the build was about to upload
+  `aaa` a second time. `order` must now be a subsequence of the plan prefix the
+  cursor claims to have walked, uploads must have a recorded set to live in, and
+  an in-flight marker must be the plan entry the cursor was moved past to run it.
+  That check also moved **ahead of the delete phase**: a state that live Telegram
+  disagrees with never gets as far as destroying the existing packs.
+- **One lock around the whole canonical map.** Atomic replacement prevents a
+  truncated `ticker_to_id.json`; it does nothing about a lost update, where two
+  tools each read the map, apply their own edit, and the second write discards
+  the first. `alias_map`, `enhance_map` and `remap_ids --apply` took no lock at
+  all, and the providers read the map *before* waiting for theirs. All of them
+  now hold one shared lock across the complete read-modify-write with the read
+  inside it, and exit `FAILED` on a busy lock instead of writing a merged-from-
+  stale map. Lock order is documented where the locks are defined: pack-family
+  lock first, canonical map lock second.
+- **A `verify_logos` replacement intent is bound to its target.** The intent file
+  has one fixed path while `--map`/`--state` are chosen per run, so a crash under
+  one map could be reconciled into another — repointing a ticker inside a file
+  that never held the old id. The intent now records its resolved targets and
+  refuses to recover against a different one.
+
 ### Fixed — second audit pass (34 findings)
 - **The bot rejected everyone, including its owner.** `main()` built the numeric
   allowlist as `allowed`, then reassigned that same name to the Telegram

@@ -1026,6 +1026,9 @@ runtime CDN), so the panel works offline.
 | Animated card shows ▶ but never plays | Bad/non-standard `.tgs`, or JS blocked. | Other cards still work; that single TGS just won't render. |
 | Wrong logo for a coin | Source logo is a different token with the same ticker. | `coins\verify_logos.py --fix --only <ticker>` with the correct image. |
 | Scrambled ticker→id map | Position-based mapping (legacy). | Rebuild with `coins\remap_ids.py ... --apply`. |
+| `canonical_map.lock is held by pid …` | Another coin tool is mid-write of `ticker_to_id.json`. Every writer holds one lock across the whole read-modify-write, so neither can lose the other's ids. | Let the other tool finish, then re-run. The map was **not** modified. |
+| `the pending replacement … was recorded against map A, not this run's map B` | A `verify_logos --fix` was interrupted; its intent is bound to the exact `--map`/`--state` it started against. | Re-run with the **original** `--map`/`--state` so it can be resolved, or review the pack and delete `coins\verify_logos_intent.json` deliberately. |
+| `… exists but its first sticker is not <x>.png; refusing to adopt` | A set of that name exists but this run did not create it (leftover family, or someone else's). Existence is not identity. | Rename the family, or delete the stale set, then re-run. |
 | CI red on push | A check failed (install/compile/import/test/dry-run). | `gh run view <id> --log-failed`; fix; the matrix is Python 3.11 only. |
 
 ---
