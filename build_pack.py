@@ -375,6 +375,12 @@ def links_chat_id(owner_id: int) -> str | int:
 
 
 def load_env() -> None:
+    # The test package sets this. Several modules call load_env() at IMPORT
+    # time, which would put the real credentials straight back into os.environ
+    # after the suite scrubbed them -- reopening the hole that let a test reach
+    # live Telegram.
+    if os.environ.get("EMOJI_MAPPER_NO_DOTENV") == "1":
+        return
     env = ROOT / ".env"
     if env.is_file():
         for line in env.read_text(encoding="utf-8").splitlines():
