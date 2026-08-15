@@ -38,12 +38,17 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from build_pack import safe_int_env
+
 # Project root = parent of this package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 # Each execution writes its own file, so without pruning the directory grows
 # without bound. Override with EMOJI_LOG_RETENTION_DAYS (0 disables pruning).
-LOG_RETENTION_DAYS = int(os.environ.get("EMOJI_LOG_RETENTION_DAYS", "30") or 30)
+# Parsed defensively: a bare int() here turned one stray character in .env into
+# an ImportError, killing logging (and the script) before startup could report
+# anything. Negative values are clamped so "-1" cannot mean "prune everything".
+LOG_RETENTION_DAYS = safe_int_env("EMOJI_LOG_RETENTION_DAYS", 30, minimum=0)
 
 # Env vars whose *values* are secrets and must be masked wherever they appear.
 SECRET_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "GENERAL_BOT_TOKEN", "CMC_API_KEY",

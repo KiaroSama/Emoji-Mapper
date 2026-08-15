@@ -42,8 +42,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import (AmbiguousUploadError, Telegram, links_chat_id,
-                        load_env, write_json_atomic)
+from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
+                        LiveStateUnknown, SetState, Telegram, exclusive_lock,
+                        links_chat_id, load_env, write_json_atomic)
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -52,6 +53,7 @@ OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
 OLD_STATE = ROOT / "rebuild_state.json"        # the current 30 packs, to delete
 PLAN = ROOT / "rebuild_dedup_plan.json"
 STATE = ROOT / "rebuild_dedup_state.json"
+LOCK = STATE.with_name(STATE.name + ".lock")   # same convention as build_pack.py
 GROUPS_REPORT = ROOT / "shared_logo_groups.json"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 KEYWORDS_CSV = ROOT / "keywords.csv"
@@ -125,20 +127,53 @@ def build_plan() -> list[dict]:
         groups.append({"rep": rep, "tickers": ordered, "kw": kw, "hash": h})
     groups.sort(key=lambda g: g["rep"])  # deterministic, frozen order
 
-    PLAN.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
+    # Atomic: an interrupted write must not leave a truncated plan behind, because
+    # the plan is the frozen upload order and load_plan() would read the surviving
+    # prefix as the whole plan.
+    write_json_atomic(PLAN, groups)
     # Documentation: only the shared-logo groups (>1 coin per image).
     shared = {g["rep"]: g["tickers"] for g in groups if len(g["tickers"]) > 1}
-    GROUPS_REPORT.write_text(json.dumps(shared, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_json_atomic(GROUPS_REPORT, shared)
     dup_extra = sum(len(g["tickers"]) - 1 for g in groups)
     print(f"plan: {len(groups)} unique images | shared-logo groups: {len(shared)} "
           f"| coins collapsing onto a shared image: {dup_extra}", flush=True)
     return groups
 
 
+def _plan_is_sound(plan) -> bool:
+    """Every entry must carry the fields build()/map_and_fill() index it by."""
+    return bool(plan) and isinstance(plan, list) and all(
+        isinstance(g, dict) and isinstance(g.get("rep"), str) and g["rep"]
+        and isinstance(g.get("tickers"), list) and g["tickers"]
+        and isinstance(g.get("kw"), str)
+        for g in plan)
+
+
 def load_plan() -> list[dict]:
-    if PLAN.is_file():
-        return json.loads(PLAN.read_text(encoding="utf-8"))
-    return build_plan()
+    """Load the frozen plan; build it only when there is none.
+
+    A truncated or malformed plan must fail closed. It is the canonical upload
+    order, so silently regenerating it -- or accepting the surviving prefix of a
+    half-written one -- renumbers entries that are already live and re-uploads
+    them as duplicates.
+    """
+    if not PLAN.is_file():
+        return build_plan()
+    try:
+        plan = json.loads(PLAN.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        plan, why = None, str(exc)
+    else:
+        why = "" if _plan_is_sound(plan) else "entries are missing rep/tickers/kw"
+    if why:
+        raise SystemExit(
+            f"ERROR: the rebuild plan {PLAN.name} is unusable ({why}).\n"
+            f"       Refusing to rebuild it: the plan is the frozen upload "
+            f"order, and a fresh one would not line up with what is already "
+            f"live.\n"
+            f"       Restore it (a .tmp sibling may hold the last write), or "
+            f"delete the packs and the state file to rebuild cleanly.")
+    return plan
 
 
 def load_state() -> dict:
@@ -162,11 +197,40 @@ def save_state(s: dict) -> None:
     write_json_atomic(STATE, s)
 
 
-def live_count(tg: Telegram, name: str) -> int:
-    try:
-        return len(tg._call("getStickerSet", data={"name": name}).get("stickers", []))
-    except Exception:  # noqa: BLE001
-        return 0
+def _stop_retryable(reason: str) -> None:
+    """End the run before the next mutation, with the "resume me" exit code.
+
+    Anything unresolved -- an ambiguous upload, a live state that could not be
+    read -- must stop the process here. Continuing would overwrite the in-flight
+    marker that is the only record of what is unresolved, and would mutate packs
+    whose real contents are unknown.
+    """
+    print(f"STOP: {reason}", flush=True)
+    raise SystemExit(EXIT_PARTIAL)
+
+
+def _mark_in_flight(state: dict, key: str, operation: str, set_name: str,
+                    set_index: int, expected_before: int) -> None:
+    """Record WHICH mutation is about to run, before running it.
+
+    Structured, not a bare ticker: a restart has to reconcile an ambiguous
+    create whose set never reached state["sets"], and that needs the set name
+    and index as well as the plan key.
+    """
+    state["in_flight"] = {
+        "key": key, "operation": operation, "set_name": set_name,
+        "set_index": set_index, "expected_before": expected_before,
+        "phase": "upload",
+    }
+    save_state(state)
+
+
+def _as_marker(marker) -> dict:
+    """Accept the bare-'rep' in-flight marker written by older runs."""
+    if isinstance(marker, str):
+        return {"key": marker, "operation": "add", "set_name": "",
+                "set_index": 0, "expected_before": None, "phase": "upload"}
+    return marker
 
 
 def msg(tg: Telegram, text: str) -> None:
@@ -193,20 +257,90 @@ def notify(tg: Telegram, state: dict, name: str, title: str) -> None:
         print(f"  notify failed {name}: {exc}", flush=True)
 
 
-def delete_old_packs(tg: Telegram) -> None:
+def delete_old_packs(tg: Telegram, state: dict) -> bool:
+    """Delete the old packs; True only when every one is confirmed gone.
+
+    A printed delete failure used to be enough for build() to record the phase
+    as complete, so a pack that survived was never retried and the rebuild
+    published a second family beside it. Deletion status is now per pack and
+    persisted, and only a live probe closes one out.
+    """
     if not OLD_STATE.is_file():
-        return
+        return True
     old = json.loads(OLD_STATE.read_text(encoding="utf-8"))
-    for s in old.get("sets", []):
+    names = [s["name"] for s in old.get("sets", [])]
+    gone = set(state.setdefault("deleted_old_packs", []))
+    for name in names:
+        if name in gone:
+            continue
         try:
-            tg._call("deleteStickerSet", data={"name": s["name"]})
-            print(f"  deleted old pack {s['name']}", flush=True)
-            time.sleep(0.5)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  (old pack {s['name']}: {exc})", flush=True)
+            tg._call("deleteStickerSet", data={"name": name})
+        except Exception as exc:  # noqa: BLE001 - the probe below is the verdict
+            print(f"  (old pack {name}: {exc})", flush=True)
+        # Only live state proves a delete: the call can fail after applying it,
+        # and can succeed for a set that was already gone.
+        set_state, _ = tg.probe_set_state(name)
+        if set_state is SetState.UNKNOWN:
+            _stop_retryable(f"cannot confirm old pack {name} was deleted")
+        if set_state is SetState.MISSING:
+            gone.add(name)
+            state["deleted_old_packs"] = sorted(gone)
+            save_state(state)
+            print(f"  deleted old pack {name}", flush=True)
+        else:
+            print(f"  old pack {name} still exists after delete", flush=True)
+        time.sleep(0.5)
+    return set(names) <= gone
+
+
+def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
+    """Resolve the recorded in-flight mutation against live state.
+
+    Returns the live sticker total, which grows if an ambiguous create is found
+    to have landed. That case is invisible to the per-set count in build():
+    the set was never recorded in state["sets"], so its stickers are counted
+    nowhere and the entry would be blamed as "did not land" and re-uploaded.
+    """
+    marker = _as_marker(state["in_flight"])
+    known_sets = {s["name"] for s in state["sets"]}
+    if marker.get("operation") == "create" and marker.get("set_name") not in known_sets:
+        set_state, sset = tg.probe_set_state(marker["set_name"])
+        if set_state is SetState.UNKNOWN:
+            _stop_retryable(f"live state of {marker['set_name']} is unknown; "
+                            f"cannot tell whether the in-flight create landed")
+        if set_state is SetState.EXISTS:
+            live = len(sset.get("stickers", []))
+            index = marker.get("set_index") or len(state["sets"]) + 1
+            state["sets"].append({"index": index, "name": marker["set_name"],
+                                  "title": f"{TITLE} {index}", "live": live})
+            cum += live
+            print(f"  resume: adopted {marker['set_name']}, created before the "
+                  f"interruption", flush=True)
+
+    if cum == len(state["order"]) + 1:
+        state["order"].append(marker["key"])
+        print(f"  resume: {marker['key']} did land before the interruption",
+              flush=True)
+    else:
+        print(f"  resume: {marker['key']} did not land; retrying", flush=True)
+        state["cursor"] = max(0, state["cursor"] - 1)
+    state["in_flight"] = None
+    save_state(state)
+    return cum
 
 
 def build(tg: Telegram, bot: str) -> None:
+    """Upload the plan, one exclusive run at a time.
+
+    Two concurrent runs sharing this state read the same cursor, upload the
+    same plan entries and duplicate them in the pack -- and a pack has no
+    unique constraint that would catch it afterwards.
+    """
+    with exclusive_lock(LOCK):
+        _build(tg, bot)
+
+
+def _build(tg: Telegram, bot: str) -> None:
     plan = load_plan()
     state = load_state()
     state.setdefault("order", [])  # actual successful-upload order (drift-proof map)
@@ -226,7 +360,9 @@ def build(tg: Telegram, bot: str) -> None:
     if not state.get("deleted_old"):
         print(f"deleting ALL old packs and rebuilding {len(plan)} images...",
               flush=True)
-        delete_old_packs(tg)
+        if not delete_old_packs(tg, state):
+            _stop_retryable("some old packs still exist; refusing to build a "
+                            "second family beside them")
         state["deleted_old"] = True
         save_state(state)
 
@@ -239,23 +375,19 @@ def build(tg: Telegram, bot: str) -> None:
     state.setdefault("cursor", 0)
     state.setdefault("in_flight", None)
     cum = 0
-    for s in state["sets"]:
-        s["live"] = live_count(tg, s["name"])
-        cum += s["live"]
+    try:
+        for s in state["sets"]:
+            s["live"] = tg.live_count_strict(s["name"])
+            cum += s["live"]
+    except LiveStateUnknown as exc:
+        # A live read that failed is not "the set is empty": treating it as 0
+        # moves the cursor backwards and re-sends an upload that already landed.
+        _stop_retryable(f"{exc}; refusing to resume from a guessed live count")
 
-    # An upload recorded as in flight may or may not have landed; the live count
+    # An upload recorded as in flight may or may not have landed; live state
     # answers that exactly, for that one entry.
     if state["in_flight"]:
-        if cum == len(state["order"]) + 1:
-            state["order"].append(state["in_flight"])
-            print(f"  resume: {state['in_flight']} did land before the "
-                  f"interruption", flush=True)
-        else:
-            print(f"  resume: {state['in_flight']} did not land; retrying",
-                  flush=True)
-            state["cursor"] = max(0, state["cursor"] - 1)
-        state["in_flight"] = None
-        save_state(state)
+        cum = _reconcile_in_flight(tg, state, cum)
 
     if cum != len(state["order"]):
         raise SystemExit(
@@ -289,14 +421,14 @@ def build(tg: Telegram, bot: str) -> None:
             state["cursor"] = plan_i + 1
             continue
         kw = g["kw"]
-        # Write the intent before the request, so an interruption anywhere in
-        # the upload leaves an exact record of which entry was in flight.
         state["cursor"] = plan_i + 1
-        state["in_flight"] = g["rep"]
-        save_state(state)
         try:
             placed = False
             if in_set != 0:
+                # Write the intent before the request, so an interruption
+                # anywhere in the upload leaves an exact record of which
+                # mutation was in flight.
+                _mark_in_flight(state, g["rep"], "add", set_name, set_index, in_set)
                 try:
                     tg.add_sticker(USER_ID, set_name, png, EMOJI_CHAR, kw,
                                    expected_before=in_set)
@@ -309,32 +441,19 @@ def build(tg: Telegram, bot: str) -> None:
                 set_index += 1
                 set_name = f"{BASE}{set_index}_by_{bot}"
                 title = f"{TITLE} {set_index}"
+                _mark_in_flight(state, g["rep"], "create", set_name, set_index, 0)
                 tg.create_set(USER_ID, set_name, title, png, EMOJI_CHAR, kw)
                 state["sets"].append({"index": set_index, "name": set_name,
                                       "title": title})
                 save_state(state)
                 print(f"[set {set_index}] created {set_name}", flush=True)
         except AmbiguousUploadError as exc:
-            # Never blind-retry a maybe-applied call (that duplicates emoji in
-            # the pack). Adopt a create that verifiably landed; anything else
-            # is healed by the live-count reconcile on the next run.
-            if not placed and in_set == 0:
-                known, sset = tg.probe_sticker_set(set_name)
-                if known and sset is not None and len(sset.get("stickers", [])) == 1:
-                    state["sets"].append({"index": set_index, "name": set_name,
-                                          "title": title})
-                    save_state(state)
-                    print(f"[set {set_index}] adopted {set_name} after ambiguous "
-                          f"create", flush=True)
-                else:
-                    set_index -= 1
-                    print(f"  {g['rep']}: {exc}; reconciled on next run", flush=True)
-                    save_state(state)   # keep in_flight: next run resolves it
-                    continue
-            else:
-                print(f"  {g['rep']}: {exc}; reconciled on next run", flush=True)
-                save_state(state)       # keep in_flight: next run resolves it
-                continue
+            # The call may or may not have been applied. Never blind-retry it
+            # (that duplicates the emoji) and never run another mutation: the
+            # next one would overwrite the marker that identifies this one.
+            # The marker is already on disk; the reconcile at the start of the
+            # next run resolves it against live state.
+            _stop_retryable(f"{g['rep']}: {exc}; resolved on the next run")
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
@@ -514,17 +633,22 @@ def fill_inventory(ticker_to_id: dict[str, str]) -> None:
 
 
 def send_final_links(tg: Telegram) -> None:
-    state = load_state()
-    sets = sorted(state["sets"], key=lambda x: x["index"])
-    if not sets:
-        print("no sets to send.", flush=True)
-        return
-    lines = [f"{s['index']}. https://t.me/addemoji/{s['name']}" for s in sets]
-    text = "\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:\n" + "\n".join(lines)
-    msg(tg, text)
-    state["final_sent"] = True
-    save_state(state)
-    print(f"sent final combined message with {len(sets)} links (preview off).", flush=True)
+    # Same lock as build(): this is a read-modify-write of the rebuild state, so
+    # running it beside a build would save a stale snapshot back over the
+    # upload order recorded in the meantime.
+    with exclusive_lock(LOCK):
+        state = load_state()
+        sets = sorted(state["sets"], key=lambda x: x["index"])
+        if not sets:
+            print("no sets to send.", flush=True)
+            return
+        lines = [f"{s['index']}. https://t.me/addemoji/{s['name']}" for s in sets]
+        text = "\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:\n" + "\n".join(lines)
+        msg(tg, text)
+        state["final_sent"] = True
+        save_state(state)
+        print(f"sent final combined message with {len(sets)} links (preview off).",
+              flush=True)
 
 
 if __name__ == "__main__":
@@ -557,16 +681,16 @@ if __name__ == "__main__":
             build(_tg, _bot)
         except Exception:  # noqa: BLE001 - log full cause, let the loop resume
             traceback.print_exc()
-        state = load_state()
-        live = sum(live_count(_tg, s["name"]) for s in state["sets"])
-        cursor = state.get("cursor", 0)
-        print(f"buildonly checkpoint: plan position {cursor}/{len(plan)}, "
-              f"{live} live stickers", flush=True)
+        # A stop inside build() raises SystemExit with its own retryable code and
+        # skips this checkpoint on purpose.
+        cursor = load_state().get("cursor", 0)
+        print(f"buildonly checkpoint: plan position {cursor}/{len(plan)}",
+              flush=True)
         # Done means "walked the whole plan", NOT "live count reached the plan
         # length". Entries that are permanently skipped (missing/blank image)
         # never become stickers, so a live-count gate can never be satisfied and
         # the restart loop keeps re-running forever, adding duplicates.
-        raise SystemExit(0 if cursor >= len(plan) else 3)
+        raise SystemExit(EXIT_OK if cursor >= len(plan) else EXIT_PARTIAL)
     else:
         build(_tg, _bot)
         map_and_fill(_tg)

@@ -10,7 +10,12 @@ Strategy:
 Robust by design: resumes (skips logos already on disk), sanitizes tickers into
 Windows-safe filenames, and never lets one bad coin abort the whole run.
 
-Pure standard library (urllib) — no third-party dependencies required.
+Downloads go to a temp file and are only published to their final name once they
+decode as a real, non-empty image, so an error page or a truncated body can
+never be cached as a logo.
+
+Networking is pure standard library (urllib); Pillow is used only to validate
+downloaded images.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 SVG_DIR = ROOT / "logos" / "svg"
@@ -58,6 +65,39 @@ def _get(url: str, *, binary: bool = False, retries: int = 6):
             print(f"  retry {attempt}/{retries}: {exc} (wait {wait:.0f}s)", flush=True)
             time.sleep(wait)
     raise RuntimeError(f"GET failed after {retries} attempts: {url} ({last})")
+
+
+def _valid_image(path: Path) -> bool:
+    """True if ``path`` decodes completely and has visible pixels.
+
+    ``exists()`` proves nothing here: a rate-limit HTML body, a redirect page or
+    a run killed mid-write all leave a file that the resume check would treat as
+    a finished logo forever.
+    """
+    try:
+        with Image.open(path) as im:
+            im.verify()                     # full decode: catches truncation
+        with Image.open(path) as im:        # verify() leaves the file unusable
+            return im.convert("RGBA").getchannel("A").getbbox() is not None
+    except Exception:  # noqa: BLE001 - anything unreadable is simply not a logo
+        return False
+
+
+def fetch_logo(url: str, dest: Path) -> bool:
+    """Download ``url`` and publish it as ``dest`` only if it is a real image.
+
+    Written to a sibling temp file and renamed (atomic on NTFS and POSIX), so a
+    partial or non-image body never appears under the final name.
+    """
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        tmp.write_bytes(_get(url, binary=True, retries=3))
+        if not _valid_image(tmp):
+            return False
+        tmp.replace(dest)
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def existing_svg_tickers() -> set[str]:
@@ -100,6 +140,12 @@ def main() -> int:
                                     "file": f"logos/svg/{ticker}.svg"}
                     continue
                 dest = PNG_DIR / f"{ticker}.png"
+                if dest.exists() and not _valid_image(dest):
+                    # Cached garbage from an earlier run: drop it so the resume
+                    # check below cannot keep serving it as this coin's logo.
+                    print(f"  {ticker}: cached file is not an image; re-downloading",
+                          flush=True)
+                    dest.unlink(missing_ok=True)
                 if dest.exists():  # resume: keep what we already downloaded
                     rows[ticker] = {"ticker": ticker, "name": name, "format": "png",
                                     "file": f"logos/png/{ticker}.png"}
@@ -107,8 +153,9 @@ def main() -> int:
                     continue
                 if not img or not str(img).startswith("http"):
                     continue
-                blob = _get(img, binary=True, retries=3)
-                dest.write_bytes(blob)
+                if not fetch_logo(img, dest):
+                    print(f"  skip {ticker}: download was not a usable image", flush=True)
+                    continue
                 rows[ticker] = {"ticker": ticker, "name": name, "format": "png",
                                 "file": f"logos/png/{ticker}.png"}
                 png_new += 1

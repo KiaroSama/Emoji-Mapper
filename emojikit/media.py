@@ -20,7 +20,9 @@ This module provides:
 * validation helpers backed by ffprobe.
 
 Raster/vector image decoding uses Pillow (+ resvg for SVG). Video and
-animated-video work requires ``ffmpeg``/``ffprobe`` on PATH.
+animated-video work requires ``ffmpeg``/``ffprobe`` on PATH; every such child
+runs under a wall-clock limit (``EMOJI_FFMPEG_TIMEOUT``, default 300 s) so one
+corrupt file cannot stall an ingest or publish run.
 """
 
 from __future__ import annotations
@@ -30,7 +32,9 @@ import hashlib
 import io
 import json
 import logging
+import os
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +55,18 @@ TGS_MAX_BYTES = 64 * 1024        # animated emoji hard cap
 WEBM_MAX_BYTES = 256 * 1024      # video emoji hard cap
 WEBM_MAX_SECONDS = 3.0
 WEBM_FPS = 30
+
+# Every ffmpeg/ffprobe child runs under a wall limit. A truncated container or a
+# wedged decoder makes the tool wait on its input forever, and an unbounded child
+# stalls the whole ingest/publish run with no output and no error.
+FFMPEG_TIMEOUT = 300             # seconds per child; a 3 s emoji encode is <1 s
+_KILL_GRACE = 5                  # seconds allowed to kill and reap a stuck child
+
+# Shared "is there anything to see?" rule, also used by the publisher: alpha at
+# or below VISIBLE_ALPHA is invisible in practice, and a handful of stray pixels
+# is noise, not artwork.
+VISIBLE_ALPHA = 10
+BLANK_MAX_VISIBLE = 8
 
 # Container/codec magic bytes used for fast format sniffing.
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -84,9 +100,66 @@ def ffprobe_path() -> str:
     return exe
 
 
-def _run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess:
-    log.debug("exec: %s", " ".join(cmd))
-    return subprocess.run(cmd, check=True, capture_output=capture)
+def ff_timeout() -> float:
+    """Per-child ffmpeg/ffprobe wall limit; override with EMOJI_FFMPEG_TIMEOUT."""
+    # Lazy import: emojikit stays importable without the CLI layer (and this is
+    # called once per child process, so the sys.modules lookup is free).
+    from build_pack import safe_int_env
+    return safe_int_env("EMOJI_FFMPEG_TIMEOUT", FFMPEG_TIMEOUT, minimum=1)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a stuck child *and its descendants*, then reap it.
+
+    Killing only the direct child can leave a grandchild holding the output
+    pipes open, so the follow-up read blocks for exactly as long as the hang we
+    are trying to bound.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, check=False, timeout=_KILL_GRACE)
+        else:
+            # start_new_session below makes the child its own group leader, so
+            # this kills its whole tree without touching our own process group.
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass                              # already gone, or not ours to signal
+    try:
+        proc.kill()
+        proc.communicate(timeout=_KILL_GRACE)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _run(cmd: list[str], *, capture: bool = False,
+         timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run one ffmpeg/ffprobe child under a finite wall limit.
+
+    A hang is reported as :class:`MediaError` like any other conversion failure,
+    so a single corrupt file is skipped instead of freezing the run. Non-zero
+    exits keep raising ``CalledProcessError`` as before.
+    """
+    limit = ff_timeout() if timeout is None else timeout
+    log.debug("exec (timeout %ss): %s", limit, " ".join(cmd))
+    pipe = subprocess.PIPE if capture else None
+    # POSIX: own session so _kill_tree can signal the group. Windows uses
+    # taskkill /T instead, which needs no creation flag (and setting one would
+    # stop Ctrl+C from reaching the child).
+    extra = {} if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(cmd, stdout=pipe, stderr=pipe, **extra)
+    try:
+        out, err = proc.communicate(timeout=limit)
+    except subprocess.TimeoutExpired as exc:
+        _kill_tree(proc)
+        raise MediaError(
+            f"{Path(cmd[0]).name} timed out after {limit}s") from exc
+    except BaseException:                 # Ctrl+C must not orphan the child
+        _kill_tree(proc)
+        raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 # --------------------------------------------------------------------------- #
@@ -193,10 +266,30 @@ def _load_image(src: Path) -> Image.Image:
     return Image.open(src).convert("RGBA")
 
 
+def is_blank_image(img: Image.Image) -> bool:
+    """True if an image has no meaningful visible pixels.
+
+    Shared rule so every producer and the publisher agree on what "blank" means.
+    """
+    alpha = img.convert("RGBA").split()[3]
+    if alpha.getbbox() is None:
+        return True
+    visible = sum(1 for v in alpha.get_flattened_data() if v > VISIBLE_ALPHA)
+    return visible <= BLANK_MAX_VISIBLE
+
+
 def to_static_png(src: Path, out: Path) -> Path:
-    """Convert any supported image into a 100x100 transparent PNG."""
+    """Convert any supported image into a 100x100 transparent PNG.
+
+    Raises MediaError if the result would be blank: a transparent emoji is
+    invisible forever, and ingesting one pollutes the catalog with an item that
+    can never be used but still occupies one of the 200 slots in a pack.
+    """
     out.parent.mkdir(parents=True, exist_ok=True)
-    fit_100(_load_image(src)).save(out, format="PNG", optimize=True)
+    img = fit_100(_load_image(src))
+    if is_blank_image(img):
+        raise MediaError(f"{src.name}: image is blank (no visible pixels)")
+    img.save(out, format="PNG", optimize=True)
     return out
 
 
@@ -437,7 +530,7 @@ def _video_content_digest(path: Path) -> str:
     ff = ffmpeg_path()
     cmd = [ff, "-v", "error", "-t", str(WEBM_MAX_SECONDS), "-i", str(path),
            "-an", "-vf", "fps=10,scale=64:64,format=rgba", "-f", "rawvideo", "-"]
-    res = subprocess.run(cmd, check=True, capture_output=True)
+    res = _run(cmd, capture=True)
     if res.stdout:
         return hashlib.sha256(res.stdout).hexdigest()
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -476,7 +569,7 @@ def _first_video_frame(path: Path) -> Image.Image:
     ff = ffmpeg_path()
     cmd = [ff, "-v", "error", "-i", str(path), "-frames:v", "1",
            "-vf", "scale=64:64,format=rgba", "-f", "rawvideo", "-"]
-    res = subprocess.run(cmd, check=True, capture_output=True)
+    res = _run(cmd, capture=True)
     return Image.frombytes("RGBA", (64, 64), res.stdout[: 64 * 64 * 4])
 
 

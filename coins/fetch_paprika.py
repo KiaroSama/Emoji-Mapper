@@ -30,22 +30,26 @@ import os as _bootstrap_os, sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
-import csv
 import io
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
 from pathlib import Path
 
 from PIL import Image
 
-from build_pack import Telegram, load_env
+from build_pack import (AmbiguousUploadError, LockBusy, Telegram, exclusive_lock,
+                        ingest_exit_code, load_env, load_keywords, safe_int_env,
+                        write_json_atomic)
+from emojikit.media import _dhash, hamming
+# The pipeline's single definition of "this image is effectively empty".
+from make_emoji_pngs import _is_blank
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -54,6 +58,17 @@ OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
 STATE = ROOT / "rebuild_state.json"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 CACHE = ROOT / "paprika_matches.json"  # resumable {ticker: {id, conf, name}}
+KEYWORDS_CSV = ROOT / "keywords.csv"
+# One lock for the whole coin pack family. fetch_paprika, fetch_cmc and
+# verify_logos --fix all mutate the SAME live sets, so they must exclude each
+# other by a fixed name -- not by whichever state file each happens to read.
+PACK_LOCK = ROOT / "coin_pack.lock"
+SET_BASE = "gvcryptoemoji"
+SET_TITLE = "@GodVerify Crypto Emoji"
+# A live sticker within this perceptual distance of the PNG we uploaded IS that
+# upload: Telegram re-encodes PNG to WEBP, so identical content still differs by
+# a bit or two.
+SAME_IMAGE_MAX = 8
 
 SEARCH = "https://api.coinpaprika.com/v1/search?c=currencies&limit=10&q="
 COIN = "https://api.coinpaprika.com/v1/coins/"
@@ -65,7 +80,7 @@ PER_SET = 200
 # imported by fetch_cmc.py (which reuses USER_ID).
 load_env()
 # Pack owner numeric Telegram id (from .env / env; never hardcode a personal id).
-USER_ID = int(os.environ.get("PACK_OWNER_USER_ID", "0"))
+USER_ID = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
 SIZE = 100
 SLEEP = 2.5  # seconds between metered /search calls
 
@@ -117,17 +132,23 @@ def http_bytes(url: str, retries: int = 3):
 
 
 def to_emoji_png(data: bytes, dest: Path) -> bool:
-    """Crop to alpha bbox, fit into a transparent 100x100 RGBA canvas."""
+    """Crop to alpha bbox, fit into a transparent 100x100 RGBA canvas.
+
+    Returns False -- writing nothing -- for a blank provider image. A fully
+    transparent placeholder used to pass straight through here (no alpha bbox
+    means nothing was cropped) and be uploaded as an empty emoji. The source is
+    judged by the same visible-alpha rule as the rest of the pipeline, BEFORE
+    the fit: scaling a handful of stray pixels up to 100px would hide the very
+    emptiness we are testing for.
+    """
     try:
         im = Image.open(io.BytesIO(data)).convert("RGBA")
     except Exception:  # noqa: BLE001
         return False
-    bb = im.split()[3].getbbox()
-    if bb:
-        im = im.crop(bb)
-    w, h = im.size
-    if not w or not h:
+    if _is_blank(im):
         return False
+    im = im.crop(im.split()[3].getbbox())  # _is_blank guarantees a bbox
+    w, h = im.size
     sc = min(SIZE / w, SIZE / h)
     nw, nh = max(1, round(w * sc)), max(1, round(h * sc))
     im = im.resize((nw, nh), Image.LANCZOS)
@@ -181,15 +202,6 @@ def search_match(name: str, ticker: str):
     return None, conf
 
 
-def load_keywords() -> dict[str, str]:
-    kw: dict[str, str] = {}
-    kp = ROOT / "keywords.csv"
-    if kp.is_file():
-        for row in csv.DictReader(open(kp, encoding="utf-8")):
-            kw[row["ticker"].lower()] = row.get("keywords") or row["ticker"]
-    return kw
-
-
 def parse_missing(have: set[str]) -> list[tuple[str, str]]:
     text = INV.read_text(encoding="utf-8")
     blocks = re.findall(r"##\s*(\S+)\s*[\u2014-]+\s*(.+?)\n\s*ticker:\s*(\S+)", text)
@@ -228,7 +240,130 @@ def load_cache() -> dict[str, dict]:
 
 
 def save_cache(cache: dict[str, dict]) -> None:
-    CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=1), "utf-8")
+    write_json_atomic(CACHE, cache)
+
+
+# --------------------------------------------------------------------------- #
+# Publishing (shared by fetch_paprika and fetch_cmc)
+# --------------------------------------------------------------------------- #
+def live_stickers(tg: Telegram, name: str) -> list[dict]:
+    """Live stickers of a set. Raises rather than guessing an empty set."""
+    return tg.get_sticker_set(name).get("stickers", [])
+
+
+def match_by_image(tg: Telegram, candidates: list[dict], png: Path) -> str:
+    """custom_emoji_id of the candidate whose image is the one we uploaded.
+
+    Only reached when a sticker we did not add appeared while we were adding:
+    both are then equally "new", so identity has to come from the content.
+    """
+    want = _dhash(Image.open(png).convert("RGBA"))
+    hits: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for st in candidates:
+            dest = Path(tmp) / str(st.get("file_unique_id") or st["file_id"])
+            try:
+                tg.download_file(str(st["file_id"]), dest)
+                got = _dhash(Image.open(dest).convert("RGBA"))
+            except Exception as exc:  # noqa: BLE001 - an unreadable candidate
+                print(f"  compare failed for {st.get('custom_emoji_id')}: {exc}",
+                      flush=True)
+                continue
+            if hamming(want, got) <= SAME_IMAGE_MAX:
+                hits.append(str(st["custom_emoji_id"]))
+    if len(hits) != 1:
+        raise RuntimeError(f"{len(candidates)} stickers appeared and {len(hits)} "
+                           f"match {png.name}; refusing to guess an emoji id")
+    return hits[0]
+
+
+def added_emoji_id(tg: Telegram, name: str, before_ids: set[str], png: Path) -> str:
+    """The custom_emoji_id of the sticker WE just put into ``name``.
+
+    Never positional. Reading the ids off the tail (``cids[-len(added):]``)
+    attributes an emoji id to the wrong ticker as soon as one add fails, a
+    sticker is edited by hand, or another run appends in between.
+    """
+    new = [s for s in live_stickers(tg, name)
+           if str(s.get("custom_emoji_id")) not in before_ids]
+    if not new:
+        raise RuntimeError(f"no new sticker is live in {name}")
+    if len(new) == 1:
+        return str(new[0]["custom_emoji_id"])
+    return match_by_image(tg, new, png)
+
+
+def _mutate(call, *args, **kw) -> None:
+    """Run a set-growing Telegram call, tolerating an ambiguous outcome.
+
+    An ambiguous failure must never be re-sent (that is what duplicates an
+    emoji); the caller's identity check reads live state and decides.
+    """
+    try:
+        call(*args, **kw)
+    except AmbiguousUploadError as exc:
+        print(f"  {exc}; deciding from live state", flush=True)
+
+
+def publish_logos(tg: Telegram, tickers: list[str],
+                  ticker_to_id: dict[str, str]) -> tuple[int, int]:
+    """Add one emoji per ticker to the coin pack family; returns (added, failed).
+
+    Both fetchers used to carry their own copy of this loop, and both had
+    drifted into the same two defects: a blind retry of the non-idempotent add
+    (a timeout after Telegram applied it duplicates the emoji) and reading the
+    new emoji ids off the tail of the set.
+    """
+    keywords = load_keywords(KEYWORDS_CSV)
+    added = failed = 0
+    try:
+        with exclusive_lock(PACK_LOCK):
+            bot = tg.get_me()["username"]
+            state = json.loads(STATE.read_text("utf-8"))
+            last = sorted(state["sets"], key=lambda x: x["index"])[-1]
+            set_index, set_name = last["index"], last["name"]
+            for tk in tickers:
+                png = EMOJI / f"{tk}.png"
+                kw = keywords.get(tk, tk)
+                try:
+                    live = live_stickers(tg, set_name)
+                    if len(live) >= PER_SET:
+                        index = set_index + 1
+                        name = f"{SET_BASE}{index}_by_{bot}"
+                        title = f"{SET_TITLE} {index}"
+                        _mutate(tg.create_set, USER_ID, name, title, png,
+                                EMOJI_CHAR, kw)
+                        cid = added_emoji_id(tg, name, set(), png)
+                        # Record the set only once it is verifiably live: a
+                        # phantom entry here sends every later add to a set that
+                        # does not exist.
+                        set_index, set_name = index, name
+                        state["sets"].append({"index": index, "name": name,
+                                              "title": title})
+                        write_json_atomic(STATE, state)
+                    else:
+                        before_ids = {str(s.get("custom_emoji_id")) for s in live}
+                        # expected_before makes a retry after a network failure
+                        # verify the add instead of repeating it.
+                        _mutate(tg.add_sticker, USER_ID, set_name, png, EMOJI_CHAR,
+                                kw, expected_before=len(live))
+                        cid = added_emoji_id(tg, set_name, before_ids, png)
+                except Exception as exc:  # noqa: BLE001 - one coin must not stop the batch
+                    # ponytail: an id we cannot verify is simply not recorded, so
+                    # the next run re-adds that coin. Bounded by the lock and by
+                    # these batches being a handful of coins; give the fetchers a
+                    # build_pack-style in-flight ledger if they ever run unattended.
+                    print(f"  add failed {tk}: {exc}", flush=True)
+                    failed += 1
+                    continue
+                ticker_to_id[tk] = cid
+                write_json_atomic(TICKER_IDS, ticker_to_id)
+                added += 1
+                time.sleep(0.3)
+    except LockBusy as exc:
+        print(f"ERROR: {exc}", flush=True)
+        return 0, len(tickers)
+    return added, failed
 
 
 def resolve_phase(missing, cache) -> bool:
@@ -283,6 +418,7 @@ def main() -> int:
     # If the deterministic CDN path is missing (404), fall back to the /coins/{id}
     # API 'logo' field (metered, but quota is available when this path is reached).
     fetched: list[str] = []
+    failed = 0
     for tk, cid in confident:
         data = http_bytes(LOGO_CDN.format(id=cid))
         if not data:
@@ -293,65 +429,26 @@ def main() -> int:
                 data = http_bytes(url)
         if not data:
             print(f"  download failed: {tk} ({cid})", flush=True)
+            failed += 1
             continue
         if to_emoji_png(data, EMOJI / f"{tk}.png"):
             fetched.append(tk)
             print(f"  got logo: {tk} <- {cid}", flush=True)
+        else:
+            print(f"  unusable logo: {tk} ({cid})", flush=True)
+            failed += 1
 
     print(f"fetched logos: {len(fetched)}", flush=True)
     if not fetched:
         print("nothing to add.", flush=True)
-        return 0
+        return ingest_exit_code(0, failed)
 
-    # Add to the last not-full set, overflow to new sets (mirrors fetch_missing.py).
+    # Add to the last not-full set, overflow to new sets.
     tg = Telegram(os.environ["TELEGRAM_BOT_TOKEN"])
-    bot = tg.get_me()["username"]
-    state = json.loads(STATE.read_text("utf-8"))
-    sets = sorted(state["sets"], key=lambda x: x["index"])
-    last = sets[-1]
-    set_index = last["index"]
-    set_name = last["name"]
-    in_set = len(tg._call("getStickerSet", data={"name": set_name}).get("stickers", []))
-    keywords = load_keywords()
-
-    added_order: list[tuple[str, str]] = []
-    for tk in fetched:
-        png = EMOJI / f"{tk}.png"
-        kw = keywords.get(tk, tk)
-        try:
-            if in_set >= PER_SET:
-                set_index += 1
-                set_name = f"gvcryptoemoji{set_index}_by_{bot}"
-                tg.create_set(USER_ID, set_name, f"@GodVerify Crypto Emoji {set_index}",
-                              png, EMOJI_CHAR, kw)
-                state["sets"].append({"index": set_index, "name": set_name,
-                                      "title": f"@GodVerify Crypto Emoji {set_index}"})
-                STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
-                in_set = 1
-            else:
-                tg.add_sticker(USER_ID, set_name, png, EMOJI_CHAR, kw)
-                in_set += 1
-            added_order.append((set_name, tk))
-            time.sleep(0.3)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  add failed {tk}: {exc}", flush=True)
-
-    # Capture new custom_emoji_ids: appended stickers are at the tail, in add order.
-    per_set_added: dict[str, list[str]] = defaultdict(list)
-    for sn, tk in added_order:
-        per_set_added[sn].append(tk)
-    for sn, tks in per_set_added.items():
-        cids = [str(s.get("custom_emoji_id", ""))
-                for s in tg._call("getStickerSet", data={"name": sn}).get("stickers", [])]
-        tail = cids[-len(tks):]
-        for tk, cid in zip(tks, tail):
-            ticker_to_id[tk] = cid
-
-    TICKER_IDS.write_text(json.dumps(ticker_to_id, ensure_ascii=False, indent=1), "utf-8")
+    added, add_failed = publish_logos(tg, fetched, ticker_to_id)
     filled, total = refill_inventory(ticker_to_id)
-    print(f"added {len(added_order)} stickers; inventory filled: {filled}/{total}",
-          flush=True)
-    return 0
+    print(f"added {added} stickers; inventory filled: {filled}/{total}", flush=True)
+    return ingest_exit_code(added, failed + add_failed)
 
 
 if __name__ == "__main__":

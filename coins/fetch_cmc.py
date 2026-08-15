@@ -31,14 +31,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
-from pathlib import Path
 
-from build_pack import Telegram, load_env
-# Reuse proven helpers from the CoinPaprika fetcher.
-from fetch_paprika import (
-    EMOJI, STATE, TICKER_IDS, EMOJI_CHAR, PER_SET, USER_ID,
-    base_ticker, classify, http_bytes, load_keywords, parse_missing,
+from build_pack import Telegram, ingest_exit_code, load_env
+# Reuse proven helpers from the CoinPaprika fetcher -- including the ONE
+# verified publisher, so this fetcher cannot drift back into its own copy.
+# Package-qualified so the module also imports as ``coins.fetch_cmc``.
+from coins.fetch_paprika import (
+    EMOJI, TICKER_IDS,
+    base_ticker, classify, http_bytes, parse_missing, publish_logos,
     refill_inventory, to_emoji_png,
 )
 
@@ -121,74 +121,39 @@ def main() -> int:
 
     # Resolve logos + build emoji PNGs.
     fetched: list[str] = []
+    failed = 0
     for tk, cid in resolved:
         url = get_logo_url(headers, cid)
         if not url:
             print(f"  no logo: {tk} (cmc:{cid})", flush=True)
+            failed += 1
             continue
         data = http_bytes(url)
         if not data:  # 128x128 may not exist; fall back to default 64x64
             data = http_bytes(url.replace("/128x128/", "/64x64/"))
         if not data:
             print(f"  download failed: {tk}", flush=True)
+            failed += 1
             continue
         if to_emoji_png(data, EMOJI / f"{tk}.png"):
             fetched.append(tk)
             print(f"  got logo: {tk} <- cmc:{cid}", flush=True)
+        else:
+            print(f"  unusable logo: {tk} (cmc:{cid})", flush=True)
+            failed += 1
 
     print(f"fetched logos: {len(fetched)}", flush=True)
     if not fetched:
         print("nothing to add.", flush=True)
-        return 0
+        return ingest_exit_code(0, failed)
 
-    # Add to the last not-full set, overflow to new sets (mirrors fetch_paprika.py).
+    # Same verified publisher as fetch_paprika: locked, duplicate-proof adds and
+    # emoji ids read by identity.
     tg = Telegram(os.environ["TELEGRAM_BOT_TOKEN"])
-    bot = tg.get_me()["username"]
-    state = json.loads(STATE.read_text("utf-8"))
-    sets = sorted(state["sets"], key=lambda x: x["index"])
-    last = sets[-1]
-    set_index = last["index"]
-    set_name = last["name"]
-    in_set = len(tg._call("getStickerSet", data={"name": set_name}).get("stickers", []))
-    keywords = load_keywords()
-
-    added_order: list[tuple[str, str]] = []
-    for tk in fetched:
-        png = EMOJI / f"{tk}.png"
-        kw = keywords.get(tk, tk)
-        try:
-            if in_set >= PER_SET:
-                set_index += 1
-                set_name = f"gvcryptoemoji{set_index}_by_{bot}"
-                tg.create_set(USER_ID, set_name, f"@GodVerify Crypto Emoji {set_index}",
-                              png, EMOJI_CHAR, kw)
-                state["sets"].append({"index": set_index, "name": set_name,
-                                      "title": f"@GodVerify Crypto Emoji {set_index}"})
-                STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
-                in_set = 1
-            else:
-                tg.add_sticker(USER_ID, set_name, png, EMOJI_CHAR, kw)
-                in_set += 1
-            added_order.append((set_name, tk))
-            time.sleep(0.3)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  add failed {tk}: {exc}", flush=True)
-
-    per_set_added: dict[str, list[str]] = defaultdict(list)
-    for sn, tk in added_order:
-        per_set_added[sn].append(tk)
-    for sn, tks in per_set_added.items():
-        cids = [str(s.get("custom_emoji_id", ""))
-                for s in tg._call("getStickerSet", data={"name": sn}).get("stickers", [])]
-        tail = cids[-len(tks):]
-        for tk, cid in zip(tks, tail):
-            ticker_to_id[tk] = cid
-
-    TICKER_IDS.write_text(json.dumps(ticker_to_id, ensure_ascii=False, indent=1), "utf-8")
+    added, add_failed = publish_logos(tg, fetched, ticker_to_id)
     filled, total = refill_inventory(ticker_to_id)
-    print(f"added {len(added_order)} stickers; inventory filled: {filled}/{total}",
-          flush=True)
-    return 0
+    print(f"added {added} stickers; inventory filled: {filled}/{total}", flush=True)
+    return ingest_exit_code(added, failed + add_failed)
 
 
 if __name__ == "__main__":

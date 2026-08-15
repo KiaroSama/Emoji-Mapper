@@ -14,7 +14,6 @@ Run:  python panel.py            (serves http://127.0.0.1:8765 and opens it)
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import logging
 import os
@@ -29,7 +28,9 @@ from urllib.parse import unquote
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
-from emojikit.media import hamming
+# ``_load_lottie`` is private to media, but it owns the .tgs decompression bound
+# (TGS_MAX_UNPACKED). Importing it keeps one bound; a copy here would drift.
+from emojikit.media import _load_lottie, hamming
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -212,12 +213,15 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                     self._send(404, b"{}")
                     return
                 try:
-                    raw = it.read_bytes()
-                    if raw[:2] == b"\x1f\x8b":          # gzip-compressed .tgs
-                        raw = gzip.decompress(raw)
-                    self._send(200, raw, "application/json", cache=_IMMUTABLE)
+                    # Bounded: a .tgs is gzip, and a few KB of it can expand to
+                    # gigabytes. gzip.decompress has no cap, so a corrupt or
+                    # hostile catalog entry could exhaust this process's RAM.
+                    body = json.dumps(_load_lottie(it),
+                                      separators=(",", ":")).encode("utf-8")
                 except Exception:  # noqa: BLE001
                     self._send(500, b"{}")
+                    return
+                self._send(200, body, "application/json", cache=_IMMUTABLE)
                 return
             if self.path.startswith("/static/"):
                 name = unquote(self.path[len("/static/"):])
