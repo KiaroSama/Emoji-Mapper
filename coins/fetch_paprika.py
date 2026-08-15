@@ -54,6 +54,16 @@ from make_emoji_pngs import _is_blank
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
+# Where a fetcher parks a freshly downloaded logo until its upload is proven.
+#
+# EMOJI/<ticker>.png is the project's identity oracle: rebuild_dedup and
+# remap_ids both decide which live sticker belongs to which ticker by comparing
+# against it. Writing a download straight there -- which both fetchers did, from
+# main(), with no lock held -- means the LOSER of a race leaves its art in the
+# file while the map names the WINNER's sticker. Nothing is duplicated, but
+# rebuild_dedup.resolve_by_image then reports MapIdentityUnproven and
+# map_and_fill hard-stops until someone repairs it by hand. Staging keeps the
+# oracle matching what was actually published.
 INV = ROOT / "currency-emoji-inventory.md"
 OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
 STATE = ROOT / "rebuild_state.json"
@@ -161,6 +171,7 @@ def to_emoji_png(data: bytes, dest: Path) -> bool:
     im = im.resize((nw, nh), Image.LANCZOS)
     canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     canvas.paste(im, ((SIZE - nw) // 2, (SIZE - nh) // 2), im)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(dest, format="PNG", optimize=True)
     return True
 
@@ -258,6 +269,33 @@ def live_stickers(tg: Telegram, name: str) -> list[dict]:
     return tg.get_sticker_set(name).get("stickers", [])
 
 
+def incoming_dir() -> Path:
+    """Staging directory, derived from EMOJI so one patch relocates both."""
+    return EMOJI.parent / ".incoming"
+
+
+def staged_or_published(tk: str) -> Path:
+    """The image to send for ``tk``: this run's download if it made one.
+
+    Falls back to the published file so a resumed run, whose staging directory
+    is long gone, still has a source.
+    """
+    staged = incoming_dir() / f"{tk}.png"
+    return staged if staged.is_file() else EMOJI / f"{tk}.png"
+
+
+def publish_source(tk: str) -> None:
+    """Promote this run's download to the shared oracle. Call under the lock.
+
+    Only after the upload is proven and the map is written: until then the file
+    would be claiming an identity for a sticker that may not exist.
+    """
+    staged = incoming_dir() / f"{tk}.png"
+    if staged.is_file():
+        EMOJI.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, EMOJI / f"{tk}.png")
+
+
 def source_dhash(png: Path) -> int:
     """The identity of the image we are about to send, captured ONCE.
 
@@ -345,7 +383,7 @@ def _recover_in_flight(tg: Telegram, state: dict,
     if not intent:
         return None
     tk, name = intent.get("key"), intent.get("set_name")
-    png = EMOJI / f"{tk}.png"
+    png = staged_or_published(tk)
     # The identity recorded WITH the mutation, not re-derived from the file now.
     # Between that run and this one, main() may have re-downloaded the ticker --
     # it does so whenever the map has no entry, which is exactly the state an
@@ -375,6 +413,7 @@ def _recover_in_flight(tg: Telegram, state: dict,
                                   "title": intent.get("title", "")})
         ticker_to_id[tk] = cid
         write_json_atomic(TICKER_IDS, ticker_to_id)
+        publish_source(tk)
         print(f"  recovered {tk}: {cid} landed before the interruption",
               flush=True)
     else:
@@ -447,7 +486,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                           f"waited for the lock; not adding a second copy",
                           flush=True)
                     continue
-                png = EMOJI / f"{tk}.png"
+                png = staged_or_published(tk)
                 kw = keywords.get(tk, tk)
                 try:
                     live = live_stickers(tg, set_name)
@@ -522,6 +561,9 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     state["sets"].append(dict(last))
                 ticker_to_id[tk] = cid
                 write_json_atomic(TICKER_IDS, ticker_to_id)
+                # Proven and mapped: this art now identifies a LIVE sticker,
+                # so it may become the oracle the other tools trust.
+                publish_source(tk)
                 state["in_flight"] = None
                 write_json_atomic(STATE, state)
                 added += 1
@@ -597,7 +639,7 @@ def main() -> int:
             print(f"  download failed: {tk} ({cid})", flush=True)
             failed += 1
             continue
-        if to_emoji_png(data, EMOJI / f"{tk}.png"):
+        if to_emoji_png(data, incoming_dir() / f"{tk}.png"):
             fetched.append(tk)
             print(f"  got logo: {tk} <- {cid}", flush=True)
         else:
