@@ -309,6 +309,40 @@ class AddMediaExitCode(unittest.TestCase):
         self.assertEqual(self._run(), bp.EXIT_OK)
 
 
+class LinksDestination(unittest.TestCase):
+    """Finished-pack links must go where PACK_LINKS_CHAT_ID says."""
+
+    OWNER = 111111111
+
+    def _env(self, value):
+        return mock.patch.dict("os.environ", {"PACK_LINKS_CHAT_ID": value},
+                               clear=False)
+
+    def test_unset_falls_back_to_the_owner(self):
+        with self._env(""):
+            self.assertEqual(bp.links_chat_id(self.OWNER), self.OWNER)
+
+    def test_numeric_channel_id_is_used_as_an_int(self):
+        with self._env("-1001111111111"):
+            self.assertEqual(bp.links_chat_id(self.OWNER), -1001111111111)
+
+    def test_at_username_is_passed_through(self):
+        with self._env("@packlinks"):
+            self.assertEqual(bp.links_chat_id(self.OWNER), "@packlinks")
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        with self._env("  -1001111111111  "):
+            self.assertEqual(bp.links_chat_id(self.OWNER), -1001111111111)
+
+    def test_every_publisher_resolves_the_same_destination(self):
+        """A publisher that still hardcoded the owner would fail here."""
+        import build_collection
+        import coins.rebuild_dedup as rd
+        for module in (bp, build_collection, rd):
+            self.assertIs(module.links_chat_id, bp.links_chat_id,
+                          f"{module.__name__} must use the shared resolver")
+
+
 class SharedLogoGuard(unittest.TestCase):
     """The detector that would have caught the 129-ticker collision."""
 
