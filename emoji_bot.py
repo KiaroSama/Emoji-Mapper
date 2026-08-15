@@ -359,12 +359,12 @@ def main() -> int:
         # only fails later, per message, when it tries to reply.
         log.error("PACK_OWNER_USER_ID is not set to a valid numeric id (.env).")
         return 2
-    allowed = allowed_user_ids()
-    if not allowed:
+    allowed_users = allowed_user_ids()
+    if not allowed_users:
         log.error("no authorized users: set BOT_ALLOWED_USER_IDS or "
                   "PACK_OWNER_USER_ID. Refusing to run an open bot.")
         return 2
-    log.info("access list: %d authorized user id(s)", len(allowed))
+    log.info("access list: %d authorized user id(s)", len(allowed_users))
     tg = Telegram(token)
     me = tg.get_me()
     log.info("Emoji Mapper bot @%s started (owner=%s)", me.get("username"), owner_id)
@@ -382,12 +382,17 @@ def main() -> int:
     if offset:
         log.info("resuming from update offset %d", offset)
     # Only ask for update types this bot actually dispatches.
-    allowed = ["message", "channel_post", "my_chat_member"]
+    # Deliberately NOT named `allowed`: this is the Telegram update-type filter,
+    # a completely different thing from the numeric user allowlist above. They
+    # were once both called `allowed`, and the second assignment silently
+    # replaced the user ids -- so `sender not in allowed` compared an int
+    # against update-type strings and rejected every user, including the owner.
+    allowed_update_types = ["message", "channel_post", "my_chat_member"]
     while True:
         try:
             updates = tg._call("getUpdates", data={
                 "offset": offset, "timeout": 50,
-                "allowed_updates": json.dumps(allowed),
+                "allowed_updates": json.dumps(allowed_update_types),
             })
         except Exception as exc:  # noqa: BLE001
             text = redact(str(exc))
@@ -402,7 +407,7 @@ def main() -> int:
             continue
         for upd in updates or []:
             try:
-                handle_update(tg, owner_id, upd, allowed)
+                handle_update(tg, owner_id, upd, allowed_users)
             except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
                 # Explicitly dead-lettered: acknowledged so a poison update
                 # cannot wedge the queue, but recorded at error level rather

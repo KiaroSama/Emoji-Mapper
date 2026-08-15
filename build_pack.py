@@ -33,11 +33,14 @@ Run with --dry-run first to validate inputs without calling Telegram.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import json
 import os
 import sys
 import time
-import json
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 import requests
@@ -59,6 +62,80 @@ def ingest_exit_code(succeeded: int, failed: int) -> int:
     if not failed:
         return EXIT_OK
     return EXIT_PARTIAL if succeeded else EXIT_FAILED
+
+
+def safe_int_env(name: str, default: int = 0, *, minimum: int | None = None,
+                 maximum: int | None = None) -> int:
+    """Parse a numeric env var without letting a typo kill the process.
+
+    ``int(os.environ.get(...))`` at import time turns one bad character in .env
+    into an unexplained crash before argparse can print anything useful.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"WARNING: {name} is not a whole number; using {default}.",
+              file=sys.stderr)
+        return default
+    if minimum is not None and value < minimum:
+        print(f"WARNING: {name}={value} below {minimum}; using {minimum}.",
+              file=sys.stderr)
+        return minimum
+    if maximum is not None and value > maximum:
+        print(f"WARNING: {name}={value} above {maximum}; using {maximum}.",
+              file=sys.stderr)
+        return maximum
+    return value
+
+
+class LockBusy(RuntimeError):
+    """Another process already holds this publisher's lock."""
+
+
+@contextlib.contextmanager
+def exclusive_lock(path: Path, *, stale_after: float = 6 * 3600):
+    """Exclusive per-state lock so two publishers cannot mutate one pack family.
+
+    Without it, two runs read the same state, both see the same item pending,
+    and both upload it. Uses O_EXCL creation, which is atomic on NTFS and
+    POSIX alike; a lock left by a crashed run is reclaimed after ``stale_after``.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    try:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            age = time.time() - path.stat().st_mtime if path.exists() else 0.0
+            if age < stale_after:
+                holder = ""
+                try:
+                    holder = path.read_text(encoding="utf-8").strip()[:120]
+                except OSError:
+                    pass
+                raise LockBusy(
+                    f"{path.name} is held by another run ({holder or 'unknown'}; "
+                    f"{age:.0f}s old). Refusing to publish concurrently.")
+            print(f"  reclaiming stale lock {path.name} ({age:.0f}s old)",
+                  flush=True)
+            path.unlink(missing_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, f"pid={os.getpid()} started={_utc_now()}\n".encode())
+        os.close(fd)
+        fd = None
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        path.unlink(missing_ok=True)
+
+
+def _utc_now() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def write_json_atomic(path: Path, data) -> None:
@@ -141,6 +218,22 @@ def load_keywords(path: Path = KEYWORDS_CSV) -> dict[str, str]:
             for row in csv.DictReader(fh):
                 out[row["ticker"].lower()] = row.get("keywords") or row["ticker"]
     return out
+
+
+class SetState(Enum):
+    """Three distinct answers to "does this sticker set exist?".
+
+    Collapsing UNKNOWN into MISSING is how a network blip becomes "the set is
+    empty", which then justifies re-uploading or re-creating it.
+    """
+
+    EXISTS = "exists"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
+class LiveStateUnknown(RuntimeError):
+    """Live Telegram state could not be determined; callers must not guess."""
 
 
 class AmbiguousUploadError(RuntimeError):
@@ -250,6 +343,27 @@ class Telegram:
         if "stickerset_invalid" in str(payload.get("description", "")).lower():
             return True, None
         return False, None
+
+    def probe_set_state(self, name: str) -> tuple[SetState, dict | None]:
+        """Tri-state probe: EXISTS / MISSING / UNKNOWN plus the set when known."""
+        known, sset = self.probe_sticker_set(name)
+        if not known:
+            return SetState.UNKNOWN, None
+        return (SetState.EXISTS, sset) if sset is not None else (SetState.MISSING, None)
+
+    def live_count_strict(self, name: str) -> int:
+        """Live sticker count, or raise LiveStateUnknown.
+
+        Never returns 0 for "could not tell": a caller that rolls back or
+        retries a mutation on that 0 will re-send an upload that already
+        landed.
+        """
+        state, sset = self.probe_set_state(name)
+        if state is SetState.EXISTS:
+            return len(sset.get("stickers", []))
+        if state is SetState.MISSING:
+            return 0
+        raise LiveStateUnknown(f"live state of {name} is unknown")
 
     def _added_check(self, name: str, expected_before: int | None):
         """applied_check for addStickerToSet: did the set grow by exactly one?"""
