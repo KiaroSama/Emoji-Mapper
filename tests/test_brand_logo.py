@@ -40,19 +40,36 @@ class FakeTelegram:
         self.username = username
         self.sets: dict[str, list[dict]] = {}
         self.messages: list[str] = []
+        self.bodies: dict[str, bytes] = {}
 
     def get_me(self):
         return {"username": self.username}
 
+    def _stored(self, name, path, fmt, emojis) -> dict:
+        """A live sticker as Telegram reports it, whose file can be fetched.
+
+        Identity fields and a downloadable body are not decoration: the
+        publisher proves a new sticker is the image it just sent by fetching it
+        and hashing the pixels, so a fake that returns neither makes every
+        upload unattributable.
+        """
+        i = len(self.sets.get(name, []))
+        file_id = f"{name}-f{i}"
+        self.bodies[file_id] = Path(path).read_bytes()
+        return {"emojis": list(emojis), "fmt": fmt,
+                "custom_emoji_id": f"{name}-{i}",
+                "file_id": file_id, "file_unique_id": f"{name}-u{i}",
+                "is_animated": fmt == "animated", "is_video": fmt == "video"}
+
     def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
-        self.sets[name] = [{"emojis": list(emojis), "fmt": fmt,
-                            "custom_emoji_id": f"{name}-0"}]
+        self.sets[name] = [self._stored(name, path, fmt, emojis)]
 
     def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,
                   expected_before=None):
-        i = len(self.sets[name])
-        self.sets[name].append({"emojis": list(emojis), "fmt": fmt,
-                                "custom_emoji_id": f"{name}-{i}"})
+        self.sets[name].append(self._stored(name, path, fmt, emojis))
+
+    def download_file(self, file_id, dest):
+        Path(dest).write_bytes(self.bodies[str(file_id)])
 
     def get_sticker_set(self, name):
         return {"stickers": self.sets.get(name, [])}
@@ -97,7 +114,9 @@ class PublishFormatLogoFirst(unittest.TestCase):
             for i in range(n):
                 p = data / "media" / "static" / f"item{i}.png"
                 _make_png(p, color=(10, 20 * (i + 1), 200, 255))
-                key = f"s:item{i:030d}"
+                # The REAL content key: publishing attributes a live sticker by
+                # hashing its pixels, so a synthetic key resolves to nothing.
+                key = media.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["😀"], keywords=[f"item{i}"])
                 keys.append(key)
@@ -141,8 +160,8 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 for i in range(2):
                     p = data / "media" / "animated" / f"a{i}.tgs"
                     p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_bytes(b"\x1f\x8b" + b"x" * 50)  # gzip-magic dummy
-                    key = f"a:item{i:030d}"
+                    p.write_bytes(b"\x1f\x8b" + b"x" * (50 + i))  # gzip-magic dummy
+                    key = media.content_key(p, "animated")
                     cat.add(content_key=key, fmt="animated", file_path=p,
                             emojis=["😀"], keywords=[f"a{i}"])
                     keys.append(key)

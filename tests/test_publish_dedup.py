@@ -15,6 +15,7 @@ Covers the three duplicate mechanisms:
 
 from __future__ import annotations
 
+import io
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,7 @@ from PIL import Image  # noqa: E402
 import build_pack  # noqa: E402
 import build_collection as bc  # noqa: E402
 from build_pack import AmbiguousUploadError, Telegram  # noqa: E402
+from emojikit import media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 
@@ -53,17 +55,72 @@ class _Resp:
         return self._payload
 
 
+def _png_bytes(color) -> bytes:
+    """A real 100x100 PNG, so a fake sticker body can actually be decoded."""
+    buf = io.BytesIO()
+    im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    for x in range(20, 80):
+        for y in range(20, 80):
+            im.putpixel((x, y), color)
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+class _FileResp:
+    """A downloaded file body (requests.Session.get stand-in result)."""
+
+    def __init__(self, content: bytes):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
 class _FakeServer:
     """requests.Session stand-in: the API server actually APPLIES an
     addStickerToSet before the network 'fails', so a blind client retry
-    would duplicate the sticker."""
+    would duplicate the sticker.
+
+    Stickers carry a ``file_unique_id`` and a downloadable body, because the
+    real Bot API always does and the client now PROVES an ambiguous add by
+    comparing the new sticker's content against the image it sent. A fake
+    without those forced the client into "cannot verify" on every path and
+    hid what the test was meant to exercise.
+    """
 
     def __init__(self, fail_first_add="after_apply"):
-        self.sets: dict[str, list[dict]] = {"pack1": [{"i": 0}]}
+        self.files: dict[str, bytes] = {"FU-seed": b"seed-not-a-real-png"}
+        self.sets: dict[str, list[dict]] = {
+            "pack1": [{"file_unique_id": "FU-seed", "file_id": "FID-seed"}]}
         self.add_calls = 0
         self.fail_first_add = fail_first_add
         self.probe_fails = False
         self.last_files = None
+        self._n = 0
+
+    def _apply(self, name: str, files) -> None:
+        """Store the uploaded bytes so a later download returns OUR image."""
+        self._n += 1
+        fuid, fid = f"FU-{self._n}", f"FID-{self._n}"
+        body = b""
+        if files and "file0" in files:
+            body = files["file0"][1]
+        self.files[fuid] = body
+        self.sets[name].append({"file_unique_id": fuid, "file_id": fid})
+
+    def add_foreign(self, name: str, body: bytes | None = None) -> str:
+        """Simulate an external/manual sticker landing in the same set.
+
+        A REAL but different image by default, so the client can actually
+        decode it and prove it is not ours -- garbage bytes would only prove
+        the weaker "could not verify" path.
+        """
+        self._n += 1
+        fuid = f"FU-foreign-{self._n}"
+        self.files[fuid] = body if body is not None else _png_bytes((10, 200, 40, 255))
+        self.sets[name].append({"file_unique_id": fuid,
+                                "file_id": f"FID-foreign-{self._n}"})
+        return fuid
 
     def post(self, url, data=None, files=None, timeout=None):
         method = url.rsplit("/", 1)[1]
@@ -74,17 +131,32 @@ class _FakeServer:
             if name in self.sets:
                 return _Resp({"ok": True, "result": {"stickers": list(self.sets[name])}})
             return _Resp({"ok": False, "description": "STICKERSET_INVALID"})
+        if method == "getFile":
+            fid = data["file_id"]
+            fuid = next((f for f, s in
+                         ((st["file_unique_id"], st) for sts in self.sets.values()
+                          for st in sts) if s["file_id"] == fid), None)
+            if fuid is None:
+                return _Resp({"ok": False, "description": "file not found"})
+            return _Resp({"ok": True, "result": {"file_path": fuid}})
         if method == "addStickerToSet":
             self.add_calls += 1
             self.last_files = files
             if self.add_calls == 1 and self.fail_first_add == "after_apply":
-                self.sets[data["name"]].append({"i": len(self.sets[data["name"]])})
+                self._apply(data["name"], files)
                 raise requests.ReadTimeout("timeout after server applied the add")
             if self.add_calls == 1 and self.fail_first_add == "before_apply":
                 raise requests.ConnectionError("connection dropped before apply")
-            self.sets[data["name"]].append({"i": len(self.sets[data["name"]])})
+            if self.add_calls == 1 and self.fail_first_add == "foreign_only":
+                # OUR request failed, but somebody else's sticker landed.
+                self.add_foreign(data["name"])
+                raise requests.ReadTimeout("timeout; ours never applied")
+            self._apply(data["name"], files)
             return _Resp({"ok": True, "result": True})
         raise AssertionError(f"unexpected method {method}")
+
+    def get(self, url, timeout=None):
+        return _FileResp(self.files.get(url.rsplit("/", 1)[1], b""))
 
 
 @mock.patch("build_pack.time.sleep", lambda s: None)
@@ -108,6 +180,34 @@ class VerifiedRetryTest(unittest.TestCase):
         tg.add_sticker(1, "pack1", self.png, "😀", "kw", expected_before=1)
         self.assertEqual(srv.add_calls, 1)              # never re-sent
         self.assertEqual(len(srv.sets["pack1"]), 2)     # exactly one new sticker
+
+    def test_a_foreign_sticker_landing_is_not_read_as_our_upload(self):
+        """The dangerous case: OUR add failed while someone else's landed.
+
+        The set grows by exactly one new identity, so an identity-only check
+        answers "applied" and the caller marks OUR item done against a stranger's
+        sticker. Only comparing the new sticker's content against the image we
+        sent can tell the two apart.
+        """
+        srv = _FakeServer(fail_first_add="foreign_only")
+        tg = self._tg(srv)
+        tg.add_sticker(1, "pack1", self.png, "😀", "kw", expected_before=1)
+        # Proven not ours -> safe to re-send, and the retry really uploaded.
+        self.assertEqual(srv.add_calls, 2)
+        bodies = [srv.files[s["file_unique_id"]] for s in srv.sets["pack1"]]
+        self.assertIn(self.png.read_bytes(), bodies,
+                      "our image must end up in the set exactly once")
+        self.assertEqual(bodies.count(self.png.read_bytes()), 1)
+
+    def test_an_unverifiable_new_sticker_is_never_claimed_as_ours(self):
+        """If the content cannot be compared, the outcome is UNKNOWN."""
+        srv = _FakeServer(fail_first_add="after_apply")
+        tg = self._tg(srv)
+        # Downloads fail, so no comparison is possible.
+        tg.download_file = mock.Mock(side_effect=RuntimeError("download failed"))
+        with self.assertRaises(AmbiguousUploadError):
+            tg.add_sticker(1, "pack1", self.png, "😀", "kw", expected_before=1)
+        self.assertEqual(srv.add_calls, 1, "must not re-send while unresolved")
 
     def test_not_applied_network_error_is_retried_with_full_body(self):
         srv = _FakeServer(fail_first_add="before_apply")
@@ -150,6 +250,7 @@ class FakeTelegram:
         self.ambiguous_add_keys = set(ambiguous_add_keys)
         self.add_calls: list[str] = []
         self.messages: list[str] = []
+        self.bodies: dict[str, bytes] = {}
 
     def get_me(self):
         return {"username": "YourEmojiBot"}
@@ -157,9 +258,22 @@ class FakeTelegram:
     def _sticker(self, name, path, fmt, emojis):
         i = len(self.sets[name])
         stem = Path(path).stem
+        fuid = self.fuid_for.get(stem, f"FU-{stem}")
+        # Keep the uploaded bytes fetchable. When a live sticker's fuid was
+        # never recorded, the publisher attributes it by downloading it and
+        # hashing the pixels -- a fake that cannot serve the file makes every
+        # such sticker look foreign.
+        file_id = f"FID-{fuid}"
+        self.bodies[file_id] = Path(path).read_bytes()
         return {"emojis": list(emojis), "fmt": fmt,
                 "custom_emoji_id": f"{name}-{i}",
-                "file_unique_id": self.fuid_for.get(stem, f"FU-{stem}")}
+                "file_id": file_id, "file_unique_id": fuid}
+
+    def download_file(self, file_id, dest):
+        body = self.bodies.get(str(file_id))
+        if body is None:
+            raise RuntimeError(f"no such file: {file_id}")
+        Path(dest).write_bytes(body)
 
     def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
         self.sets[name] = []
@@ -191,7 +305,9 @@ class PublishDedupTest(unittest.TestCase):
             for i in range(n):
                 p = data / "media" / "static" / f"item{i}.png"
                 _make_png(p, color=(10, 40 * (i + 1) % 255, 200, 255))
-                key = f"s:item{i:030d}"
+                # The REAL content key: publishing attributes a live sticker by
+                # hashing its pixels, so a synthetic key resolves to nothing.
+                key = media.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["😀"], keywords=[f"item{i}"],
                         file_unique_id=f"SRC-item{i}")

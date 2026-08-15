@@ -433,7 +433,8 @@ def _live_index(tg, name: str) -> dict[tuple[str, str], dict]:
 
 
 def _confirm_new_upload(tg, cat: Catalog, set_name: str, key: str,
-                        before: dict[tuple[str, str], dict]) -> dict:
+                        before: dict[tuple[str, str], dict],
+                        tmp_dir: Path) -> dict:
     """Identify the sticker an upload just created -- by identity, not position.
 
     Telegram re-encodes on upload, so the new copy's identity cannot be
@@ -457,6 +458,18 @@ def _confirm_new_upload(tg, cat: Catalog, set_name: str, key: str,
             f"{set_name}: {len(new)} new identities appeared, expected exactly "
             f"one. Refusing to attribute it by position.")
     st = new[0]
+    # "Exactly one new sticker" is still not "OUR new sticker": if our add
+    # failed while an external or manual one landed, exactly one new identity
+    # also appears. Resolve the candidate's CONTENT and require it to be this
+    # key before anything durable is written -- otherwise a foreign FUID and
+    # CID get bound to our catalog entry permanently.
+    resolved = _resolve_sticker_key(tg, cat, st, tmp_dir)
+    if resolved != key:
+        raise SetDrift(
+            f"the sticker that appeared in {set_name} while uploading {key} "
+            f"resolves to {resolved or 'an unidentifiable image'}, not {key}. "
+            f"Our upload did not land, or someone else wrote to this set; "
+            f"refusing to record a foreign sticker as ours.")
     fuid = str(st.get("file_unique_id") or "")
     owner = cat.seen_file_unique_id(fuid) if fuid else None
     if owner is not None and owner != key:
@@ -796,7 +809,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         # Identity BEFORE any record: keys[], the publication row and the
         # custom_emoji_id all map this key onto a live position, so the position
         # has to be proven ours first, not assumed from order.
-        st = _confirm_new_upload(tg, cat, set_name, key, before)
+        st = _confirm_new_upload(tg, cat, set_name, key, before,
+                                 data_dir / "tmp")
         in_set += 1
         fmt_sets[-1]["live"] = in_set
         # Record actual upload order (for cid mapping) + mark uploaded (committed

@@ -46,6 +46,7 @@ from PIL import Image  # noqa: E402
 import build_collection as bc  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
                         LiveStateUnknown, LockBusy, SetState, exclusive_lock)
+from emojikit import media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 SET = "pks1_by_YourEmojiBot"
@@ -70,6 +71,9 @@ class FakeTG:
         self.fail_after = fail_after         # uploads accepted before it breaks
         self.uploaded: list[str] = []
         self.sent: list[str] = []
+        # file_unique_id -> the bytes that were uploaded for it, so a later
+        # download can prove the live sticker is the one we sent.
+        self.bodies: dict[str, bytes] = {}
 
     def probe_set_state(self, name):
         if name in self.unknown:
@@ -98,8 +102,23 @@ class FakeTG:
             raise RuntimeError("BAD_REQUEST: STICKER_PNG_DIMENSIONS")
         stem = Path(path).stem
         self.uploaded.append(stem)
-        return _sticker(f"{self.fuid_prefix}{stem}",
-                        f"{name}-{len(self.sets.get(name, []))}")
+        st = _sticker(f"{self.fuid_prefix}{stem}",
+                      f"{name}-{len(self.sets.get(name, []))}")
+        # Remember what was uploaded: the publisher now PROVES the new sticker
+        # is ours by downloading it and hashing its content, so a fake that
+        # cannot serve the bytes back makes every upload "unidentifiable".
+        self.bodies[st["file_unique_id"]] = Path(path).read_bytes()
+        return st
+
+    def download_file(self, file_id, dest):
+        """Serve the stored body for a sticker, as Telegram would."""
+        fuid = str(file_id)[2:] if str(file_id).startswith("f-") else str(file_id)
+        body = self.bodies.get(fuid)
+        if body is None:
+            raise RuntimeError(f"no such file: {file_id}")
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(body)
+        return dest
 
     def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
         self.sets[name] = [self._new(name, path)]
@@ -144,7 +163,11 @@ class _CatalogFixture(unittest.TestCase):
             for i in range(2):
                 p = self.data / "media" / "static" / f"item{i}.png"
                 _make_png(p, color=(10, 60 * (i + 1), 200, 255))
-                key = f"s:item{i:030d}"
+                # The REAL content key, not a synthetic one: publishing now
+                # attributes a live sticker by downloading it and hashing the
+                # pixels, so a made-up key could never match and every upload
+                # would look unidentifiable.
+                key = media.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["\U0001F600"], keywords=[f"item{i}"])
                 cat.record_file_unique_id(f"UP-item{i}", key)
@@ -162,7 +185,7 @@ class _CatalogFixture(unittest.TestCase):
         """Catalogue one more static item, as a later curate pass would."""
         p = self.data / "media" / "static" / f"item{i}.png"
         _make_png(p, color=(10, 30 * (i + 1), 90, 255))
-        key = f"s:item{i:030d}"
+        key = media.content_key(p, "static")
         with Catalog(self.data / "catalog.db") as cat:
             cat.add(content_key=key, fmt="static", file_path=p,
                     emojis=["\U0001F600"], keywords=[f"item{i}"])
