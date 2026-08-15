@@ -1,6 +1,12 @@
+<div align="center">
+
+<img src="assets/emoji-mapper-logo.png" alt="Emoji Mapper" width="180">
+
 # Emoji Mapper
 
-Build Telegram **premium custom-emoji packs** from any collection of images.
+**Build Telegram premium custom-emoji packs from any collection of images.**
+
+</div>
 
 Emoji Mapper started as a crypto-coin logo packer and is now a general tool: it
 takes a folder of images, normalizes each one to the exact 100×100 PNG that
@@ -9,10 +15,10 @@ custom-emoji sets owned by your account.
 
 It ships with two independent workflows that share the same engine:
 
-| Workflow | Bot | Source | Purpose |
-|----------|-----|--------|---------|
-| **Crypto coins** | `TELEGRAM_BOT_TOKEN` | CoinGecko / CoinPaprika / CoinMarketCap logos | the original coin-logo packs |
-| **General** | `GENERAL_BOT_TOKEN` (`@GodVerifyEmojiMapperbot`) | any folder of images you provide | any non-coin emoji pack |
+| | Workflow | Bot | Source | Purpose |
+|---|----------|-----|--------|---------|
+| <img src="assets/coin-emoji-mapper-logo.png" alt="" width="42"> | **Crypto coins** | `TELEGRAM_BOT_TOKEN` | CoinGecko / CoinPaprika / CoinMarketCap logos | the original coin-logo packs |
+| <img src="assets/emoji-mapper-logo.png" alt="" width="42"> | **General** | `GENERAL_BOT_TOKEN` (`@GodVerifyEmojiMapperbot`) | any folder of images you provide | any non-coin emoji pack |
 
 The same scripts (`make_emoji_pngs.py` + `build_pack.py`) power both; only the
 source folder and the selected bot token differ.

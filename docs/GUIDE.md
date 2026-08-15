@@ -87,9 +87,10 @@ CMC_API_KEY=<optional CoinMarketCap key, only for coins/fetch_cmc.py>
 External tool: **ffmpeg + ffprobe** on `PATH` are required **only** for video
 emoji. Install on Windows: `winget install Gyan.FFmpeg`.
 
-Pinned deps note: `svglib<2` / `reportlab<4` are intentional — they ship the
-bundled SVG rasterizer (no system cairo). These wheels exist for Python 3.11,
-not 3.12, so the project targets 3.11 and CI runs on 3.11.
+SVG note: SVG rasterizing uses `resvg-py`, a self-contained Rust renderer
+shipped as a prebuilt wheel — no system cairo and no build toolchain. It renders
+straight to RGBA (gradients included). 3.11 remains the reference runtime; CI
+also exercises 3.12.
 
 ---
 
@@ -367,8 +368,7 @@ Git: work is committed in small logical commits and pushed to `main` on
    focus, `prefers-reduced-motion`, lazy media (IntersectionObserver) so large
    catalogs stay fast. Verify in a real browser before claiming done.
 7. **External libs/APIs**: check current docs before coding (the Telegram Bot
-   API and any JS player evolve). Keep `svglib<2`/`reportlab<4` unless you also
-   solve the SVG backend on the target Python.
+   API and any JS player evolve).
 8. **Always**: add/maintain tests, run the unit suite + a real run, then commit
    and **push to keep GitHub in sync**, and **update this guide** with any new
    command 0 → 100.
@@ -662,7 +662,7 @@ Constants: `SIZE=100`, `TGS_MAX_BYTES=65536`, `WEBM_MAX_BYTES=262144`,
 | `ext_for_format(fmt)` | `.png`/`.tgs`/`.webm` | Canonical extension. |
 | `media_extension(path, fmt)` | str | Refines static into `.png` vs `.webp`. |
 | `fit_100(img)` | PIL.Image | Trim transparent borders, center on 100×100 RGBA. |
-| `to_static_png(src, out)` | Path | Any image (SVG via svglib) → 100×100 PNG. |
+| `to_static_png(src, out)` | Path | Any image (SVG via resvg) → 100×100 PNG. |
 | `to_video_webm(src, out)` | Path | ffmpeg → VP9 WEBM, 100×100, ≤3 s, transparent-padded; CRF escalates until ≤256 KB. |
 | `probe_video(path)` | `VideoInfo(width,height,duration,codec)` | via ffprobe. |
 | `validate_video(path)` | raises on violation | dims/duration/codec/size checks. |
@@ -699,38 +699,36 @@ merges perceptual near-duplicates; with `-1` (default) only exact content +
 
 ### 14.3 `emojikit.logsetup` (advanced logging)
 
-`setup_logging(name, *, console_level=INFO, file_level=DEBUG, json_sidecar=False,
-color=None)` configures a console handler plus a fresh UTC file log under
-`logs/`, named `<name>_YYYY-MM-DD_HH-mm-ss_UTC_<run_id>.log`. It is idempotent
-per process and returns the root logger. Capabilities:
+`setup_logging(name, *, console_level=INFO, file_level=DEBUG, color=None)`
+configures a console handler plus a fresh UTC file log under `logs/`, named
+`<name>_YYYY-MM-DD_HH-mm-ss_UTC_<run_id>.log`. It is idempotent per process and
+returns the root logger. Capabilities:
 
-- **Per-run id** — an 8-hex id stamped on every file line (`get_run_id()`).
+- **Per-run id** — an 8-hex id stamped on every file line.
 - **Automatic secret redaction** — known secret *values* (auto-registered from
   `TELEGRAM_BOT_TOKEN`, `GENERAL_BOT_TOKEN`, `CMC_API_KEY`, …) and token-shaped
   strings/`/bot<token>/` URLs are masked in **every** record, including
-  exception tracebacks and the JSON sidecar. Content hashes (`s:...`) and numeric
-  ids are **not** redacted. Register extra secrets with `register_secret(value)`.
+  exception tracebacks. Content hashes (`s:...`) and numeric ids are **not**
+  redacted. Register extra secrets with `register_secret(value)`.
 - **Rich file format** — `[UTC] [LEVEL] [run_id] [logger] module:line message`;
   concise (optionally ANSI-colored on TTY) console format.
-- **JSONL sidecar** — pass `json_sidecar=True` to also write `*.jsonl`.
 - **Uncaught-exception capture** — `sys.excepthook` + threading hook log full
-  tracebacks as CRITICAL.
+  tracebacks as CRITICAL, and the traceback printed to stderr is redacted too
+  (delegating to the default hook would have printed the token raw).
 - **Quiet third parties** — `urllib3`/`requests`/`PIL` turned down;
   `logging.captureWarnings(True)`.
 - **End-of-run summary** (atexit) — `run <id> finished in N.NNs | warnings=… errors=… critical=…`.
 
-Helpers for scripts:
+The public surface is exactly three names:
 
 ```python
-from emojikit.logsetup import setup_logging, log_duration, logcall, get_run_id, redact
-setup_logging("myscript", json_sidecar=True)
-with log_duration("download pack"):     # logs start/finish + elapsed (+ failure)
-    ...
-@logcall                                 # logs entry/exit/duration/exceptions
-def work(...): ...
+from emojikit.logsetup import setup_logging, redact, register_secret
+setup_logging("myscript")
+print(redact(some_text))        # mask before any manual print
 ```
 
-`redact(text)` is also exported for masking before any manual print.
+Secret handling is covered by `tests/test_logsetup.py`, which also fails the
+build if any value from `.env` appears in a git-tracked file.
 
 ### 14.4 `build_pack.Telegram`
 
@@ -748,8 +746,8 @@ for static/animated/video), and the legacy static `create_set`/`add_sticker`.
 - File: PNG or WEBP, **exactly 100×100**, RGBA (transparent background).
 - Built by `make_emoji_pngs._fit_100` / `media.to_static_png`: trim fully
   transparent borders, scale to fit 100×100 with LANCZOS, center on a
-  transparent canvas. SVG sources are rasterized via svglib + reportlab's
-  bundled renderPM (that is why `reportlab<4` is pinned).
+  transparent canvas. SVG sources are rasterized by resvg straight to RGBA
+  (gradients included).
 - Telegram stores static stickers as WEBP; when downloaded they come back as
   `.webp` (the panel renders them directly in `<img>`).
 
@@ -1017,7 +1015,7 @@ runtime CDN), so the panel works offline.
 |---------|-------|-----|
 | `GENERAL_BOT_TOKEN not set` / `getMe failed: Not Found` | Token missing/invalid in `.env`, or a stale shell env var shadowing it. | Put a valid token in `.env`; in PowerShell clear a leftover var: `Remove-Item Env:\GENERAL_BOT_TOKEN`. |
 | `ffmpeg not found` | ffmpeg/ffprobe not on PATH. | `winget install Gyan.FFmpeg` (only needed for video). |
-| `cannot find ft2build.h` / reportlab build fails | Installing `reportlab<4` from source on Python 3.12 (no wheel). | Use **Python 3.11** (the supported runtime). |
+| `cannot find ft2build.h` / reportlab build fails | An old checkout still pinning `reportlab<4`, which had no cp312 wheel. | Pull latest: the reportlab/svglib stack was replaced by `resvg-py`. |
 | `Python int too large to convert to SQLite INTEGER` | Old catalog code stored an unsigned 64-bit phash. | Fixed in `emojikit/catalog.py` (signed storage); pull latest. |
 | Fetch reports `dedup` on a pack with no real duplicates | Near-dup merging was on. | It's **off by default** now (`--phash-threshold -1`); pull latest or pass `-1`. |
 | Panel images 404 | `/img/<key>` not URL-decoded. | Fixed; pull latest. |
@@ -1156,10 +1154,13 @@ These were found with real data; the guards must not regress.
    dropped rows. Fix: signed storage + restore. (§13.4)
 4. **Over-aggressive dedup** — perceptual merge (threshold 5) collapsed 80
    distinct emoji to 70. Fix: near-dup merging **off by default**. (§16.2)
-5. **Blank emoji from gradient SVG** — svglib renders some gradients blank. Fix:
-   blank detection + raster fallback; never upload blank. (§15.1)
-6. **reportlab 3.12 wheel** — `reportlab<4` has no cp312 wheel. Fix: target
-   Python 3.11 in runtime + CI. (§3)
+5. **Blank emoji from gradient SVG** — the old svglib backend could not paint
+   gradients and returned a fully transparent image. Fix: blank detection +
+   raster fallback, then replacing the backend with resvg, which renders them.
+   (§15.1)
+6. **reportlab 3.12 wheel** — `reportlab<4` had no cp312 wheel, which pinned the
+   whole project to Python 3.11. Fix: the reportlab/svglib stack was removed.
+   (§3)
 7. **Token in logs** — urllib3 DEBUG logged the bot-token URL. Fix: silence those
    loggers + `redact()`. (§26)
 8. **Panel image 404** — `/img/<key>` wasn't URL-decoded. Fix: `unquote`. (§20)

@@ -19,7 +19,7 @@ This module provides:
   conversion ("build from scratch") into each format.
 * validation helpers backed by ffprobe.
 
-Raster/vector image decoding uses Pillow (+ optional svglib for SVG). Video and
+Raster/vector image decoding uses Pillow (+ resvg for SVG). Video and
 animated-video work requires ``ffmpeg``/``ffprobe`` on PATH.
 """
 
@@ -39,7 +39,14 @@ from PIL import Image
 
 log = logging.getLogger("emojikit.media")
 
-SIZE = 100                       # custom emoji canvas (px)
+SIZE = 100                       # static/video custom emoji canvas (px)
+# Animated emoji are the exception: Telegram requires a 512x512 Lottie canvas
+# for .tgs, the same as animated stickers -- only the static and video sections
+# of core.telegram.org/stickers narrow the canvas to 100x100 for emoji.
+TGS_SIZE = 512
+TGS_MAX_SECONDS = 3.0
+TGS_FPS = 60
+TGS_MAX_UNPACKED = 8 * 1024 * 1024   # bound decompression of a hostile .tgs
 TGS_MAX_BYTES = 64 * 1024        # animated emoji hard cap
 WEBM_MAX_BYTES = 256 * 1024      # video emoji hard cap
 WEBM_MAX_SECONDS = 3.0
@@ -177,7 +184,7 @@ def fit_100(img: Image.Image) -> Image.Image:
 def _load_image(src: Path) -> Image.Image:
     """Decode a raster or SVG source into an RGBA Pillow image."""
     if src.suffix.lower() == ".svg":
-        # svglib/reportlab are only needed for SVG; import lazily.
+        # The SVG rasterizer is only needed for SVG; import lazily.
         from make_emoji_pngs import _render_svg  # type: ignore
         img = _render_svg(src)
         if img is None:
@@ -276,12 +283,24 @@ def _load_lottie(src: Path) -> dict:
     """Load a Lottie animation from .json or .tgs into a dict."""
     raw = src.read_bytes()
     if raw[:2] == _GZIP_MAGIC:
-        raw = gzip.decompress(raw)
-    return json.loads(raw.decode("utf-8"))
+        # Bounded: a few KB of gzip can expand to gigabytes, and the compressed
+        # size check happens after this.
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+            raw = gz.read(TGS_MAX_UNPACKED + 1)
+        if len(raw) > TGS_MAX_UNPACKED:
+            raise MediaError(f"{src.name}: Lottie expands beyond "
+                             f"{TGS_MAX_UNPACKED} bytes")
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        # A list/scalar root would otherwise surface as AttributeError far away
+        # from here.
+        raise MediaError(f"{src.name}: Lottie root is {type(data).__name__}, "
+                         f"expected an object")
+    return data
 
 
 def to_animated_tgs(src: Path, out: Path) -> Path:
-    """Package a Lottie animation (.json or .tgs) into a valid 100x100 .tgs.
+    """Package a Lottie animation (.json or .tgs) into a valid 512x512 .tgs.
 
     NOTE: animated emoji are VECTOR (Lottie) only. Raster sources (GIF/MP4/WEBM)
     CANNOT become animated emoji -- convert those to *video* emoji instead. This
@@ -289,15 +308,17 @@ def to_animated_tgs(src: Path, out: Path) -> Path:
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     lottie = _load_lottie(src)
-    # Telegram emoji are 100x100. If the Lottie was authored at another canvas
-    # size, set the canvas to 100x100 (a uniform scale of the root is appended
-    # so the artwork is not clipped).
     w, h = int(lottie.get("w", 0)), int(lottie.get("h", 0))
-    if (w, h) != (SIZE, SIZE) and w and h:
-        log.warning("Lottie canvas %dx%d != %dx%d; rescaling to fit.", w, h, SIZE, SIZE)
-        _rescale_lottie(lottie, w, h)
-        lottie["w"] = SIZE
-        lottie["h"] = SIZE
+    if (w, h) != (TGS_SIZE, TGS_SIZE):
+        # Rewriting the canvas is not a safe repair: a Lottie's positions,
+        # anchors, animated transforms, masks and nested precompositions are all
+        # expressed in canvas units, so scaling only the top-level layer
+        # transform moves and clips the artwork. Reject instead of shipping a
+        # broken animation.
+        raise MediaError(
+            f"{src.name}: animated emoji require a {TGS_SIZE}x{TGS_SIZE} Lottie "
+            f"canvas, got {w}x{h}. Re-export the animation at "
+            f"{TGS_SIZE}x{TGS_SIZE}.")
     data = json.dumps(lottie, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     # mtime=0 keeps the gzip output deterministic for stable content hashing.
     with open(out, "wb") as fh:
@@ -307,25 +328,18 @@ def to_animated_tgs(src: Path, out: Path) -> Path:
     return out
 
 
-def _rescale_lottie(lottie: dict, w: int, h: int) -> None:
-    """Wrap layers in a scaling transform so a non-100x100 Lottie fits 100x100."""
-    scale = min(SIZE / w, SIZE / h) * 100.0  # Lottie scale is in percent
-    for layer in lottie.get("layers", []):
-        ks = layer.setdefault("ks", {})
-        s = ks.get("s", {"a": 0, "k": [100, 100, 100]})
-        k = s.get("k", [100, 100, 100])
-        if isinstance(k, list) and len(k) >= 2 and all(isinstance(v, (int, float)) for v in k[:2]):
-            s["k"] = [k[0] * scale / 100.0, k[1] * scale / 100.0,
-                      k[2] if len(k) > 2 else 100]
-            s["a"] = 0
-            ks["s"] = s
-
-
 def validate_tgs(path: Path) -> None:
-    """Raise MediaError if a .tgs is invalid or exceeds Telegram's size cap."""
+    """Raise MediaError unless a .tgs satisfies Telegram's animated contract.
+
+    Checks the whole published contract, not just the byte cap: a .tgs is a
+    GZIP package, the canvas must be 512x512, and the timeline must run at
+    60 fps for at most 3 seconds. See core.telegram.org/stickers.
+    """
     size = path.stat().st_size
     if size > TGS_MAX_BYTES:
         raise MediaError(f"{path.name}: TGS {size} > {TGS_MAX_BYTES} bytes")
+    if path.read_bytes()[:2] != _GZIP_MAGIC:
+        raise MediaError(f"{path.name}: TGS must be gzip-compressed Lottie")
     try:
         lottie = _load_lottie(path)
     except (OSError, ValueError) as exc:
@@ -333,6 +347,26 @@ def validate_tgs(path: Path) -> None:
     for key in ("v", "fr", "ip", "op", "layers"):
         if key not in lottie:
             raise MediaError(f"{path.name}: Lottie missing required key {key!r}")
+
+    w, h = lottie.get("w"), lottie.get("h")
+    if (w, h) != (TGS_SIZE, TGS_SIZE):
+        raise MediaError(f"{path.name}: canvas {w}x{h}, expected "
+                         f"{TGS_SIZE}x{TGS_SIZE}")
+    try:
+        fr = float(lottie["fr"])
+        frames = float(lottie["op"]) - float(lottie["ip"])
+    except (TypeError, ValueError) as exc:
+        raise MediaError(f"{path.name}: non-numeric fr/ip/op ({exc})") from exc
+    if fr <= 0:
+        raise MediaError(f"{path.name}: frame rate {fr} must be positive")
+    if fr > TGS_FPS:
+        raise MediaError(f"{path.name}: {fr} fps > {TGS_FPS} fps")
+    duration = frames / fr
+    if duration <= 0:
+        raise MediaError(f"{path.name}: empty timeline (ip={lottie['ip']}, "
+                         f"op={lottie['op']})")
+    if duration > TGS_MAX_SECONDS + 0.01:
+        raise MediaError(f"{path.name}: {duration:.2f}s > {TGS_MAX_SECONDS}s")
 
 
 # --------------------------------------------------------------------------- #
