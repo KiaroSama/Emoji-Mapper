@@ -83,6 +83,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Project logos in `assets/`, shown in the README and the curate panel.
+- **The emoji bot is now private.** `BOT_ALLOWED_USER_IDS` lists the numeric
+  Telegram ids allowed to use it (defaulting to `PACK_OWNER_USER_ID`). An unset
+  allowlist means *nobody* — the bot refuses to start rather than run open.
+  Authorization is checked on the message sender, so a stranger cannot extract
+  emoji ids; unauthorized group messages are ignored silently.
+- **`PACK_LINKS_CHAT_ID`** announces finished-pack links in a channel (numeric
+  id or `@username`) instead of the owner's private chat. The bot must be an
+  administrator of that channel; unset keeps the previous PM behaviour.
+- **`EMOJI_LOG_RETENTION_DAYS`** (default 30) prunes old run logs, which
+  previously accumulated one file per run forever. The end-of-run summary now
+  also reports the outcome and the real exit code.
+- Publication records are queryable per pack family: `is_published(base, key)`,
+  `custom_emoji_id_for(base, key)`, `publication_bases()` and
+  `forget_publication(base)` to make a deleted pack family publishable again.
 - **Curate panel — drag to reorder.** Emoji can now be dragged to set the
   **publish order**. The order is persisted to a new `items.position` column
   (`Catalog.set_order`, POST `/api/order`) and drives both the panel and
