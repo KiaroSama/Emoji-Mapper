@@ -43,6 +43,24 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parent
+
+
+def write_json_atomic(path: Path, data) -> None:
+    """Write JSON so an interrupted run can never leave a truncated file.
+
+    Upload progress lives in these files: a half-written state file is read back
+    as corrupt (or, worse, silently replaced by an empty default) and the whole
+    source set gets uploaded again. Write to a sibling temp file, flush it to
+    disk, then rename -- rename is atomic on both NTFS and POSIX.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 # Default source/keyword locations (crypto-coin workflow). Override per run with
 # --source-dir / --keywords so the same engine builds any kind of emoji pack.
 EMOJI_DIR = ROOT / "logos" / "emoji"
@@ -54,9 +72,26 @@ STATE_FILE = ROOT / "pack_state.json"
 
 # Custom emoji must be 100x100 PNG; build_pack uploads the prepared PNGs.
 _MIME = {".png": "image/png", ".webp": "image/webp"}
-API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 DEFAULT_EMOJI = "\U0001FA99"  # ߞ coin
-PER_SET = 400
+# Telegram's hard cap for a custom-emoji set. See
+# https://core.telegram.org/bots/api#addstickertoset -- "Emoji sticker sets can
+# have up to 200 stickers." Exceeding it only produces STICKERS_TOO_MUCH at
+# upload time, after the wrong set count has already been planned.
+MAX_PER_SET = 200
+PER_SET = MAX_PER_SET
+# Upper bound on how long a create may wait for a deleted set name to be
+# released, across all of its retries.
+NAME_LOCK_TIMEOUT = 300.0
+
+
+def api_base() -> str:
+    """Resolve the API base per call, not at import.
+
+    ``load_env()`` runs inside main(), which is *after* this module is imported,
+    so reading the env var at import time silently ignores a TELEGRAM_API_BASE
+    that is configured only in .env.
+    """
+    return os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 
 
 def load_env() -> None:
@@ -92,6 +127,15 @@ class Telegram:
         self.token = token
         self.s = requests.Session()
 
+    def _safe(self, exc: BaseException) -> str:
+        """Exception text with the bot token stripped.
+
+        Every request URL embeds the token, and requests puts the URL in its
+        exception message -- printing ``str(exc)`` raw publishes the token to
+        the console and, via the coin runner's output redirect, to a log file.
+        """
+        return str(exc).replace(self.token, "[REDACTED]")
+
     def _call(self, method: str, *, data=None, files=None, retries: int = 5,
               applied_check=None):
         """POST a Bot API method with retries.
@@ -106,7 +150,13 @@ class Telegram:
                    caller reconciles instead of guessing.
         Without a check, such methods keep the historical blind-retry behavior.
         """
-        url = f"{API_BASE}/bot{self.token}/{method}"
+        url = f"{api_base()}/bot{self.token}/{method}"
+        # A just-deleted set name stays locked for ~2 min, so a CREATE may
+        # legitimately need to wait it out. For every other method
+        # STICKERSET_INVALID means "no such set" -- a permanent answer that must
+        # be returned at once, not slept on for six minutes.
+        name_lock_retry = method == "createNewStickerSet"
+        deadline = time.monotonic() + NAME_LOCK_TIMEOUT
         for attempt in range(1, retries + 1):
             try:
                 r = self.s.post(url, data=data, files=files, timeout=60)
@@ -120,12 +170,13 @@ class Telegram:
                     print(f"  flood wait {wait}s ({method})", flush=True)
                     time.sleep(wait + 1)
                     continue
-                # A just-deleted sticker-set name stays locked for ~2 min; recreating
-                # it too soon yields STICKERSET_INVALID. Wait it out and retry.
                 if "stickerset_invalid" in desc.lower():
-                    wait = min(30 * attempt, 90)
+                    remaining = deadline - time.monotonic()
+                    if not name_lock_retry or attempt >= retries or remaining <= 0:
+                        raise RuntimeError(f"{method} failed: {desc}")
+                    wait = min(30 * attempt, 90, remaining)
                     print(f"  stickerset_invalid; name not released yet, "
-                          f"wait {wait}s ({method})", flush=True)
+                          f"wait {wait:.0f}s ({method})", flush=True)
                     time.sleep(wait)
                     continue
                 raise RuntimeError(f"{method} failed: {desc}")
@@ -140,10 +191,13 @@ class Telegram:
                     if applied is None:
                         raise AmbiguousUploadError(
                             f"{method}: network failure and live state "
-                            f"unknown ({exc})") from exc
+                            f"unknown ({self._safe(exc)})") from exc
                     # applied is False: definitely not applied, safe to re-send.
+                if attempt >= retries:
+                    break          # never sleep after the final attempt
                 wait = min(3 * attempt, 20)
-                print(f"  net retry {attempt}/{retries} ({method}): {exc} (wait {wait}s)", flush=True)
+                print(f"  net retry {attempt}/{retries} ({method}): "
+                      f"{self._safe(exc)} (wait {wait}s)", flush=True)
                 time.sleep(wait)
         raise RuntimeError(f"{method} failed after {retries} attempts")
 
@@ -157,7 +211,7 @@ class Telegram:
         name-release lock and waits minutes, which a probe must not do).
         """
         try:
-            r = self.s.post(f"{API_BASE}/bot{self.token}/getStickerSet",
+            r = self.s.post(f"{api_base()}/bot{self.token}/getStickerSet",
                             data={"name": name}, timeout=30)
             payload = r.json()
         except (requests.RequestException, ValueError):
@@ -263,7 +317,7 @@ class Telegram:
     def download_file(self, file_id: str, dest: Path, retries: int = 5) -> Path:
         """Download a Telegram file (by file_id) to ``dest`` (with retries)."""
         info = self._call("getFile", data={"file_id": file_id})
-        url = f"{API_BASE}/file/bot{self.token}/{info['file_path']}"
+        url = f"{api_base()}/file/bot{self.token}/{info['file_path']}"
         for attempt in range(1, retries + 1):
             try:
                 r = self.s.get(url, timeout=60)
@@ -272,9 +326,11 @@ class Telegram:
                 dest.write_bytes(r.content)
                 return dest
             except requests.RequestException as exc:
+                if attempt >= retries:
+                    break
                 wait = min(3 * attempt, 15)
-                print(f"  download retry {attempt}/{retries}: {exc} (wait {wait}s)",
-                      flush=True)
+                print(f"  download retry {attempt}/{retries}: "
+                      f"{self._safe(exc)} (wait {wait}s)", flush=True)
                 time.sleep(wait)
         raise RuntimeError(f"download failed for file_id {file_id}")
 
@@ -387,6 +443,14 @@ def main() -> int:
         print("ERROR: provide --user-id or PACK_OWNER_USER_ID (your numeric Telegram id).",
               file=sys.stderr)
         return 2
+    if not 1 <= args.per_set <= MAX_PER_SET:
+        print(f"ERROR: --per-set must be between 1 and {MAX_PER_SET} "
+              f"(Telegram's cap for a custom-emoji set); got {args.per_set}.",
+              file=sys.stderr)
+        return 2
+    if args.limit < 0 or args.start < 0:
+        print("ERROR: --limit and --start must not be negative.", file=sys.stderr)
+        return 2
 
     # Per-base state file so coin and general packs never clobber each other.
     state_file = Path(args.state) if args.state else ROOT / f"state_{args.base}.json"
@@ -431,32 +495,54 @@ def main() -> int:
     if state_file.is_file():
         try:
             loaded = json.loads(state_file.read_text(encoding="utf-8"))
-            if loaded.get("base") == args.base:
-                state = loaded
-        except Exception:  # noqa: BLE001
-            pass
+        except (OSError, ValueError) as exc:
+            # Continuing from the empty default would treat every already
+            # uploaded image as pending and upload the whole set a second time.
+            print(f"ERROR: cannot read resume state {state_file}: {exc}\n"
+                  f"       Refusing to start from scratch -- that would re-upload "
+                  f"everything already published.\n"
+                  f"       Inspect or delete the file deliberately, then re-run.",
+                  file=sys.stderr)
+            return 4
+        if loaded.get("base") == args.base:
+            state = loaded
     done = set(state["done"])
     sets = state["sets"]
 
     pending = [p for p in sources if p.stem.lower() not in done]
 
-    # Resume safety: reconcile the ACTIVE set's count from LIVE Telegram and
-    # positionally attribute any uploads a previous run applied but never
-    # saved (crash / ambiguous network failure). The pending order is
-    # deterministic, so the first (live - counted) pending images are exactly
-    # those unrecorded uploads -- marking them done prevents re-uploading
-    # them, which would put the same emoji in the pack twice.
+    # Resume safety. A previous run can have applied an upload without recording
+    # it (crash, or an ambiguous network failure). Which image that was is known
+    # exactly, because the intent is written BEFORE the request: state["in_flight"]
+    # names it. Positional attribution -- "the first (live - counted) pending
+    # images must be the unrecorded ones" -- is wrong as soon as any earlier
+    # image was skipped for being missing/unusable, because a skip consumes a
+    # position in `pending` without producing a sticker; that mis-attribution
+    # both re-uploads a duplicate and marks the wrong image as done.
     if sets:
         known, sset = tg.probe_sticker_set(sets[-1]["name"])
         if known and sset is not None:
             live_n = len(sset.get("stickers", []))
             drift = live_n - sets[-1]["count"]
-            if drift > 0:
-                for p in pending[:drift]:
-                    done.add(p.stem.lower())
-                    print(f"  reconciled from live: {p.stem} already uploaded", flush=True)
-                pending = pending[drift:]
+            in_flight = state.get("in_flight")
+            if drift == 1 and in_flight:
+                done.add(in_flight)
+                pending = [p for p in pending if p.stem.lower() != in_flight]
                 sets[-1]["count"] = live_n
+                print(f"  reconciled from live: {in_flight} was applied before "
+                      f"the crash", flush=True)
+            elif drift > 0:
+                # More live stickers than we can account for: another run, a
+                # manual edit, or a lost in-flight record. Guessing here is what
+                # writes the wrong emoji id onto the wrong item.
+                print(f"ERROR: {sets[-1]['name']} has {live_n} stickers but state "
+                      f"records {sets[-1]['count']} and no single in-flight upload "
+                      f"explains the difference.\n"
+                      f"       Refusing to guess which images are already live. "
+                      f"Reconcile the set manually, or delete it and re-run.",
+                      file=sys.stderr)
+                return 4
+    state["in_flight"] = None
 
     print(f"Bot: @{bot_username}  owner_user_id={args.user_id}  "
           f"images={len(sources)}  already_done={len(done)}  pending={len(pending)}", flush=True)
@@ -465,7 +551,7 @@ def main() -> int:
         state["done"] = sorted(done)
         state["sets"] = sets
         state["sent"] = sorted(sent)
-        state_file.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        write_json_atomic(state_file, state)
 
     sent = set(state.get("sent", []))
 
@@ -517,6 +603,13 @@ def main() -> int:
             if not path.is_file() or path.stat().st_size == 0:
                 print(f"  skip {ticker}: missing/empty file", flush=True)
                 continue
+
+            # Write the intent BEFORE the request. If the process dies between
+            # Telegram applying the upload and us recording it, the next run
+            # knows exactly which image that was instead of inferring it from
+            # positions (see the resume block above).
+            state["in_flight"] = ticker
+            save_state()
 
             try:
                 placed = False
@@ -570,11 +663,13 @@ def main() -> int:
                 continue
             in_set += 1
             done.add(ticker)
+            state["in_flight"] = None
+            # Persist immediately: batching this every 10 items is what leaves a
+            # window where an upload is live but unrecorded.
+            save_state()
             if in_set >= args.per_set:
                 in_set = 0
             notify_full_sets()  # send link as soon as a pack is full
-            if (i + 1) % 10 == 0:
-                save_state()
             if (i + 1) % 50 == 0:
                 print(f"  ...{i + 1}/{len(pending)} added this run", flush=True)
             time.sleep(0.1)

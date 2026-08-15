@@ -30,19 +30,20 @@ import os as _bootstrap_os, sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
+import argparse
 import csv
 import hashlib
 import json
 import os
 import re
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
 
 from PIL import Image
 
-from build_pack import AmbiguousUploadError, Telegram, load_env
+from build_pack import (AmbiguousUploadError, Telegram, load_env,
+                        write_json_atomic)
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -59,6 +60,11 @@ BASE = "gvcryptoemoji"
 TITLE = "@GodVerify Crypto Emoji"
 EMOJI_CHAR = "\U0001FA99"
 PER_SET = 200
+# Above this, a set of tickers sharing one emoji id is treated as corruption
+# rather than a shared logo. Real shared-logo groups are one asset on several
+# chains (USDT on 8, USDC on 9); the positional-drift bug produced a group of
+# 129 unrelated coins.
+SHARED_GROUP_LIMIT = 20
 load_env()  # ensure .env is loaded before resolving the owner id at import
 # Pack owner numeric Telegram id (from .env / env; never hardcode a personal id).
 USER_ID = int(os.environ.get("PACK_OWNER_USER_ID", "0"))
@@ -137,12 +143,23 @@ def load_plan() -> list[dict]:
 
 def load_state() -> dict:
     if STATE.is_file():
-        return json.loads(STATE.read_text(encoding="utf-8"))
-    return {"sets": [], "sent": [], "deleted_old": False, "final_sent": False}
+        try:
+            return json.loads(STATE.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # Never fall back to the empty default: that resets deleted_old and
+            # the cursor, so the whole plan is uploaded again as duplicates.
+            raise SystemExit(
+                f"ERROR: resume state {STATE.name} is unreadable ({exc}).\n"
+                f"       Refusing to restart from zero -- that would re-upload "
+                f"every image already published.\n"
+                f"       Inspect the file (a .tmp sibling may hold the last "
+                f"write) and restore it deliberately.")
+    return {"sets": [], "sent": [], "deleted_old": False, "final_sent": False,
+            "order": [], "cursor": 0, "in_flight": None}
 
 
 def save_state(s: dict) -> None:
-    STATE.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_json_atomic(STATE, s)
 
 
 def live_count(tg: Telegram, name: str) -> int:
@@ -189,19 +206,64 @@ def build(tg: Telegram, bot: str) -> None:
     state = load_state()
     state.setdefault("order", [])  # actual successful-upload order (drift-proof map)
 
+    if not USER_ID:
+        raise SystemExit("ERROR: PACK_OWNER_USER_ID is not set (env or .env); "
+                         "refusing to start a rebuild without a pack owner.")
+    # Validate BEFORE destroying anything. An empty or unusable plan (missing
+    # emoji directory, unreadable plan file) would otherwise delete every
+    # existing pack and then have nothing to rebuild them from.
+    if not plan:
+        raise SystemExit(
+            f"ERROR: the rebuild plan is empty ({PLAN.name}); nothing to build.\n"
+            f"       Expected prepared 100x100 PNGs in {EMOJI}.\n"
+            f"       Refusing to delete the existing packs.")
+
     if not state.get("deleted_old"):
-        print("deleting ALL old packs (full rebuild)...", flush=True)
+        print(f"deleting ALL old packs and rebuilding {len(plan)} images...",
+              flush=True)
         delete_old_packs(tg)
         state["deleted_old"] = True
         save_state(state)
 
-    # Reconcile progress from LIVE counts -> duplicate-proof.
+    # Resume position comes from the RECORDED cursor, never from the live
+    # sticker count. A plan entry that is skipped (missing / blank / failed)
+    # consumes a plan position but produces no sticker, so `sum(live)` drifts
+    # behind the plan index by one per skip -- resuming at plan[sum(live)] then
+    # re-uploads entries that are already published, which is exactly how
+    # duplicates and the mis-aligned ticker map were produced.
+    state.setdefault("cursor", 0)
+    state.setdefault("in_flight", None)
     cum = 0
     for s in state["sets"]:
         s["live"] = live_count(tg, s["name"])
         cum += s["live"]
+
+    # An upload recorded as in flight may or may not have landed; the live count
+    # answers that exactly, for that one entry.
+    if state["in_flight"]:
+        if cum == len(state["order"]) + 1:
+            state["order"].append(state["in_flight"])
+            print(f"  resume: {state['in_flight']} did land before the "
+                  f"interruption", flush=True)
+        else:
+            print(f"  resume: {state['in_flight']} did not land; retrying",
+                  flush=True)
+            state["cursor"] = max(0, state["cursor"] - 1)
+        state["in_flight"] = None
+        save_state(state)
+
+    if cum != len(state["order"]):
+        raise SystemExit(
+            f"ERROR: {cum} stickers are live but only {len(state['order'])} "
+            f"uploads are recorded.\n"
+            f"       Refusing to continue: the recorded order is what maps "
+            f"stickers to tickers, and continuing from a disagreeing state is "
+            f"what corrupts ticker_to_id.json.\n"
+            f"       Reconcile with coins/remap_ids.py, or delete the packs and "
+            f"the state file to rebuild cleanly.")
+
     print(f"resume: {len(state['sets'])} sets, {cum} live stickers, "
-          f"{len(plan) - cum} pending", flush=True)
+          f"plan position {state['cursor']}/{len(plan)}", flush=True)
 
     if state["sets"] and state["sets"][-1]["live"] < PER_SET:
         cur = state["sets"][-1]
@@ -209,15 +271,24 @@ def build(tg: Telegram, bot: str) -> None:
     else:
         set_index, set_name, in_set = len(state["sets"]), "", 0
 
-    for g in plan[cum:]:
+    for plan_i in range(state["cursor"], len(plan)):
+        g = plan[plan_i]
         png = EMOJI / f"{g['rep']}.png"
+        # Permanent skips: deterministic, so simply advancing past them is safe.
         if not png.is_file() or png.stat().st_size == 0:
             print(f"  skip {g['rep']}: missing/empty", flush=True)
+            state["cursor"] = plan_i + 1
             continue
         if is_blank(png):
             print(f"  skip {g['rep']}: blank image (no blank emoji)", flush=True)
+            state["cursor"] = plan_i + 1
             continue
         kw = g["kw"]
+        # Write the intent before the request, so an interruption anywhere in
+        # the upload leaves an exact record of which entry was in flight.
+        state["cursor"] = plan_i + 1
+        state["in_flight"] = g["rep"]
+        save_state(state)
         try:
             placed = False
             if in_set != 0:
@@ -253,17 +324,23 @@ def build(tg: Telegram, bot: str) -> None:
                 else:
                     set_index -= 1
                     print(f"  {g['rep']}: {exc}; reconciled on next run", flush=True)
+                    save_state(state)   # keep in_flight: next run resolves it
                     continue
             else:
                 print(f"  {g['rep']}: {exc}; reconciled on next run", flush=True)
+                save_state(state)       # keep in_flight: next run resolves it
                 continue
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
             print(f"  skip {g['rep']}: {exc}", flush=True)
+            state["in_flight"] = None   # definitively not applied
+            save_state(state)
             continue
         in_set += 1
         state["order"].append(g["rep"])  # record actual upload order
+        state["in_flight"] = None
+        save_state(state)                # persist before the next request
         if in_set >= PER_SET:
             notify(tg, state, set_name, f"{TITLE} {set_index}")
             in_set = 0
@@ -304,6 +381,33 @@ def reapply_aliases(new_map: dict[str, str]) -> int:
     return added
 
 
+def approved_shared_tickers() -> set[str]:
+    """Tickers reviewed as legitimately sharing a logo (shared_logo_groups.json)."""
+    if not GROUPS_REPORT.is_file():
+        return set()
+    try:
+        groups = json.loads(GROUPS_REPORT.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {t for members in groups.values() for t in members}
+
+
+def unapproved_shared_groups(mapping: dict[str, str]) -> dict[str, list[str]]:
+    """Emoji ids claimed by several tickers that were never reviewed as shared.
+
+    Two coins may legitimately share one image (Tether on six chains), and those
+    groups are recorded in shared_logo_groups.json. Anything else pointing many
+    tickers at one id is the signature of a mis-aligned mapping, not a shared
+    logo -- and it is silent, because the map stays structurally valid.
+    """
+    approved = approved_shared_tickers()
+    by_id: dict[str, list[str]] = defaultdict(list)
+    for ticker, cid in mapping.items():
+        by_id[str(cid)].append(ticker)
+    return {cid: tickers for cid, tickers in by_id.items()
+            if len(tickers) > 1 and not set(tickers) <= approved}
+
+
 def map_and_fill(tg: Telegram) -> None:
     plan = load_plan()
     state = load_state()
@@ -315,31 +419,67 @@ def map_and_fill(tg: Telegram) -> None:
 
     ticker_to_id: dict[str, str] = {}
     order = state.get("order") or []
-    if len(order) == len(cids) and order:
-        # Preferred, drift-proof: map cids to the ACTUAL upload order recorded
-        # during build (immune to skipped/failed items shifting positions).
-        by_rep = {g["rep"]: g for g in plan}
-        for i, cid in enumerate(cids):
-            g = by_rep.get(order[i])
-            if not g:
-                continue
-            for t in g["tickers"]:
-                ticker_to_id[t] = cid
-        print(f"mapped via recorded upload order ({len(cids)} stickers)", flush=True)
-    else:
-        # Fallback (legacy): assumes live order == plan order. If this warns, run
-        # coins/remap_ids.py to rebuild the map from image content instead.
-        if len(cids) != len(plan):
-            print(f"  WARNING: live stickers {len(cids)} != plan {len(plan)} and no "
-                  f"upload-order record; mapping by position may be WRONG. "
-                  f"Run coins/remap_ids.py to fix by image content.", flush=True)
-        for i, cid in enumerate(cids):
-            if i >= len(plan):
-                break
-            for t in plan[i]["tickers"]:
-                ticker_to_id[t] = cid
+    # The ONLY sound mapping is the recorded upload order. The former positional
+    # fallback ("assume live order == plan order") printed a warning and then
+    # overwrote the canonical map anyway; with skipped entries the assignments
+    # drift by one per skip, which is what put 129 unrelated tickers on a single
+    # emoji id. There is no safe guess here -- refuse instead.
+    if len(order) != len(cids) or not order:
+        candidate = ROOT / "ticker_to_id.candidate.json"
+        write_json_atomic(candidate, {
+            "error": "upload-order record does not match live stickers",
+            "recorded_uploads": len(order), "live_stickers": len(cids),
+            "plan_entries": len(plan),
+        })
+        raise SystemExit(
+            f"ERROR: {len(order)} recorded uploads but {len(cids)} live "
+            f"stickers.\n"
+            f"       Refusing to write {TICKER_IDS.name} from positional "
+            f"guesswork -- that is what corrupts the map.\n"
+            f"       Rebuild identities from image content with "
+            f"coins/remap_ids.py. Details: {candidate.name}")
+
+    by_rep = {g["rep"]: g for g in plan}
+    for i, cid in enumerate(cids):
+        g = by_rep.get(order[i])
+        if not g:
+            continue
+        for t in g["tickers"]:
+            ticker_to_id[t] = cid
+    print(f"mapped via recorded upload order ({len(cids)} stickers)", flush=True)
+
+    # The same plan entry appearing twice means the image really was uploaded
+    # twice -- a duplicate in the pack, and the map would silently keep only the
+    # later id.
+    repeated = sorted({rep for rep in order if order.count(rep) > 1})
+    if repeated:
+        raise SystemExit(
+            f"ERROR: {len(repeated)} image(s) were uploaded more than once "
+            f"(e.g. {repeated[:5]}).\n"
+            f"       Refusing to write {TICKER_IDS.name} over a pack that "
+            f"contains duplicates. Remove the extra stickers first.")
+
     reapply_aliases(ticker_to_id)
-    TICKER_IDS.write_text(json.dumps(ticker_to_id, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    bad = unapproved_shared_groups(ticker_to_id)
+    oversized = {cid: ts for cid, ts in bad.items() if len(ts) > SHARED_GROUP_LIMIT}
+    if oversized:
+        biggest = max(oversized.values(), key=len)
+        candidate = ROOT / "ticker_to_id.candidate.json"
+        write_json_atomic(candidate, ticker_to_id)
+        raise SystemExit(
+            f"ERROR: one emoji id would be shared by {len(biggest)} unreviewed "
+            f"tickers (e.g. {sorted(biggest)[:6]}).\n"
+            f"       A group that large is the signature of a mis-aligned "
+            f"mapping, not a shared logo. Refusing to overwrite "
+            f"{TICKER_IDS.name}; review {candidate.name} instead.")
+    if bad:
+        print(f"  note: {len(bad)} shared-logo group(s) are not listed in "
+              f"{GROUPS_REPORT.name} (largest {max(len(t) for t in bad.values())}). "
+              f"Cross-chain variants of one asset are expected here; add them to "
+              f"that file to silence this.", flush=True)
+
+    write_json_atomic(TICKER_IDS, ticker_to_id)
     print(f"mapped {len(ticker_to_id)} tickers across {len(sets)} sets "
           f"({len(cids)} live stickers)", flush=True)
     fill_inventory(ticker_to_id)
@@ -383,10 +523,22 @@ def send_final_links(tg: Telegram) -> None:
 
 
 if __name__ == "__main__":
+    # Explicit parsing: the previous code treated ANY unrecognised first
+    # argument -- including a typo like "buid" -- as "run the full destructive
+    # rebuild", so a slip deleted every pack. Unknown input must fail closed.
+    _ap = argparse.ArgumentParser(
+        description="Deduplicated rebuild of the crypto custom-emoji packs.")
+    _ap.add_argument("command", nargs="?", default="all",
+                     choices=["all", "build", "map", "links"],
+                     help="all = delete old packs + build + map + links "
+                          "(DESTRUCTIVE); build = upload only; "
+                          "map = rebuild ticker_to_id.json; links = resend links")
+    _args = _ap.parse_args()
+
     load_env()
     _tg = Telegram(os.environ["TELEGRAM_BOT_TOKEN"])
     _bot = _tg.get_me()["username"]
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    arg = _args.command
     if arg == "map":
         map_and_fill(_tg)
     elif arg == "links":
@@ -402,8 +554,14 @@ if __name__ == "__main__":
             traceback.print_exc()
         state = load_state()
         live = sum(live_count(_tg, s["name"]) for s in state["sets"])
-        print(f"buildonly checkpoint: {live}/{len(plan)} live", flush=True)
-        raise SystemExit(0 if live >= len(plan) else 3)
+        cursor = state.get("cursor", 0)
+        print(f"buildonly checkpoint: plan position {cursor}/{len(plan)}, "
+              f"{live} live stickers", flush=True)
+        # Done means "walked the whole plan", NOT "live count reached the plan
+        # length". Entries that are permanently skipped (missing/blank image)
+        # never become stickers, so a live-count gate can never be satisfied and
+        # the restart loop keeps re-running forever, adding duplicates.
+        raise SystemExit(0 if cursor >= len(plan) else 3)
     else:
         build(_tg, _bot)
         map_and_fill(_tg)
