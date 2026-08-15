@@ -157,8 +157,22 @@ class Catalog:
         return row["content_key"] if row else None
 
     def _record_seen(self, fuid: str, content_key: str) -> None:
+        """Map a Telegram file_unique_id to a catalog item, first mapping wins.
+
+        A file_unique_id identifies one file on Telegram, so it must not point
+        at two different items. INSERT OR REPLACE silently reassigned it, which
+        makes the fast pre-dedup resolve a sticker to the wrong emoji; keep the
+        original and report the conflict instead.
+        """
+        existing = self.seen_file_unique_id(fuid)
+        if existing is not None:
+            if existing != content_key:
+                log.warning(
+                    "file_unique_id %s already maps to %s; refusing to "
+                    "reassign it to %s", fuid, existing, content_key)
+            return
         self.db.execute(
-            "INSERT OR REPLACE INTO seen_files(file_unique_id, content_key) VALUES(?, ?)",
+            "INSERT INTO seen_files(file_unique_id, content_key) VALUES(?, ?)",
             (fuid, content_key),
         )
 
@@ -219,6 +233,7 @@ class Catalog:
             if file_unique_id:
                 self._record_seen(file_unique_id, canonical)
             self.db.commit()
+            self._drop_unreferenced(canonical, file_path)
             return canonical, False
 
         next_pos = self.db.execute(
@@ -235,6 +250,32 @@ class Catalog:
         self.db.commit()
         log.debug("new %s item %s (%s)", fmt, content_key, file_path)
         return content_key, True
+
+    def _drop_unreferenced(self, canonical: str, file_path: Path) -> None:
+        """Delete a just-ingested media file that lost a merge.
+
+        Callers move the file into permanent storage BEFORE add() decides, so a
+        merge (exact or near-duplicate) leaves that file on disk with no row
+        pointing at it. Only the losing copy is removed, never the canonical
+        row's own file.
+        """
+        row = self.db.execute(
+            "SELECT file_path FROM items WHERE content_key=?", (canonical,)
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            kept, losing = Path(row["file_path"]).resolve(), Path(file_path).resolve()
+        except OSError:
+            return
+        if kept == losing or not losing.is_file():
+            return
+        try:
+            losing.unlink()
+            log.debug("removed unreferenced media %s (merged into %s)",
+                      losing.name, canonical)
+        except OSError as exc:
+            log.warning("could not remove unreferenced media %s: %s", losing, exc)
 
     def _merge(self, key: str, emojis: list[str], keywords: list[str],
                source: str | None) -> None:
@@ -356,13 +397,26 @@ class Catalog:
 
     # ----- stats --------------------------------------------------------- #
     def stats(self) -> dict[str, dict[str, int]]:
-        """Per-format {total, uploaded, pending} counts."""
+        """Per-format {total, uploaded, excluded, pending} counts.
+
+        ``pending`` uses the SAME predicate as :meth:`pending` -- not uploaded
+        AND included. Counting it as ``total - uploaded`` reported items the
+        user had deliberately excluded as still waiting to publish, so the
+        number never reached zero.
+        """
         out: dict[str, dict[str, int]] = {}
         for r in self.db.execute(
-            "SELECT format, COUNT(*) n, SUM(uploaded) up FROM items GROUP BY format"
+            "SELECT format, COUNT(*) n, SUM(uploaded) up, "
+            "SUM(CASE WHEN included=0 THEN 1 ELSE 0 END) ex, "
+            "SUM(CASE WHEN uploaded=0 AND included=1 THEN 1 ELSE 0 END) pend "
+            "FROM items GROUP BY format"
         ):
-            total = int(r["n"]); up = int(r["up"] or 0)
-            out[r["format"]] = {"total": total, "uploaded": up, "pending": total - up}
+            out[r["format"]] = {
+                "total": int(r["n"]),
+                "uploaded": int(r["up"] or 0),
+                "excluded": int(r["ex"] or 0),
+                "pending": int(r["pend"] or 0),
+            }
         return out
 
 

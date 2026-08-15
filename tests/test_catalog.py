@@ -14,6 +14,69 @@ sys.path.insert(0, str(ROOT))
 from emojikit.catalog import Catalog  # noqa: E402
 
 
+class TestCatalogIntegrity(unittest.TestCase):
+    """Regressions for the catalog's silent-corruption paths."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cat = Catalog(self.tmp / "catalog.db", phash_threshold=-1)
+
+    def tearDown(self):
+        self.cat.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _media(self, name: str, data: bytes = b"x") -> Path:
+        p = self.tmp / name
+        p.write_bytes(data)
+        return p
+
+    def test_fuid_is_not_silently_reassigned(self):
+        """One Telegram file maps to one item; a conflict must not overwrite."""
+        self.cat.add(content_key="s:one", fmt="static",
+                     file_path=self._media("a.png"), file_unique_id="FUID1")
+        self.cat.add(content_key="s:two", fmt="static",
+                     file_path=self._media("b.png"), file_unique_id="FUID1")
+        self.assertEqual(self.cat.seen_file_unique_id("FUID1"), "s:one",
+                         "the first mapping must win")
+
+    def test_same_fuid_same_key_is_idempotent(self):
+        self.cat.add(content_key="s:one", fmt="static",
+                     file_path=self._media("a.png"), file_unique_id="FUID1")
+        self.cat.record_file_unique_id("FUID1", "s:one")
+        self.assertEqual(self.cat.seen_file_unique_id("FUID1"), "s:one")
+
+    def test_merged_duplicate_leaves_no_orphan_file(self):
+        """The losing copy of a dedup merge must not stay on disk."""
+        first = self._media("first.png")
+        self.cat.add(content_key="s:same", fmt="static", file_path=first)
+        second = self._media("second.png")
+        key, is_new = self.cat.add(content_key="s:same", fmt="static",
+                                   file_path=second)
+        self.assertFalse(is_new)
+        self.assertEqual(key, "s:same")
+        self.assertTrue(first.is_file(), "the canonical file must survive")
+        self.assertFalse(second.is_file(), "the redundant copy must be removed")
+
+    def test_readding_the_canonical_file_does_not_delete_it(self):
+        only = self._media("only.png")
+        self.cat.add(content_key="s:same", fmt="static", file_path=only)
+        self.cat.add(content_key="s:same", fmt="static", file_path=only)
+        self.assertTrue(only.is_file())
+
+    def test_excluded_items_are_not_counted_as_pending(self):
+        for i in range(3):
+            self.cat.add(content_key=f"s:k{i}", fmt="static",
+                         file_path=self._media(f"m{i}.png", bytes([i])))
+        self.cat.set_inclusion({"s:k0"})          # exclude one
+        stats = self.cat.stats()["static"]
+        pending_rows = [it for it in self.cat.pending() if it.fmt == "static"]
+        self.assertEqual(stats["total"], 3)
+        self.assertEqual(stats["excluded"], 1)
+        self.assertEqual(stats["pending"], len(pending_rows),
+                         "stats must use the publisher's own predicate")
+        self.assertEqual(stats["pending"], 2)
+
+
 class TestCatalog(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -80,7 +143,8 @@ class TestCatalog(unittest.TestCase):
         self.cat.add(content_key="s:b", fmt="static", file_path=self._f())
         self.cat.mark_uploaded("s:a", None)
         s = self.cat.stats()
-        self.assertEqual(s["static"], {"total": 2, "uploaded": 1, "pending": 1})
+        self.assertEqual(s["static"],
+                         {"total": 2, "uploaded": 1, "excluded": 0, "pending": 1})
 
     def test_large_phash_64bit(self):
         # A full 64-bit dHash can exceed SQLite's signed-64-bit INTEGER max.
