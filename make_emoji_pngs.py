@@ -205,6 +205,9 @@ def _run_general(in_dir: Path, out_dir: Path, limit: int) -> int:
             break
         name = p.stem.lower()
         out = out_dir / f"{name}.png"
+        # ponytail: the reuse scan is silent to run_convert.ps1's heartbeat at
+        # ~1.5 ms/output; only a folder of ~80k finished emojis would out-wait
+        # its per-file deadline. Write the marker while checking if that day comes.
         if name in quarantined or _output_ok(out, p):
             continue
         marker.write_text(name, encoding="utf-8")  # heartbeat + culprit if we hang
