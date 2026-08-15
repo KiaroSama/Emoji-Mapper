@@ -113,8 +113,23 @@ class Catalog:
                 file_unique_id TEXT PRIMARY KEY,
                 content_key    TEXT NOT NULL
             );
+            -- Publication state is per pack family (``base``), not per item.
+            -- A single items.uploaded flag meant that publishing a catalog to
+            -- one base marked its items done everywhere, so the SAME catalog
+            -- could never be published to a second base, and a deleted pack
+            -- could not be rebuilt without hand-editing the database.
+            CREATE TABLE IF NOT EXISTS publications (
+                base            TEXT NOT NULL,
+                content_key     TEXT NOT NULL,
+                set_name        TEXT,
+                custom_emoji_id TEXT,
+                uploaded_utc    TEXT NOT NULL,
+                PRIMARY KEY (base, content_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pub_base ON publications(base);
             """
         )
+        self._migrate_publications()
         # Migrate older databases that predate the 'included' column.
         try:
             self.db.execute("ALTER TABLE items ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
@@ -293,18 +308,96 @@ class Catalog:
         )
 
     # ----- publishing ---------------------------------------------------- #
-    def pending(self, fmt: str | None = None) -> list[Item]:
-        """Items not yet uploaded AND included, in deterministic (frozen) order."""
-        if fmt:
-            rows = self.db.execute(
-                "SELECT * FROM items WHERE uploaded=0 AND included=1 AND format=? "
-                "ORDER BY position, content_key", (fmt,),
-            ).fetchall()
+    # ----- publication records (per pack family) -------------------------- #
+    LEGACY_BASE = "__legacy__"
+
+    def _migrate_publications(self) -> None:
+        """Move pre-publications upload state into the new table, once.
+
+        Old databases only recorded "uploaded" globally and did not record WHICH
+        base it went to, so those rows land under LEGACY_BASE and are adopted by
+        the first base that publishes (see :meth:`adopt_legacy_publication`).
+        """
+        if self.get_meta("publications_migrated") == "1":
+            return
+        rows = self.db.execute(
+            "SELECT content_key, custom_emoji_id FROM items WHERE uploaded=1"
+        ).fetchall()
+        for r in rows:
+            self.db.execute(
+                "INSERT OR IGNORE INTO publications"
+                "(base, content_key, set_name, custom_emoji_id, uploaded_utc) "
+                "VALUES(?,?,?,?,?)",
+                (self.LEGACY_BASE, r["content_key"], None,
+                 r["custom_emoji_id"], _now()),
+            )
+        if rows:
+            log.info("migrated %d uploaded item(s) into publication records",
+                     len(rows))
+        self.set_meta("publications_migrated", "1")
+        self.db.commit()
+
+    def adopt_legacy_publication(self, base: str) -> int:
+        """Claim un-attributed legacy upload state for ``base``. Returns count."""
+        if self.db.execute("SELECT 1 FROM publications WHERE base=? LIMIT 1",
+                           (base,)).fetchone():
+            return 0
+        n = self.db.execute(
+            "UPDATE publications SET base=? WHERE base=?",
+            (base, self.LEGACY_BASE)).rowcount
+        if n:
+            log.info("adopted %d legacy publication record(s) into base %s", n, base)
+            self.db.commit()
+        return n
+
+    def publication_bases(self) -> list[str]:
+        return [r["base"] for r in self.db.execute(
+            "SELECT DISTINCT base FROM publications ORDER BY base")]
+
+    def is_published(self, base: str, content_key: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM publications WHERE base=? AND content_key=?",
+            (base, content_key)).fetchone() is not None
+
+    def custom_emoji_id_for(self, base: str, content_key: str) -> str | None:
+        row = self.db.execute(
+            "SELECT custom_emoji_id FROM publications WHERE base=? AND content_key=?",
+            (base, content_key)).fetchone()
+        return row["custom_emoji_id"] if row else None
+
+    def forget_publication(self, base: str) -> int:
+        """Drop every record for a pack family, so it can be published again.
+
+        Needed when the live sets were deleted or rebuilt: without this the
+        catalog insisted the items were already uploaded.
+        """
+        n = self.db.execute("DELETE FROM publications WHERE base=?", (base,)).rowcount
+        self.db.commit()
+        log.info("cleared %d publication record(s) for base %s", n, base)
+        return n
+
+    def pending(self, fmt: str | None = None, *, base: str | None = None) -> list[Item]:
+        """Included items still to publish, in deterministic (frozen) order.
+
+        With ``base`` the answer is scoped to that pack family, so the same
+        catalog can be published to several bases independently. Without it the
+        legacy global ``uploaded`` flag is used (kept for the ingest commands'
+        progress counts, which are not tied to a pack family).
+        """
+        where = ["included=1"]
+        params: list = []
+        if base is None:
+            where.append("uploaded=0")
         else:
-            rows = self.db.execute(
-                "SELECT * FROM items WHERE uploaded=0 AND included=1 "
-                "ORDER BY position, content_key"
-            ).fetchall()
+            where.append("content_key NOT IN "
+                         "(SELECT content_key FROM publications WHERE base=?)")
+            params.append(base)
+        if fmt:
+            where.append("format=?")
+            params.append(fmt)
+        rows = self.db.execute(
+            f"SELECT * FROM items WHERE {' AND '.join(where)} "
+            f"ORDER BY position, content_key", params).fetchall()
         return [_row_to_item(r) for r in rows]
 
     def all_items(self, fmt: str | None = None) -> list[Item]:
@@ -367,11 +460,28 @@ class Catalog:
         exc = self.db.execute("SELECT COUNT(*) FROM items WHERE included=0").fetchone()[0]
         return int(inc), int(exc)
 
-    def mark_uploaded(self, content_key: str, custom_emoji_id: str | None) -> None:
+    def mark_uploaded(self, content_key: str, custom_emoji_id: str | None, *,
+                      base: str | None = None, set_name: str | None = None) -> None:
+        """Record that an item is live, for a specific pack family.
+
+        ``base`` scopes the record so publishing to one family never marks the
+        item done for another. The legacy per-item columns are still mirrored,
+        because ingest commands report progress from them.
+        """
         self.db.execute(
             "UPDATE items SET uploaded=1, custom_emoji_id=? WHERE content_key=?",
             (custom_emoji_id, content_key),
         )
+        if base:
+            self.db.execute(
+                "INSERT INTO publications"
+                "(base, content_key, set_name, custom_emoji_id, uploaded_utc) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(base, content_key) DO UPDATE SET "
+                "  set_name=COALESCE(excluded.set_name, set_name),"
+                "  custom_emoji_id=COALESCE(excluded.custom_emoji_id, custom_emoji_id)",
+                (base, content_key, set_name, custom_emoji_id, _now()),
+            )
         self.db.commit()
 
     def get(self, content_key: str) -> Item | None:
