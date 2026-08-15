@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -198,6 +199,61 @@ class TestVideo(unittest.TestCase):
         out = media.to_video_webm(gif, self.tmp / "anim.webm")
         key = media.content_key(out, "video")
         self.assertTrue(key.startswith("v:"))
+
+    # --- validation must see what Telegram actually constrains -------------
+    def _lavfi(self, name, *extra, size="100x100", rate=30, duration=2):
+        out = self.tmp / name
+        subprocess.run(
+            [media.ffmpeg_path(), "-y", "-f", "lavfi", "-i",
+             f"testsrc2=size={size}:rate={rate}:duration={duration}", *extra,
+             str(out)], capture_output=True, check=True)
+        return out
+
+    VP9 = ("-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "50",
+           "-b:v", "0")
+
+    def test_compliant_webm_is_accepted(self):
+        media.validate_video(self._lavfi("ok.webm", *self.VP9, "-an"))
+
+    def test_audio_stream_is_rejected(self):
+        """Telegram video emoji must carry no audio.
+
+        probe_video used to select only stream v:0, so an audio track was
+        invisible to the validator.
+        """
+        out = self.tmp / "audio.webm"
+        subprocess.run(
+            [media.ffmpeg_path(), "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=100x100:rate=30:duration=2",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+             *self.VP9, "-c:a", "libopus", "-shortest", str(out)],
+            capture_output=True, check=True)
+        with self.assertRaises(media.MediaError) as cm:
+            media.validate_video(out)
+        self.assertIn("audio", str(cm.exception))
+
+    def test_excessive_frame_rate_is_rejected(self):
+        out = self._lavfi("fast.webm", *self.VP9, "-an", rate=60)
+        with self.assertRaises(media.MediaError) as cm:
+            media.validate_video(out)
+        self.assertIn("fps", str(cm.exception))
+
+    def test_wrong_codec_is_rejected(self):
+        out = self._lavfi("vp8.webm", "-c:v", "libvpx", "-crf", "50",
+                          "-b:v", "0", "-an")
+        with self.assertRaises(media.MediaError):
+            media.validate_video(out)
+
+    def test_wrong_container_is_rejected(self):
+        out = self._lavfi("x.mp4", *self.VP9, "-an", "-f", "mp4")
+        with self.assertRaises(media.MediaError) as cm:
+            media.validate_video(out)
+        self.assertIn("container", str(cm.exception))
+
+    def test_wrong_dimensions_are_rejected(self):
+        out = self._lavfi("big.webm", *self.VP9, "-an", size="512x512")
+        with self.assertRaises(media.MediaError):
+            media.validate_video(out)
 
 
 if __name__ == "__main__":

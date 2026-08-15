@@ -243,33 +243,72 @@ class VideoInfo:
     height: int
     duration: float
     codec: str
+    fps: float = 0.0
+    has_audio: bool = False
+    container: str = ""
+
+
+def _fps(rate: str) -> float:
+    """Parse an ffprobe rational frame rate ('30/1', '60000/1001')."""
+    try:
+        num, _, den = rate.partition("/")
+        return float(num) / float(den or 1)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def probe_video(path: Path) -> VideoInfo:
-    """Read width/height/duration/codec of a video file via ffprobe."""
+    """Read the properties Telegram actually constrains, via ffprobe.
+
+    Selecting only ``v:0`` hides the audio stream, so an .webm carrying audio
+    used to validate cleanly; frame rate and container were never read at all.
+    """
     ff = ffprobe_path()
-    cmd = [ff, "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "stream=width,height,codec_name:format=duration",
+    cmd = [ff, "-v", "error",
+           "-show_entries",
+           "stream=index,codec_type,codec_name,width,height,avg_frame_rate"
+           ":format=duration,format_name",
            "-of", "json", str(path)]
     res = _run(cmd, capture=True)
     data = json.loads(res.stdout.decode("utf-8", "replace"))
-    stream = (data.get("streams") or [{}])[0]
-    dur = float(data.get("format", {}).get("duration", 0) or 0)
-    return VideoInfo(int(stream.get("width", 0)), int(stream.get("height", 0)),
-                     dur, str(stream.get("codec_name", "")))
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    fmt = data.get("format", {})
+    return VideoInfo(
+        width=int(video.get("width", 0) or 0),
+        height=int(video.get("height", 0) or 0),
+        duration=float(fmt.get("duration", 0) or 0),
+        codec=str(video.get("codec_name", "")),
+        fps=_fps(str(video.get("avg_frame_rate", "0/1"))),
+        has_audio=has_audio,
+        container=str(fmt.get("format_name", "")),
+    )
 
 
 def validate_video(path: Path) -> None:
-    """Raise MediaError if a WEBM does not meet Telegram video-emoji rules."""
+    """Raise MediaError if a WEBM does not meet Telegram video-emoji rules.
+
+    Contract: .WEBM container, VP9, no audio stream, exactly 100x100, positive
+    duration <= 3 s, <= 30 fps, <= 256 KB. See core.telegram.org/stickers.
+    """
     info = probe_video(path)
     size = path.stat().st_size
     problems = []
     if (info.width, info.height) != (SIZE, SIZE):
         problems.append(f"dimensions {info.width}x{info.height} != {SIZE}x{SIZE}")
-    if info.duration > WEBM_MAX_SECONDS + 0.05:
+    if info.duration <= 0:
+        problems.append("duration is zero or unknown")
+    elif info.duration > WEBM_MAX_SECONDS + 0.05:
         problems.append(f"duration {info.duration:.2f}s > {WEBM_MAX_SECONDS}s")
     if info.codec != "vp9":
         problems.append(f"codec {info.codec!r} != 'vp9'")
+    if info.has_audio:
+        problems.append("contains an audio stream (video emoji must have none)")
+    if info.fps > WEBM_FPS + 0.01:
+        problems.append(f"{info.fps:.2f} fps > {WEBM_FPS} fps")
+    if "webm" not in info.container.split(","):
+        problems.append(f"container {info.container!r} is not webm")
     if size > WEBM_MAX_BYTES:
         problems.append(f"size {size} > {WEBM_MAX_BYTES} bytes")
     if problems:
