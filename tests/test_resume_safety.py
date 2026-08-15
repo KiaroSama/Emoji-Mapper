@@ -542,6 +542,248 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
                          "a skipped image must not report full success")
 
 
+class AmbiguousCreateForLaterSets(unittest.TestCase):
+    """An ambiguous CREATE of set #2+ must be reconciled against ITS OWN set.
+
+    Recovery used to probe only sets[-1]. For a create, the new set is not in
+    state["sets"] yet, so the old last set says nothing about whether it landed
+    -- the intent was effectively ignored whenever any earlier set existed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "src"
+        _png(self.src / "a.png", (200, 0, 0, 255))
+        _png(self.src / "b.png", (0, 200, 0, 255))
+        self.state = self.dir / "state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _state(self, **over):
+        base = {
+            "base": "t", "per_set": 1, "done": ["a"], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 1, "index": 1}],
+            "in_flight": {"key": "b", "operation": "create",
+                          "set_name": "t2_by_bot", "set_index": 2,
+                          "expected_before": 0, "title": "T 2"},
+        }
+        base.update(over)
+        bp.write_json_atomic(self.state, base)
+
+    def _run(self, tg):
+        argv = ["build_pack.py", "--base", "t", "--title", "T", "--user-id", "1",
+                "--source-dir", str(self.src), "--token-env", "FAKE_TOKEN",
+                "--state", str(self.state), "--per-set", "1"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.dict("os.environ", {"FAKE_TOKEN": "x"}, clear=False), \
+             mock.patch.object(bp, "Telegram", return_value=tg), \
+             mock.patch.object(bp.time, "sleep", lambda s: None):
+            return bp.main()
+
+    def _tg(self, states):
+        tg = mock.Mock()
+        tg.get_me.return_value = {"username": "bot"}
+        tg.probe_set_state.side_effect = lambda name: states[name]
+        tg.send_message.return_value = None
+        return tg
+
+    def test_landed_create_of_set_two_is_adopted(self):
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"}]}),
+        })
+        self._run(tg)
+        tg.create_set.assert_not_called()
+        tg.add_sticker.assert_not_called()
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("b", saved["done"], "the landed create must be adopted")
+        self.assertIn("t2_by_bot", [s["name"] for s in saved["sets"]])
+        self.assertIsNone(saved["in_flight"])
+
+    def test_missing_create_of_set_two_leaves_the_item_pending(self):
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.MISSING, None),
+        })
+        tg.create_set.return_value = None
+        self._run(tg)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("b", saved["done"], "b should be retried and then land")
+        self.assertTrue(tg.create_set.called, "a MISSING create must be retried")
+
+    def test_unknown_create_stops_retryably(self):
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.UNKNOWN, None),
+        })
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
+        tg.create_set.assert_not_called()
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIsNotNone(saved["in_flight"], "UNKNOWN must keep the intent")
+
+
+class RecordedSetIntegrity(unittest.TestCase):
+    """A recorded set that vanished or shrank invalidates the whole resume."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "src"
+        _png(self.src / "a.png", (200, 0, 0, 255))
+        self.state = self.dir / "state.json"
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": ["x"], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 5, "index": 1}],
+            "in_flight": None,
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, probe):
+        tg = mock.Mock()
+        tg.get_me.return_value = {"username": "bot"}
+        tg.probe_set_state.return_value = probe
+        tg.send_message.return_value = None
+        argv = ["build_pack.py", "--base", "t", "--title", "T", "--user-id", "1",
+                "--source-dir", str(self.src), "--token-env", "FAKE_TOKEN",
+                "--state", str(self.state)]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.dict("os.environ", {"FAKE_TOKEN": "x"}, clear=False), \
+             mock.patch.object(bp, "Telegram", return_value=tg), \
+             mock.patch.object(bp.time, "sleep", lambda s: None):
+            return bp.main(), tg
+
+    def test_deleted_recorded_set_is_an_integrity_stop(self):
+        code, tg = self._run((bp.SetState.MISSING, None))
+        self.assertEqual(code, bp.EXIT_FAILED)
+        tg.add_sticker.assert_not_called()
+        tg.create_set.assert_not_called()
+
+    def test_shrunken_set_is_an_integrity_stop(self):
+        code, tg = self._run(
+            (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f"}] * 3}))
+        self.assertEqual(code, bp.EXIT_FAILED, "negative drift must not be ignored")
+        tg.add_sticker.assert_not_called()
+
+    def test_unknown_recorded_set_is_retryable(self):
+        code, tg = self._run((bp.SetState.UNKNOWN, None))
+        self.assertEqual(code, bp.EXIT_PARTIAL)
+        tg.add_sticker.assert_not_called()
+
+
+class StateShapeValidation(unittest.TestCase):
+    """Valid JSON is not valid state; every resume number is load-bearing."""
+
+    def _ok(self, **over):
+        s = {"base": "t", "per_set": 200, "done": ["a"], "sets": [
+            {"name": "t1_by_bot", "title": "T 1", "count": 3, "index": 1}],
+            "in_flight": None}
+        s.update(over)
+        return s
+
+    def test_a_sound_state_passes(self):
+        bp.validate_state_shape(self._ok(), base="t", per_set=200)
+
+    def test_wrong_base_is_rejected(self):
+        with self.assertRaises(bp.StateInvalid):
+            bp.validate_state_shape(self._ok(base="other"), base="t", per_set=200)
+
+    def test_negative_and_oversized_counts_are_rejected(self):
+        for bad in (-1, 201):
+            s = self._ok(sets=[{"name": "n", "title": "", "count": bad, "index": 1}])
+            with self.assertRaises(bp.StateInvalid):
+                bp.validate_state_shape(s, base="t", per_set=200)
+
+    def test_duplicate_and_backwards_indexes_are_rejected(self):
+        dup = self._ok(sets=[{"name": "a", "title": "", "count": 1, "index": 1},
+                             {"name": "b", "title": "", "count": 1, "index": 1}])
+        back = self._ok(sets=[{"name": "a", "title": "", "count": 1, "index": 2},
+                              {"name": "b", "title": "", "count": 1, "index": 1}])
+        for s in (dup, back):
+            with self.assertRaises(bp.StateInvalid):
+                bp.validate_state_shape(s, base="t", per_set=200)
+
+    def test_malformed_intent_is_rejected(self):
+        for bad in ({"key": "a"}, {"key": "a", "operation": "add"},
+                    {"key": "a", "operation": "wat", "set_name": "s"}):
+            with self.assertRaises(bp.StateInvalid):
+                bp.validate_state_shape(self._ok(in_flight=bad),
+                                        base="t", per_set=200)
+
+    def test_done_must_hold_strings(self):
+        with self.assertRaises(bp.StateInvalid):
+            bp.validate_state_shape(self._ok(done=[1, 2]), base="t", per_set=200)
+
+
+class LockOwnership(unittest.TestCase):
+    """A lock may only be removed by the process that still owns it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock = Path(self.tmp.name) / "pack_x.lock"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_live_holder_is_never_reclaimed_however_old(self):
+        with bp.exclusive_lock(self.lock):
+            old = time.time() - 10 * 24 * 3600
+            os.utime(self.lock, (old, old))       # ancient, but WE are alive
+            with self.assertRaises(bp.LockBusy):
+                with bp.exclusive_lock(self.lock, stale_after=1):
+                    self.fail("stole a lock from a live process")
+
+    def test_a_dead_holder_is_reclaimed(self):
+        self.lock.write_text(
+            json.dumps({"token": "t", "pid": 999_999_999, "started": "old"}),
+            encoding="utf-8")
+        old = time.time() - 10_000
+        os.utime(self.lock, (old, old))
+        with bp.exclusive_lock(self.lock, stale_after=3600):
+            pass                                   # must not raise
+
+    def test_a_reclaimed_lock_is_not_deleted_by_the_old_holder(self):
+        """The bug: the original holder unlinked the REPLACEMENT holder's lock."""
+        cm = bp.exclusive_lock(self.lock)
+        cm.__enter__()
+        # Another process takes over the file entirely.
+        self.lock.write_text(json.dumps(
+            {"token": "other", "pid": 4242, "started": "now"}), encoding="utf-8")
+        cm.__exit__(None, None, None)
+        self.assertTrue(self.lock.exists(),
+                        "must not remove a lock owned by someone else")
+
+    def test_heartbeat_refreshes_the_lock(self):
+        with bp.exclusive_lock(self.lock) as heartbeat:
+            old = time.time() - 10_000
+            os.utime(self.lock, (old, old))
+            heartbeat()
+            self.assertGreater(self.lock.stat().st_mtime, old + 1000)
+
+
+class PackFamilyLock(unittest.TestCase):
+    """Every tool touching one pack family must contend for the SAME lock."""
+
+    def test_same_base_yields_the_same_path(self):
+        self.assertEqual(bp.pack_family_lock_path("cryptoemoji"),
+                         bp.pack_family_lock_path("cryptoemoji"))
+
+    def test_different_bases_do_not_collide(self):
+        self.assertNotEqual(bp.pack_family_lock_path("one"),
+                            bp.pack_family_lock_path("two"))
+
+    def test_unsafe_characters_are_normalised(self):
+        p = bp.pack_family_lock_path("../../etc/passwd")
+        self.assertEqual(p.parent, bp.LOCK_DIR)
+        self.assertNotIn("..", p.name)
+
+
 class SharedLogoGuard(unittest.TestCase):
     """The detector that would have caught the 129-ticker collision."""
 

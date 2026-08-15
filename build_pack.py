@@ -37,6 +37,9 @@ import contextlib
 import csv
 import json
 import os
+import re
+import secrets
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -69,6 +72,62 @@ def _intent_key(intent) -> str | None:
     if isinstance(intent, dict):
         return intent.get("key")
     return intent or None
+
+
+class StateInvalid(RuntimeError):
+    """Resume state is not internally consistent and must not drive mutations."""
+
+
+def validate_state_shape(state: dict, *, base: str, per_set: int) -> None:
+    """Raise StateInvalid unless the resume state can be trusted.
+
+    Valid JSON is not the same as valid state: a file can parse cleanly and
+    still claim a negative sticker count or two sets sharing an index, and every
+    later decision (which set is active, how many stickers to expect) is built
+    on those numbers.
+    """
+    if not isinstance(state, dict):
+        raise StateInvalid("state is not an object")
+    if state.get("base") != base:
+        raise StateInvalid(f"state belongs to base {state.get('base')!r}")
+
+    done = state.get("done", [])
+    if not isinstance(done, list) or not all(isinstance(x, str) for x in done):
+        raise StateInvalid("'done' must be a list of item keys")
+
+    sets = state.get("sets", [])
+    if not isinstance(sets, list):
+        raise StateInvalid("'sets' must be a list")
+    seen_indexes: set[int] = set()
+    last_index = 0
+    for i, s in enumerate(sets):
+        if not isinstance(s, dict):
+            raise StateInvalid(f"sets[{i}] is not an object")
+        name, index, count = s.get("name"), s.get("index"), s.get("count")
+        if not isinstance(name, str) or not name:
+            raise StateInvalid(f"sets[{i}] has no name")
+        if not isinstance(index, int) or index < 1:
+            raise StateInvalid(f"sets[{i}] has a bad index {index!r}")
+        if index in seen_indexes:
+            raise StateInvalid(f"sets[{i}] repeats index {index}")
+        if index < last_index:
+            raise StateInvalid(f"sets[{i}] index {index} goes backwards")
+        if not isinstance(count, int) or not 0 <= count <= per_set:
+            raise StateInvalid(
+                f"sets[{i}] count {count!r} outside 0..{per_set}")
+        seen_indexes.add(index)
+        last_index = index
+
+    intent = state.get("in_flight")
+    if intent is not None and not isinstance(intent, (dict, str)):
+        raise StateInvalid("'in_flight' must be an intent object or null")
+    if isinstance(intent, dict):
+        for field in ("key", "operation", "set_name"):
+            if not intent.get(field):
+                raise StateInvalid(f"in_flight is missing {field!r}")
+        if intent["operation"] not in ("add", "create"):
+            raise StateInvalid(
+                f"in_flight operation {intent['operation']!r} is unknown")
 
 
 def make_intent(*, key: str, operation: str, set_name: str, set_index: int,
@@ -114,46 +173,112 @@ def safe_int_env(name: str, default: int = 0, *, minimum: int | None = None,
 
 
 class LockBusy(RuntimeError):
-    """Another process already holds this publisher's lock."""
+    """Another process already holds this pack family's lock."""
+
+
+LOCK_DIR = ROOT / ".locks"
+LOCK_STALE_AFTER = 6 * 3600
+LOCK_HEARTBEAT_AFTER = 300.0
+
+
+def pack_family_lock_path(base: str) -> Path:
+    """One lock per PACK FAMILY, shared by every tool that can mutate it.
+
+    Locks used to be named after whichever state file a given tool happened to
+    use -- coin_pack.lock, rebuild_dedup_state.json.lock, state_<base>.json.lock
+    -- so a provider top-up and a rebuild could hold three different locks while
+    mutating the same cryptoemoji* sets. Keying on the base name is what makes
+    the exclusion real.
+    """
+    # Dots are dropped too: a base is [A-Za-z][A-Za-z0-9]* anyway, and keeping
+    # them would let a hand-passed "../.." survive into the file name.
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base).strip("_") or "default"
+    return LOCK_DIR / f"pack_{safe}.lock"
+
+
+def _lock_owner_is_alive(pid: int) -> bool:
+    """Best-effort liveness check for the recorded lock holder."""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=15).stdout
+            return str(pid) in out
+        os.kill(pid, 0)          # signal 0 only checks existence
+        return True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return True              # cannot tell -> assume alive, never steal
 
 
 @contextlib.contextmanager
-def exclusive_lock(path: Path, *, stale_after: float = 6 * 3600):
-    """Exclusive per-state lock so two publishers cannot mutate one pack family.
+def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
+    """Exclusive lock so two runs cannot mutate one pack family at once.
 
-    Without it, two runs read the same state, both see the same item pending,
-    and both upload it. Uses O_EXCL creation, which is atomic on NTFS and
-    POSIX alike; a lock left by a crashed run is reclaimed after ``stale_after``.
+    Ownership is explicit. The file records a unique token, and the holder
+    removes the lock only if that token is still the one on disk -- previously a
+    long but healthy run could have its lock "reclaimed" as stale by a second
+    process, and would then delete the *replacement* holder's lock on the way
+    out, leaving both free to mutate. A stale lock is only taken over when its
+    recorded process is genuinely gone, and a long-running holder refreshes the
+    mtime so age alone never condemns it.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = None
-    try:
+    token = f"{os.getpid()}:{secrets.token_hex(8)}"
+    record = json.dumps({"token": token, "pid": os.getpid(),
+                         "started": _utc_now()})
+
+    def _claim() -> None:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            age = time.time() - path.stat().st_mtime if path.exists() else 0.0
-            if age < stale_after:
-                holder = ""
-                try:
-                    holder = path.read_text(encoding="utf-8").strip()[:120]
-                except OSError:
-                    pass
-                raise LockBusy(
-                    f"{path.name} is held by another run ({holder or 'unknown'}; "
-                    f"{age:.0f}s old). Refusing to publish concurrently.")
-            print(f"  reclaiming stale lock {path.name} ({age:.0f}s old)",
-                  flush=True)
-            path.unlink(missing_ok=True)
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, f"pid={os.getpid()} started={_utc_now()}\n".encode())
-        os.close(fd)
-        fd = None
-        yield
-    finally:
-        if fd is not None:
+            os.write(fd, record.encode("utf-8"))
+        finally:
             os.close(fd)
+
+    try:
+        _claim()
+    except FileExistsError:
+        held = {}
+        try:
+            held = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        age = 0.0
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            pass
+        holder_pid = int(held.get("pid") or 0)
+        if age < stale_after or _lock_owner_is_alive(holder_pid):
+            raise LockBusy(
+                f"{path.name} is held by pid {holder_pid or '?'} "
+                f"(started {held.get('started', 'unknown')}, {age:.0f}s ago). "
+                f"Refusing to mutate the same pack family concurrently.")
+        print(f"  reclaiming lock {path.name}: pid {holder_pid} is gone "
+              f"({age:.0f}s old)", flush=True)
         path.unlink(missing_ok=True)
+        _claim()
+
+    def heartbeat() -> None:
+        """Refresh the mtime so a healthy long run is never judged stale."""
+        try:
+            if path.read_text(encoding="utf-8") == record:
+                os.utime(path, None)
+        except OSError:
+            pass
+
+    try:
+        yield heartbeat
+    finally:
+        # Remove the lock ONLY if we still own it. If another process reclaimed
+        # it, deleting would hand a third process a free pass.
+        try:
+            if path.read_text(encoding="utf-8") == record:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _utc_now() -> str:
@@ -669,20 +794,15 @@ def main() -> int:
               f"named {args.base}1_by_<bot> ...  state={state_file.name}", flush=True)
         return 0
 
-    # Two publishers on one state file both see the same item pending and both
-    # upload it. Hold the lock for the whole mutation phase.
-    lock_path = state_file.with_name(state_file.name + ".lock")
+    # Locked by pack FAMILY, not by state file: the coin providers and the
+    # rebuild tool mutate the same sets through different state files, so a
+    # per-file lock let them run concurrently against one family.
     try:
-        lock = exclusive_lock(lock_path)
-        lock.__enter__()
+        with exclusive_lock(pack_family_lock_path(args.base)):
+            return _run_build(args, token, state_file, sources, keywords)
     except LockBusy as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return EXIT_FAILED
-
-    try:
-        return _run_build(args, token, state_file, sources, keywords)
-    finally:
-        lock.__exit__(None, None, None)
 
 
 def _run_build(args, token, state_file, sources, keywords) -> int:
@@ -721,6 +841,13 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                   f"       Use --state for a different file, or delete that one "
                   f"deliberately.", file=sys.stderr)
             return EXIT_FAILED
+        try:
+            validate_state_shape(loaded, base=args.base, per_set=args.per_set)
+        except StateInvalid as exc:
+            print(f"ERROR: resume state {state_file} is inconsistent: {exc}.\n"
+                  f"       Every resume decision is derived from these numbers, "
+                  f"so refusing to mutate Telegram from them.", file=sys.stderr)
+            return EXIT_FAILED
         state = loaded
     done = set(state["done"])
     sets = state["sets"]
@@ -735,72 +862,123 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
     # image was skipped for being missing/unusable, because a skip consumes a
     # position in `pending` without producing a sticker; that mis-attribution
     # both re-uploads a duplicate and marks the wrong image as done.
-    in_flight = _intent_key(state.get("in_flight"))
-    if sets:
-        set_state, sset = tg.probe_set_state(sets[-1]["name"])
+    intent = state.get("in_flight")
+    in_flight = _intent_key(intent)
+
+    # 1) Settle the unresolved intent FIRST, against the set IT names.
+    #    Probing only sets[-1] was wrong for an ambiguous CREATE of set #2 or
+    #    later: the new set is not in state["sets"] yet, so its name lives only
+    #    in the intent, and the old last set says nothing about whether it
+    #    landed.
+    if in_flight:
+        if isinstance(intent, dict):
+            target = intent.get("set_name")
+            operation = intent.get("operation")
+        elif sets:
+            # A state file written before intents were structured records only
+            # the item key. The last recorded set is the only target that
+            # version could have been writing to, so reconcile against it
+            # rather than refusing to upgrade.
+            intent = {"key": in_flight, "operation": "add",
+                      "set_name": sets[-1]["name"],
+                      "expected_before": sets[-1]["count"]}
+            target, operation = intent["set_name"], "add"
+        else:
+            target = operation = None
+        if not target:
+            print(f"ERROR: the unresolved upload of {in_flight} does not name a "
+                  f"target set, so it cannot be reconciled.\n"
+                  f"       Check Telegram, then delete {state_file.name} "
+                  f"deliberately.", file=sys.stderr)
+            return EXIT_FAILED
+
+        set_state, sset = tg.probe_set_state(target)
         if set_state is SetState.UNKNOWN:
-            # The one thing we must not do is clear an unresolved intent because
-            # the probe failed: that is how a mutation that DID land gets sent a
-            # second time.
-            print(f"ERROR: cannot determine the live state of "
-                  f"{sets[-1]['name']}.\n"
-                  f"       Refusing to continue while an upload may be "
+            print(f"ERROR: cannot determine the live state of {target}.\n"
+                  f"       Refusing to continue while {in_flight} may be "
                   f"unresolved. Retry when Telegram is reachable.",
                   file=sys.stderr)
             return EXIT_PARTIAL
-        if set_state is SetState.EXISTS:
-            live_n = len(sset.get("stickers", []))
-            drift = live_n - sets[-1]["count"]
-            if drift == 1 and in_flight:
+
+        recorded = next((s for s in sets if s["name"] == target), None)
+        if operation == "create":
+            if set_state is SetState.EXISTS:
+                live_n = len(sset.get("stickers", []))
+                if recorded is None:
+                    sets.append({"name": target,
+                                 "title": intent.get("title", ""),
+                                 "count": live_n,
+                                 "index": intent.get("set_index",
+                                                     len(sets) + 1)})
+                else:
+                    recorded["count"] = live_n
                 done.add(in_flight)
                 pending = [p for p in pending if p.stem.lower() != in_flight]
-                sets[-1]["count"] = live_n
-                print(f"  reconciled from live: {in_flight} was applied before "
-                      f"the crash", flush=True)
-                state["in_flight"] = None       # verified postcondition
-            elif drift == 0 and in_flight:
-                print(f"  {in_flight} did not land; it stays pending", flush=True)
-                state["in_flight"] = None       # verified postcondition
-            elif drift > 0:
-                # More live stickers than we can account for: another run, a
-                # manual edit, or a lost in-flight record. Guessing here is what
-                # writes the wrong emoji id onto the wrong item.
-                print(f"ERROR: {sets[-1]['name']} has {live_n} stickers but state "
-                      f"records {sets[-1]['count']} and no single in-flight upload "
-                      f"explains the difference.\n"
-                      f"       Refusing to guess which images are already live. "
-                      f"Reconcile the set manually, or delete it and re-run.",
+                print(f"  adopted {target} created before the interruption "
+                      f"({live_n} sticker(s))", flush=True)
+            else:
+                print(f"  create of {target} did not land; {in_flight} stays "
+                      f"pending", flush=True)
+        else:                                    # an ADD
+            if set_state is SetState.MISSING:
+                print(f"ERROR: {target} no longer exists, but an add to it is "
+                      f"unresolved.\n       Reconcile manually before "
+                      f"continuing.", file=sys.stderr)
+                return EXIT_FAILED
+            live_n = len(sset.get("stickers", []))
+            expected = intent.get("expected_before")
+            if expected is None and recorded is not None:
+                expected = recorded["count"]
+            if expected is None:
+                print(f"ERROR: the unresolved add of {in_flight} to {target} "
+                      f"records no expected count; refusing to guess.",
                       file=sys.stderr)
                 return EXIT_FAILED
-    elif in_flight:
-        # An ambiguous CREATE: the set was never recorded in state["sets"], so
-        # only the intent knows which set name to look for.
-        intent = state.get("in_flight") or {}
-        pending_set = intent.get("set_name") if isinstance(intent, dict) else None
-        if not pending_set:
-            print(f"ERROR: an upload of {in_flight} is unresolved but the intent "
-                  f"does not name a target set, so it cannot be reconciled.\n"
-                  f"       Delete {state_file.name} deliberately after checking "
-                  f"Telegram.", file=sys.stderr)
-            return EXIT_FAILED
-        set_state, sset = tg.probe_set_state(pending_set)
+            if live_n == expected + 1:
+                done.add(in_flight)
+                pending = [p for p in pending if p.stem.lower() != in_flight]
+                if recorded is not None:
+                    recorded["count"] = live_n
+                print(f"  reconciled from live: {in_flight} was applied before "
+                      f"the interruption", flush=True)
+            elif live_n == expected:
+                print(f"  {in_flight} did not land; it stays pending", flush=True)
+            else:
+                print(f"ERROR: {target} holds {live_n} stickers but the "
+                      f"unresolved add expected {expected} or {expected + 1}.\n"
+                      f"       Someone else changed this set; refusing to guess "
+                      f"which images are live.", file=sys.stderr)
+                return EXIT_FAILED
+        state["in_flight"] = None                # verified postcondition
+
+    # 2) Every RECORDED set must still match what state claims. A set that was
+    #    deleted or shrunk by hand invalidates the counts the whole resume is
+    #    built on, and drift < 0 used to be ignored entirely.
+    for s in sets:
+        set_state, sset = tg.probe_set_state(s["name"])
         if set_state is SetState.UNKNOWN:
-            print(f"ERROR: cannot determine whether {pending_set} was created.\n"
-                  f"       Refusing to continue while the create is unresolved.",
-                  file=sys.stderr)
+            print(f"ERROR: cannot determine the live state of {s['name']}.\n"
+                  f"       Retry when Telegram is reachable.", file=sys.stderr)
             return EXIT_PARTIAL
-        if set_state is SetState.EXISTS:
-            count = len(sset.get("stickers", []))
-            sets.append({"name": pending_set, "title": intent.get("title", ""),
-                         "count": count, "index": intent.get("set_index", 1)})
-            done.add(in_flight)
-            pending = [p for p in pending if p.stem.lower() != in_flight]
-            print(f"  adopted {pending_set} created before the interruption "
-                  f"({count} sticker(s))", flush=True)
-        else:
-            print(f"  create of {pending_set} did not land; {in_flight} stays "
-                  f"pending", flush=True)
-        state["in_flight"] = None               # verified postcondition
+        if set_state is SetState.MISSING:
+            print(f"ERROR: recorded set {s['name']} no longer exists.\n"
+                  f"       Refusing to continue against a state that describes "
+                  f"a deleted pack. Restore it, or delete {state_file.name} to "
+                  f"start this family again.", file=sys.stderr)
+            return EXIT_FAILED
+        live_n = len(sset.get("stickers", []))
+        if live_n < s["count"]:
+            print(f"ERROR: {s['name']} holds {live_n} stickers but state records "
+                  f"{s['count']}; stickers were removed.\n"
+                  f"       Refusing to publish against a shrunken set.",
+                  file=sys.stderr)
+            return EXIT_FAILED
+        if live_n > s["count"]:
+            print(f"ERROR: {s['name']} holds {live_n} stickers but state records "
+                  f"{s['count']} and no in-flight upload explains it.\n"
+                  f"       Refusing to guess which images are already live.",
+                  file=sys.stderr)
+            return EXIT_FAILED
 
     print(f"Bot: @{bot_username}  owner_user_id={args.user_id}  "
           f"images={len(sources)}  already_done={len(done)}  pending={len(pending)}", flush=True)
@@ -899,6 +1077,14 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                     set_index += 1
                     set_name = f"{args.base}{set_index}_by_{bot_username}"
                     title = f"{args.title} {set_index}"  # every pack is numbered
+                    # Replace the intent before the CREATE. On the rollover path
+                    # the persisted intent still describes the ADD to the FULL
+                    # set, so a crash here would send a restart looking at the
+                    # wrong set and conclude the create never happened.
+                    state["in_flight"] = make_intent(
+                        key=ticker, operation="create", set_name=set_name,
+                        set_index=set_index, expected_before=0, title=title)
+                    save_state()
                     tg.create_set(args.user_id, set_name, title, path, args.emoji, kw)
                     sets.append({"name": set_name, "title": title, "count": 1,
                                  "index": set_index})
