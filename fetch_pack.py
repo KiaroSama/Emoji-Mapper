@@ -27,7 +27,7 @@ from pathlib import Path
 
 from build_pack import EXIT_USAGE, Telegram, ingest_exit_code, load_env
 from emojikit import media
-from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
+from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -116,8 +116,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--token-env", default="GENERAL_BOT_TOKEN",
                     help="Env var holding the bot token (default GENERAL_BOT_TOKEN).")
     ap.add_argument("--data-dir", default="collection", help="Catalog/media directory.")
-    ap.add_argument("--phash-threshold", type=int, default=DEFAULT_PHASH_THRESHOLD,
-                    help="Hamming distance for near-duplicate merging (-1 disables).")
+    # Validated by argparse, not by Catalog(): an out-of-range value raised
+    # ValueError from deep inside main() and killed the run with a traceback
+    # instead of the usage error every other bad argument produces.
+    ap.add_argument("--phash-threshold", type=phash_threshold_arg,
+                    default=DEFAULT_PHASH_THRESHOLD,
+                    help="Hamming distance for near-duplicate merging "
+                         "(-1 disables, else 0..16).")
     ap.add_argument("--limit", type=int, default=0,
                     help="Max NEW catalog items per pack; already-known stickers "
                          "are skipped and do not count (0=all).")

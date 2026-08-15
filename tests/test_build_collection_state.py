@@ -14,7 +14,15 @@ Every test here fails on the pre-fix behaviour:
 * ``--formats garbage`` exited 0 having done nothing, ``--per-set 0`` divided
   by zero, and the dry-run set count ignored the brand logo's slot;
 * a video was judged blank by its FIRST frame only, and that verdict is a
-  permanent skip.
+  permanent skip;
+* a recorded position holding an identity we had NEVER seen passed the
+  manifest check on order alone, and then received our custom_emoji_id;
+* an unattributed sticker in the live tail only stopped attribution, so the
+  next publish appended past it and mapped a new key onto its cid;
+* the blank-video probe ran ffmpeg with no timeout at all;
+* a run where every upload failed still exited 0;
+* an older recorded set that was MISSING or UNKNOWN was warned about and the
+  run reported a clean DONE.
 """
 
 from __future__ import annotations
@@ -22,12 +30,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +49,7 @@ from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa:
 from emojikit.catalog import Catalog  # noqa: E402
 
 SET = "pks1_by_YourEmojiBot"
+SET2 = "pks2_by_YourEmojiBot"
 
 
 def _make_png(path: Path, color=(200, 30, 30, 255)) -> None:
@@ -55,9 +64,10 @@ def _make_png(path: Path, color=(200, 30, 30, 255)) -> None:
 class FakeTG:
     """In-memory Telegram with the tri-state probe the real client exposes."""
 
-    def __init__(self, sets=None, unknown=()):
+    def __init__(self, sets=None, unknown=(), fail_after=None):
         self.sets: dict[str, list[dict]] = dict(sets or {})
         self.unknown = set(unknown)          # names whose live state is unknown
+        self.fail_after = fail_after         # uploads accepted before it breaks
         self.uploaded: list[str] = []
         self.sent: list[str] = []
 
@@ -78,6 +88,8 @@ class FakeTG:
         return {"username": "YourEmojiBot"}
 
     def _new(self, name: str, path) -> dict:
+        if self.fail_after is not None and len(self.uploaded) >= self.fail_after:
+            raise RuntimeError("BAD_REQUEST: STICKER_PNG_DIMENSIONS")
         stem = Path(path).stem
         self.uploaded.append(stem)
         return _sticker(f"UP-{stem}", f"{name}-{len(self.sets.get(name, []))}")
@@ -93,8 +105,25 @@ class FakeTG:
         self.sent.append(text)
 
 
+class DownloadingTG(FakeTG):
+    """FakeTG that also serves downloads, so CONTENT attribution really runs."""
+
+    def __init__(self, *a, error: str | None = None, **kw):
+        super().__init__(*a, **kw)
+        self.error = error
+        self.downloads = 0
+
+    def download_file(self, file_id, dest):
+        self.downloads += 1
+        if self.error:
+            raise RuntimeError(self.error)
+        Path(dest).write_bytes(b"whatever telegram returned")
+        return dest
+
+
 def _sticker(fuid: str, cid: str) -> dict:
-    return {"file_unique_id": fuid, "custom_emoji_id": cid}
+    # file_id is what _resolve_sticker_key needs before it will download at all.
+    return {"file_unique_id": fuid, "custom_emoji_id": cid, "file_id": f"f-{fuid}"}
 
 
 class _CatalogFixture(unittest.TestCase):
@@ -121,6 +150,27 @@ class _CatalogFixture(unittest.TestCase):
         return {"fmt": "static", "index": 1, "name": SET, "title": "Pack 1",
                 "live": live, "logo": logo,
                 "keys": list(self.keys if keys is None else keys)}
+
+    def _add_item(self, i: int) -> str:
+        """Catalogue one more static item, as a later curate pass would."""
+        p = self.data / "media" / "static" / f"item{i}.png"
+        _make_png(p, color=(10, 30 * (i + 1), 90, 255))
+        key = f"s:item{i:030d}"
+        with Catalog(self.data / "catalog.db") as cat:
+            cat.add(content_key=key, fmt="static", file_path=p,
+                    emojis=["\U0001F600"], keywords=[f"item{i}"])
+            cat.record_file_unique_id(f"UP-item{i}", key)
+        return key
+
+    def _read_back(self, *keys: str) -> None:
+        """Pretend a previous run already stored these keys' custom_emoji_ids.
+
+        That is the moment a position's live identity becomes known, and it is
+        what makes an unknown identity there proof of a replacement.
+        """
+        with Catalog(self.data / "catalog.db") as cat:
+            for i, key in enumerate(keys):
+                cat.mark_uploaded(key, f"c{i}", base="pk", set_name=SET)
 
 
 # --------------------------------------------------------------------------- #
@@ -263,7 +313,7 @@ class LiveSetDrift(_CatalogFixture):
                                 _sticker("UP-item0", "wrong-1")]})
         with Catalog(self.data / "catalog.db") as cat:
             with self.assertRaises(bc.SetDrift):
-                bc._record_cids(tg, cat, [self._state_set()], "pk")
+                bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertIsNone(cat.get(self.keys[0]).custom_emoji_id)
             self.assertIsNone(cat.get(self.keys[1]).custom_emoji_id)
 
@@ -271,9 +321,97 @@ class LiveSetDrift(_CatalogFixture):
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
                                 _sticker("UP-item1", "c1")]})
         with Catalog(self.data / "catalog.db") as cat:
-            bc._record_cids(tg, cat, [self._state_set()], "pk")
+            bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertEqual(cat.get(self.keys[0]).custom_emoji_id, "c0")
             self.assertEqual(cat.get(self.keys[1]).custom_emoji_id, "c1")
+
+
+# --------------------------------------------------------------------------- #
+# C-03: an identity we have NEVER seen may not hold a recorded position
+# --------------------------------------------------------------------------- #
+class ForeignIdentityOnARecordedPosition(_CatalogFixture):
+    """The old check only rejected a file_unique_id that was already known and
+    mapped elsewhere. A never-seen foreign sticker returned ``known is None``
+    and passed, after which its custom_emoji_id was written onto our key."""
+
+    def test_a_foreign_sticker_on_a_read_back_position_is_drift(self):
+        self._read_back(*self.keys)          # a previous run learned both ids
+        tg = FakeTG(sets={SET: [_sticker("NEVER-SEEN", "foreign-cid"),
+                                _sticker("UP-item1", "c1")]})
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift) as ctx:
+                bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
+            self.assertIn("position 0", str(ctx.exception))
+            # The foreign sticker's id never reached our item.
+            self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[0]), "c0")
+
+    def test_reconcile_also_refuses_a_replaced_recorded_position(self):
+        self._read_back(*self.keys)
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("NEVER-SEEN", "foreign-cid")]})
+        s = self._state_set()
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift):
+                bc.reconcile_set(tg, cat, s, self.data, "pk")
+
+    def test_content_resolution_rescues_a_re_uploaded_identical_picture(self):
+        # A new id is not automatically a different emoji: if the bytes still
+        # resolve to the recorded key it is the same picture, not drift.
+        self._read_back(*self.keys)
+        tg = DownloadingTG(sets={SET: [_sticker("RE-UPLOADED", "c0"),
+                                       _sticker("UP-item1", "c1")]})
+        with mock.patch.object(bc.media, "content_key",
+                               lambda p, fmt: self.keys[0]), \
+                mock.patch.object(bc.media, "telegram_sticker_format",
+                                  lambda st: "static"):
+            with Catalog(self.data / "catalog.db") as cat:
+                bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
+        self.assertEqual(tg.downloads, 1)
+
+    def test_a_fresh_upload_not_yet_read_back_is_not_drift(self):
+        # Telegram re-encodes on upload, so the copy's id is only learnable by
+        # reading the set back -- which is exactly what _record_cids does here.
+        tg = FakeTG(sets={SET: [_sticker("BRAND-NEW-0", "c0"),
+                                _sticker("BRAND-NEW-1", "c1")]})
+        with Catalog(self.data / "catalog.db") as cat:
+            bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
+            self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[0]), "c0")
+
+
+# --------------------------------------------------------------------------- #
+# C-04: a set with an unattributed live position is closed for publishing
+# --------------------------------------------------------------------------- #
+class UnattributedTail(_CatalogFixture):
+    def test_a_tail_we_cannot_attribute_closes_the_set(self):
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("OWNER", "cx")]})
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 2)
+        self.assertEqual(s["keys"], [self.keys[0]])   # the tail stayed unowned
+        self.assertFalse(bc._set_is_open(s))
+
+    def test_a_tail_whose_download_fails_closes_the_set(self):
+        # Attribution by content is the only remaining route for an unrecorded
+        # tail sticker; when the download fails the position stays unowned, so
+        # the set must not receive another emoji behind it.
+        tg = DownloadingTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                       _sticker("UNSEEN", "cx")]},
+                           error="connection reset")
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 2)
+        self.assertEqual(tg.downloads, 1)
+        self.assertEqual(s["keys"], [self.keys[0]])
+        self.assertFalse(bc._set_is_open(s))
+
+    def test_a_fully_attributed_set_stays_open(self):
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("UP-item1", "c1")]})
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            bc.reconcile_set(tg, cat, s, self.data, "pk")
+        self.assertTrue(bc._set_is_open(s))
 
 
 # --------------------------------------------------------------------------- #
@@ -342,14 +480,14 @@ class CliContract(_CatalogFixture):
 class PublishThroughMain(_CatalogFixture):
     """The real entry point: publish, then resume without re-uploading."""
 
-    def _run(self, tg) -> int:
+    def _run(self, tg, *extra: str) -> int:
         with mock.patch.object(bc, "Telegram", lambda token: tg), \
                 mock.patch.object(bc.time, "sleep", lambda s: None), \
                 mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "x",
                                              "PACK_LINKS_CHAT_ID": ""}):
             return _main("--base", "pk", "--title", "Pack", "--formats", "static",
                          "--user-id", "7", "--no-brand-logo",
-                         "--data-dir", str(self.data))
+                         "--data-dir", str(self.data), *extra)
 
     def test_publish_then_resume_uploads_each_emoji_once(self):
         tg = FakeTG()
@@ -387,6 +525,68 @@ class PublishThroughMain(_CatalogFixture):
             self.assertEqual(self._run(tg), EXIT_PARTIAL)
         self.assertEqual(tg.uploaded, ["item0", "item1"])
 
+    # ----- C-04: publishing never appends behind a foreign sticker -------- #
+    def test_a_foreign_tail_sticker_sends_the_next_emoji_to_a_new_set(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        # The owner appends a sticker of their own; then a third emoji is
+        # catalogued. keys[] has no slot for the foreign sticker, so appending
+        # to this set would hand item2 the owner's custom_emoji_id.
+        tg.sets[SET].append(_sticker("OWNER", "owner-cid"))
+        key2 = self._add_item(2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(cat.custom_emoji_id_for("pk", key2), f"{SET2}-0")
+        self.assertEqual(len(tg.sets[SET]), 3)        # pks1 was left alone
+        self.assertEqual(len(tg.sets[SET2]), 1)
+
+    # ----- H-11: every recorded set is verified, not just the active one -- #
+    def test_an_older_recorded_set_that_disappeared_fails_closed(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "1"), EXIT_OK)
+        self.assertEqual(sorted(tg.sets), [SET, SET2])
+        del tg.sets[SET]                      # owner deleted the FIRST pack
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "1"), EXIT_FAILED)
+
+    def test_an_older_set_that_cannot_be_read_is_retryable(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "1"), EXIT_OK)
+        tg.unknown.add(SET)                   # transient: never a clean DONE
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "1"), EXIT_PARTIAL)
+
+    # ----- H-10: a run that uploaded nothing is not a success ------------- #
+    def test_a_run_where_every_upload_failed_exits_non_zero(self):
+        tg = FakeTG(fail_after=0)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_FAILED)
+        self.assertEqual(tg.uploaded, [])
+
+    def test_a_partly_failed_run_is_partial(self):
+        tg = FakeTG(fail_after=1)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_PARTIAL)
+        self.assertEqual(tg.uploaded, ["item0"])
+
+    def test_skipped_blank_media_is_not_counted_as_a_failure(self):
+        # A permanent, recorded exclusion is not retryable work: the run that
+        # records it is still a success.
+        tg = FakeTG()
+        blank = self.data / "media" / "static" / "blank.png"
+        _make_png(blank, color=(0, 0, 0, 0))
+        key = "s:blank" + "0" * 25
+        with Catalog(self.data / "catalog.db") as cat:
+            cat.add(content_key=key, fmt="static", file_path=blank,
+                    emojis=["\U0001F600"], keywords=["blank"])
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self.assertEqual(tg.uploaded, ["item0", "item1"])
+
 
 # --------------------------------------------------------------------------- #
 # M-04: a video is blank only if EVERY sampled frame is
@@ -398,14 +598,60 @@ def _frame(visible: int) -> bytes:
     return bytes(px)
 
 
+def _fake_popen(raw: bytes, *, hang: bool = False):
+    """A Popen stand-in recording the wall limit each child was given.
+
+    Patched at ``subprocess.Popen`` on purpose: both the old bare
+    ``subprocess.run`` and the bounded ``media._run`` go through it, so the
+    recorded timeout is a fair comparison between them.
+    """
+    seen: list = []
+
+    class _P:
+        def __init__(self, cmd, stdout=None, stderr=None, **kw):
+            self.args, self.returncode = cmd, 0
+
+        def communicate(self, input=None, timeout=None):
+            seen.append(timeout)
+            if hang:
+                raise subprocess.TimeoutExpired(self.args, timeout or 0)
+            return raw, b""
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+    return _P, seen
+
+
 class VideoBlankCheck(unittest.TestCase):
-    def _media_ok(self, raw: bytes) -> bool:
-        run = mock.Mock(return_value=SimpleNamespace(stdout=raw, returncode=0))
-        # Patch on the subprocess module itself: the old first-frame probe lived
-        # in emojikit.media, so a build_collection-only patch would not bind it.
-        with mock.patch("subprocess.run", run), \
+    def _probe(self, raw: bytes, *, hang: bool = False):
+        popen, seen = _fake_popen(raw, hang=hang)
+        with mock.patch("subprocess.Popen", popen), \
                 mock.patch.object(bc.media, "ffmpeg_path", lambda: "ffmpeg"):
-            return bc._media_ok(Path("clip.webm"), "video")
+            return bc._media_ok(Path("clip.webm"), "video"), seen
+
+    def _media_ok(self, raw: bytes) -> bool:
+        return self._probe(raw)[0]
+
+    # ----- H-09: the probe is bounded like every other ffmpeg child ------- #
+    def test_the_probe_runs_under_a_finite_wall_limit(self):
+        ok, seen = self._probe(_frame(900) * 2)
+        self.assertTrue(ok)
+        self.assertTrue(seen, "ffmpeg was never started")
+        self.assertTrue(all(t and t > 0 for t in seen),
+                        f"unbounded ffmpeg child: timeouts={seen}")
+
+    def test_a_hanging_ffmpeg_is_killed_and_lets_the_upload_decide(self):
+        self.assertTrue(self._probe(b"", hang=True)[0])
 
     def test_fade_in_video_is_accepted(self):
         raw = _frame(0) + _frame(0) + _frame(500) + _frame(900)
