@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — second audit pass (34 findings)
+- **The bot rejected everyone, including its owner.** `main()` built the numeric
+  allowlist as `allowed`, then reassigned that same name to the Telegram
+  update-type filter and passed it to the handler, so the check compared a user
+  id against `["message", ...]` and was always true. The regression test now
+  runs through the real polling wiring, which is where the defect lived.
+- **Unresolved uploads no longer let the run continue.** An ambiguous
+  add/create used to be logged while the loop moved on, and the next item's
+  in-flight record overwrote the unresolved one — after which a later run could
+  re-send an upload that had already landed. The run now stops with a retryable
+  exit until the ambiguity is settled, and the in-flight record is structured
+  (operation, target set, index, expected count) so even an ambiguous *create*
+  whose set was never recorded can be reconciled by name.
+- **"Unknown" is no longer read as "empty".** Live set reads are tri-state
+  (EXISTS / MISSING / UNKNOWN). Previously any network error became a live count
+  of zero, and a probe failure could clear the only record of an unresolved
+  mutation.
+- **Corrupt state and plans fail closed.** A file that exists but cannot be
+  parsed is an error; only an absent file may fall back to a default. All state,
+  plan and canonical-map writes are atomic.
+- **Concurrent publishers are refused** via an exclusive per-state lock.
+- **Live drift is detected by identity, not position.** The full set manifest is
+  verified by `file_unique_id`, so a manual delete/shrink/reorder/replace inside
+  the recorded prefix is caught, and a `custom_emoji_id` is never assigned from
+  a positional guess.
+- **Partial failure never reports success.** `build_pack` and `fetch_pack` now
+  return 3 (partial) or 4 (failed); a state file whose base disagrees with the
+  run is an integrity error instead of a silent restart from zero.
+- **Every ffmpeg/ffprobe child is bounded**; a hang becomes a `MediaError`
+  instead of stalling ingest forever.
+- `coins/verify_logos.py` died on an import that no longer existed; all 22
+  entry points, including every `coins/*` module, now import cleanly.
+- Provider tools (CoinPaprika/CMC) use one verified mutation path with
+  `expected_before` instead of blind retries, reject blank logos, and no longer
+  map emoji ids from the tail of a set.
+- Smaller contracts: `--formats`/`--per-set`/`--limit` validated, perceptual
+  hash threshold bounded inside `Catalog`, a broken SVG falls back to a healthy
+  same-stem raster, the panel bounds TGS decompression, `EMOJI_LOG_RETENTION_DAYS`
+  parses safely, cached logo files are validated, and an ambiguous normalized
+  coin name is reported rather than auto-resolved to the first candidate.
+
 ### Security
 - **Real credentials were committed as test fixtures.** The live
   `GENERAL_BOT_TOKEN` and `CMC_API_KEY` were hard-coded in
