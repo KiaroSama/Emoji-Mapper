@@ -51,7 +51,12 @@ def _media_path(data_dir: Path, fmt: str, content_key: str, ext: str | None = No
 
 def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
               tmp_dir: Path, limit: int = 0) -> dict[str, int]:
-    """Ingest a single pack; returns counts of new/dedup/skipped/failed."""
+    """Ingest a single pack; returns counts of new/dedup/skipped/failed.
+
+    ``limit`` bounds NEW catalog items, not stickers looked at: already-known
+    stickers are skipped for free, so scanning past them is what makes
+    ``--limit N`` actually deliver N new emoji on a re-run.
+    """
     log.info("Fetching pack: %s", name)
     sset = tg.get_sticker_set(name)
     stickers = sset.get("stickers", [])
@@ -59,7 +64,7 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
     counts = {"new": 0, "dedup": 0, "skipped": 0, "failed": 0}
 
     for i, st in enumerate(stickers):
-        if limit and (counts["new"] + counts["dedup"]) >= limit:
+        if limit and counts["new"] >= limit:
             break
         fuid = str(st.get("file_unique_id", ""))
         emoji = st.get("emoji")
@@ -113,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data-dir", default="collection", help="Catalog/media directory.")
     ap.add_argument("--phash-threshold", type=int, default=DEFAULT_PHASH_THRESHOLD,
                     help="Hamming distance for near-duplicate merging (-1 disables).")
-    ap.add_argument("--limit", type=int, default=0, help="Max new items per pack (0=all).")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="Max NEW catalog items per pack; already-known stickers "
+                         "are skipped and do not count (0=all).")
     args = ap.parse_args(argv)
 
     token = os.environ.get(args.token_env, "")

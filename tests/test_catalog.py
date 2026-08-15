@@ -63,6 +63,54 @@ class TestCatalogIntegrity(unittest.TestCase):
         self.cat.add(content_key="s:same", fmt="static", file_path=only)
         self.assertTrue(only.is_file())
 
+    def test_same_catalog_publishes_to_two_bases(self):
+        """The defect: publishing to one base marked items done everywhere."""
+        for i in range(3):
+            self.cat.add(content_key=f"s:k{i}", fmt="static",
+                         file_path=self._media(f"m{i}.png", bytes([i])))
+        self.assertEqual(len(self.cat.pending(base="one")), 3)
+
+        for it in self.cat.pending(base="one"):
+            self.cat.mark_uploaded(it.content_key, f"cid_{it.content_key}",
+                                   base="one", set_name="one1")
+        self.assertEqual(len(self.cat.pending(base="one")), 0)
+        self.assertEqual(len(self.cat.pending(base="two")), 3,
+                         "a second pack family must still see every item")
+
+    def test_publication_records_are_per_base(self):
+        self.cat.add(content_key="s:k", fmt="static",
+                     file_path=self._media("m.png"))
+        self.cat.mark_uploaded("s:k", "cid_one", base="one", set_name="one1")
+        self.assertTrue(self.cat.is_published("one", "s:k"))
+        self.assertFalse(self.cat.is_published("two", "s:k"))
+        self.assertEqual(self.cat.custom_emoji_id_for("one", "s:k"), "cid_one")
+        self.assertIsNone(self.cat.custom_emoji_id_for("two", "s:k"))
+
+    def test_forgetting_a_deleted_pack_allows_republishing(self):
+        self.cat.add(content_key="s:k", fmt="static",
+                     file_path=self._media("m.png"))
+        self.cat.mark_uploaded("s:k", "cid", base="one", set_name="one1")
+        self.assertEqual(len(self.cat.pending(base="one")), 0)
+        self.assertEqual(self.cat.forget_publication("one"), 1)
+        self.assertEqual(len(self.cat.pending(base="one")), 1,
+                         "a deleted pack family must be publishable again")
+
+    def test_legacy_upload_state_is_adopted_once(self):
+        self.cat.add(content_key="s:k", fmt="static",
+                     file_path=self._media("m.png"))
+        # Simulate a pre-publications database: uploaded flag, no record.
+        self.cat.db.execute("UPDATE items SET uploaded=1 WHERE content_key='s:k'")
+        self.cat.db.execute("DELETE FROM publications")
+        self.cat.set_meta("publications_migrated", "0")
+        self.cat._migrate_publications()
+        self.assertEqual(self.cat.publication_bases(), [Catalog.LEGACY_BASE])
+
+        self.assertEqual(self.cat.adopt_legacy_publication("one"), 1)
+        self.assertTrue(self.cat.is_published("one", "s:k"))
+        # A second base must NOT also claim it.
+        self.assertEqual(self.cat.adopt_legacy_publication("two"), 0)
+        self.assertFalse(self.cat.is_published("two", "s:k"))
+
     def test_excluded_items_are_not_counted_as_pending(self):
         for i in range(3):
             self.cat.add(content_key=f"s:k{i}", fmt="static",

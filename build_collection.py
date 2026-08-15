@@ -220,7 +220,7 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
     return key
 
 
-def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path) -> int:
+def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path, base: str) -> int:
     """Sync one set's records with its LIVE stickers; returns the live count.
 
     Any live sticker beyond what the state recorded is an upload a previous
@@ -243,11 +243,11 @@ def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path) -> int:
                         "stopping attribution there", s.get("fmt", "?"),
                         s["name"], offset + len(keys))
             break
-        item = cat.get(key)
-        if item is not None and not item.uploaded:
+        if not cat.is_published(base, key):
             log.info("[%s] reconciled from live: %s was already uploaded to %s",
                      s.get("fmt", "?"), key, s["name"])
-        cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None)
+        cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None,
+                          base=base, set_name=s["name"])
         fuid = str(st.get("file_unique_id") or "")
         if fuid:
             cat.record_file_unique_id(fuid, key)
@@ -287,7 +287,7 @@ def _media_ok(path: Path, fmt: str) -> bool:
     return True  # animated (.tgs) validity is enforced at creation time
 
 
-def write_manifest(data_dir: Path, cat: Catalog, s: dict) -> None:
+def write_manifest(data_dir: Path, cat: Catalog, s: dict, base: str) -> None:
     """Write a per-pack manifest: emoji name (keywords) + custom_emoji_id."""
     keys = s.get("keys") or []
     if not keys:
@@ -301,7 +301,7 @@ def write_manifest(data_dir: Path, cat: Catalog, s: dict) -> None:
         it = cat.get(key)
         name = ", ".join(it.keywords[:2]) if it and it.keywords else (
             it.sources[0] if it and it.sources else key)
-        cid = (it.custom_emoji_id if it else "") or ""
+        cid = (cat.custom_emoji_id_for(base, key) if it else "") or ""
         lines.append(f"| {i} | {name} | {cid} |")
     (md / f"{s['name']}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     log.info("manifest written: manifests/%s.md (%d emoji)", s["name"], len(keys))
@@ -328,7 +328,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     # their catalog items here, so the pending computation below can never
     # upload them a second time. This also refreshes the live capacity.
     if fmt_sets:
-        reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+        reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
         save_json(_state_path(data_dir, base), state)
     if fmt_sets and fmt_sets[-1]["live"] < per_set:
         cur = fmt_sets[-1]
@@ -339,9 +339,11 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
 
     # Pending = plan keys neither already uploaded, excluded in the panel, nor
     # permanently skipped.
+    # "Already uploaded" is per pack family: a global flag meant publishing to
+    # one base marked the items done for every other base too.
     pending = [k for k in plan_keys
-               if (it := cat.get(k)) and not it.uploaded and it.included
-               and k not in skipped]
+               if (it := cat.get(k)) and it.included
+               and not cat.is_published(base, k) and k not in skipped]
     log.info("[%s] %d sets, active in_set=%d, %d pending (of %d planned)",
              fmt, len(fmt_sets), in_set, len(pending), len(plan_keys))
 
@@ -354,7 +356,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     n = 0
     for key in pending:
         item = cat.get(key)
-        if item is None or item.uploaded:
+        if item is None or cat.is_published(base, key):
             continue  # attributed by an in-run reconcile after an ambiguous failure
         path = Path(item.file_path)
         if not path.is_file() or path.stat().st_size == 0:
@@ -413,9 +415,9 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 if adopted:
                     # Attribute whatever the set already contains (the earlier
                     # create put SOMETHING there), then re-check this item.
-                    in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+                    in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
                     save_json(_state_path(data_dir, base), state)
-                    if cat.get(key).uploaded:
+                    if cat.is_published(base, key):
                         continue  # this very item was the set's first sticker
                     if in_set > (1 if logo_png else 0) + len(fmt_sets[-1]["keys"]):
                         log.warning("[%s] %s has unattributed live stickers; not "
@@ -438,7 +440,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             if not placed and in_set == 0:
                 set_index -= 1  # the create never registered a set
             elif fmt_sets:
-                in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir)
+                in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
                 save_json(_state_path(data_dir, base), state)
             continue
         except RuntimeError as exc:
@@ -453,7 +455,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         # Record actual upload order (for cid mapping) + mark uploaded (committed
         # immediately -> crash-safe duplicate guard).
         fmt_sets[-1].setdefault("keys", []).append(key)
-        cat.mark_uploaded(key, None)
+        cat.mark_uploaded(key, None, base=base, set_name=set_name)
         n += 1
         if n % 20 == 0:
             save_json(_state_path(data_dir, base), state)
@@ -465,16 +467,17 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
 
     save_json(_state_path(data_dir, base), state)
     # Assign real custom_emoji_ids (drift-proof, from recorded order) + manifests.
-    _record_cids(tg, cat, fmt_sets)
+    _record_cids(tg, cat, fmt_sets, base)
     for s in fmt_sets:
-        write_manifest(data_dir, cat, s)
+        write_manifest(data_dir, cat, s, base)
 
     if fmt_sets:
         last = fmt_sets[-1]
         notify(tg, user_id, state, data_dir, base, last["name"], last["title"])
 
 
-def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict]) -> None:
+def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict],
+                 base: str) -> None:
     """Store each item's real custom_emoji_id using the recorded upload order."""
     for s in fmt_sets:
         keys = s.get("keys") or []
@@ -489,7 +492,8 @@ def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict]) -> None:
         for i, key in enumerate(keys):
             j = i + offset
             if j < len(live):
-                cat.mark_uploaded(key, str(live[j].get("custom_emoji_id")))
+                cat.mark_uploaded(key, str(live[j].get("custom_emoji_id")),
+                                  base=base, set_name=s["name"])
                 # Remember the uploaded copy's file_unique_id: a later fetch of
                 # our own published pack (or of ids inside it) is then caught by
                 # the fast pre-dedup and never downloaded again.
@@ -535,6 +539,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with Catalog(db) as cat:
+        # Databases written before publication records existed only knew "this
+        # item was uploaded", not to which base. The first base to publish
+        # claims that history so it is not re-uploaded.
+        cat.adopt_legacy_publication(base)
         plan = freeze_plan(cat, data_dir, base, formats)
         stats = cat.stats()
 

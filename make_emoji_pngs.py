@@ -8,18 +8,29 @@ Two modes:
 1. General mode (any emoji pack):
      python make_emoji_pngs.py --in input/myset --out build/myset
    Reads every image in ``--in`` (.svg via resvg; .png/.jpg/.jpeg/.webp/.gif
-   via Pillow) and writes ``<name>.png`` (100x100) into ``--out``.
+   via Pillow) and writes ``<name>.png`` (100x100) into ``--out``. When several
+   files share a name (foo.svg, foo.png) the source is picked by
+   ``SOURCE_PRIORITY``, not by file order.
 
 2. Legacy crypto-coin mode (default, no --in/--out):
      python make_emoji_pngs.py
    Reads ``logos/svg/<ticker>.svg`` and ``logos/png/<ticker>.png`` and writes
    ``logos/emoji/<ticker>.png``.
 
-Hang protection: before rendering an SVG its name is written to a marker file;
-if this process is killed while stuck, the next run reads the marker, blacklists
-that name (``.svg_skip.txt`` in the output dir) and moves on. Run via
-run_convert.ps1 which restarts until it completes. (The renderer that used to
-spin has been replaced by resvg, but the guard is kept as cheap insurance.)
+Exit codes are the shared ones from build_pack: 0 nothing failed, 2 bad
+arguments, 3 some sources failed, 4 every attempted source failed.
+
+Re-running is cheap but not blind: an output is reused only when it really is a
+100x100 RGBA non-blank PNG that is newer than its source. Edit a source and the
+next run reconverts it.
+
+Hang protection: before converting a file its name is written to a marker file
+and cleared afterwards, so the marker doubles as a per-file heartbeat for
+run_convert.ps1. If this process is killed while stuck, the next run reads the
+marker, quarantines that name (``.svg_skip.txt`` in the output dir) and moves
+on -- quarantined names are reported on every run so they can be reviewed.
+(The renderer that used to spin has been replaced by resvg, but the guard is
+kept as cheap insurance.)
 """
 
 from __future__ import annotations
@@ -31,6 +42,8 @@ from pathlib import Path
 import resvg_py
 from PIL import Image
 
+from build_pack import EXIT_USAGE, ingest_exit_code
+
 ROOT = Path(__file__).resolve().parent
 # Legacy crypto-coin defaults (used when --in/--out are not provided).
 SVG_DIR = ROOT / "logos" / "svg"
@@ -38,22 +51,65 @@ PNG_DIR = ROOT / "logos" / "png"
 OUT_DIR = ROOT / "logos" / "emoji"
 SIZE = 100
 RENDER = 256
-RASTER_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+# Explicit source priority: several files can share one output name (foo.svg and
+# foo.png both build foo.png), and the winner used to be whichever the directory
+# listing happened to yield first. Vector master first, then lossless rasters,
+# then lossy ones. An extension not listed here is not a source.
+SOURCE_PRIORITY = (".svg", ".png", ".webp", ".gif", ".bmp", ".jpg", ".jpeg")
+RASTER_EXTS = frozenset(SOURCE_PRIORITY) - {".svg"}
 
 
 def _load_skip(skip: Path, marker: Path) -> set[str]:
     s = set()
     if skip.is_file():
         s.update(t.strip().lower() for t in skip.read_text(encoding="utf-8").splitlines() if t.strip())
-    # If a previous run was killed mid-render, blacklist the culprit it recorded.
+    # If a previous run was killed mid-render, quarantine the culprit it recorded.
     if marker.is_file():
         culprit = marker.read_text(encoding="utf-8").strip().lower()
         if culprit:
             s.add(culprit)
             with open(skip, "a", encoding="utf-8") as fh:
                 fh.write(culprit + "\n")
+            print(f"QUARANTINE: '{culprit}' was interrupted mid-conversion; "
+                  f"recorded in {skip.name} for review.", flush=True)
         marker.unlink(missing_ok=True)
     return s
+
+
+def _report_quarantine(names: set[str], skip: Path) -> None:
+    if names:
+        print(f"REVIEW: {len(names)} source(s) quarantined and skipped: "
+              f"{', '.join(sorted(names))}. Fix them and delete their lines from "
+              f"{skip} to retry.", flush=True)
+
+
+def _pick_sources(in_dir: Path) -> list[Path]:
+    """One source file per output name, chosen by SOURCE_PRIORITY."""
+    best: dict[str, Path] = {}
+    for p in sorted(in_dir.iterdir()):
+        ext = p.suffix.lower()
+        if ext not in SOURCE_PRIORITY or not p.is_file():
+            continue
+        cur = best.get(p.stem.lower())
+        if cur is None or SOURCE_PRIORITY.index(ext) < SOURCE_PRIORITY.index(cur.suffix.lower()):
+            best[p.stem.lower()] = p
+    return [best[n] for n in sorted(best)]
+
+
+def _output_ok(out: Path, src: Path) -> bool:
+    """True if ``out`` is already a usable emoji built from the current ``src``.
+
+    Existence proves nothing: a run killed mid-save leaves a truncated PNG, an
+    older pipeline may have written a differently sized one, and a source edited
+    after its conversion has to be converted again.
+    """
+    try:
+        if out.stat().st_mtime < src.stat().st_mtime:
+            return False  # source changed since the emoji was written
+        with Image.open(out) as im:
+            return im.size == (SIZE, SIZE) and im.mode == "RGBA" and not _is_blank(im)
+    except Exception:  # noqa: BLE001 - missing, truncated or unreadable -> rebuild
+        return False
 
 
 def _trim(img: Image.Image) -> Image.Image:
@@ -104,10 +160,10 @@ def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:
 def _convert_svg(p: Path, out: Path) -> bool:
     """Render an SVG to a 100x100 PNG. Returns True only on a NON-blank result.
 
-    Some SVG features (e.g. gradient fills) are not rendered by the bundled
-    svglib/reportlab backend and yield a fully transparent image. We never save
-    such a blank result -- returning False lets the caller fall back to a raster
-    source (logos/png/<ticker>.png) instead of producing a blank emoji.
+    An SVG can still rasterize to nothing (empty document, everything clipped
+    away). We never save such a blank result -- returning False lets the caller
+    fall back to a raster source (logos/png/<ticker>.png) instead of producing a
+    blank emoji.
     """
     img = _render_svg(p)
     if img is None:
@@ -137,43 +193,39 @@ def _run_general(in_dir: Path, out_dir: Path, limit: int) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     marker = out_dir / ".svg_cur"
     skip = out_dir / ".svg_skip.txt"
-    blacklist = _load_skip(skip, marker)
+    quarantined = _load_skip(skip, marker)
     made = svg_ok = raster_ok = failed = 0
 
-    files = sorted(p for p in in_dir.iterdir()
-                   if p.is_file() and (p.suffix.lower() == ".svg"
-                                       or p.suffix.lower() in RASTER_EXTS))
-    for p in files:
+    for p in _pick_sources(in_dir):
         if limit and made >= limit:
             break
         name = p.stem.lower()
         out = out_dir / f"{name}.png"
-        if out.exists() or name in blacklist:
+        if name in quarantined or _output_ok(out, p):
             continue
+        marker.write_text(name, encoding="utf-8")  # heartbeat + culprit if we hang
         try:
             if p.suffix.lower() == ".svg":
-                marker.write_text(name, encoding="utf-8")  # record culprit if we hang
-                ok = _convert_svg(p, out)
-                marker.unlink(missing_ok=True)
-                if ok:
+                if _convert_svg(p, out):
                     made += 1; svg_ok += 1
                 else:
                     failed += 1
+            elif _convert_raster(p, out):
+                made += 1; raster_ok += 1
             else:
-                if _convert_raster(p, out):
-                    made += 1; raster_ok += 1
-                else:
-                    failed += 1  # blank/empty source -> never write a blank emoji
+                failed += 1  # blank/empty source -> never write a blank emoji
         except Exception:  # noqa: BLE001
-            marker.unlink(missing_ok=True)
             failed += 1
+        finally:
+            marker.unlink(missing_ok=True)
         if made and made % 250 == 0:
             print(f"  ...{made} emojis (svg={svg_ok}, raster={raster_ok})", flush=True)
 
+    _report_quarantine(quarantined, skip)
     total = len(list(out_dir.glob("*.png")))
     print(f"DONE: made {made} this run (svg={svg_ok}, raster={raster_ok}, failed={failed}); "
           f"total emoji PNGs in {out_dir}: {total}.", flush=True)
-    return 0
+    return ingest_exit_code(made, failed)
 
 
 def _run_legacy(limit: int) -> int:
@@ -181,20 +233,21 @@ def _run_legacy(limit: int) -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     marker = ROOT / "logos" / ".svg_cur"
     skip = ROOT / "logos" / ".svg_skip.txt"
-    blacklist = _load_skip(skip, marker)
+    quarantined = _load_skip(skip, marker)
     done: set[str] = set()
     made = svg_ok = png_ok = failed = 0
 
+    # SVG first, then PNG for the same ticker: same priority as SOURCE_PRIORITY.
     for p in sorted(SVG_DIR.glob("*.svg")):
         if limit and made >= limit:
             break
         t = p.stem.lower()
         out = OUT_DIR / f"{t}.png"
-        if out.exists():
+        if _output_ok(out, p):
             done.add(t); continue
-        if t in blacklist:
+        if t in quarantined:
             continue
-        marker.write_text(t, encoding="utf-8")  # record culprit if we hang here
+        marker.write_text(t, encoding="utf-8")  # heartbeat + culprit if we hang here
         try:
             if _convert_svg(p, out):
                 done.add(t); made += 1; svg_ok += 1
@@ -202,10 +255,13 @@ def _run_legacy(limit: int) -> int:
                 failed += 1
         except Exception:  # noqa: BLE001
             failed += 1
-        marker.unlink(missing_ok=True)
+        finally:
+            marker.unlink(missing_ok=True)
         if made and made % 250 == 0:
             print(f"  ...{made} emojis (svg={svg_ok}, png={png_ok})", flush=True)
 
+    # No quarantine check here on purpose: a quarantined name means its SVG hung,
+    # and the raster fallback is exactly how that ticker still gets an emoji.
     for p in sorted(PNG_DIR.glob("*.png")):
         if limit and made >= limit:
             break
@@ -213,7 +269,7 @@ def _run_legacy(limit: int) -> int:
         if t in done:
             continue
         out = OUT_DIR / f"{t}.png"
-        if out.exists():
+        if _output_ok(out, p):
             done.add(t); continue
         try:
             if _convert_raster(p, out):
@@ -225,10 +281,11 @@ def _run_legacy(limit: int) -> int:
         if made and made % 250 == 0:
             print(f"  ...{made} emojis (svg={svg_ok}, png={png_ok})", flush=True)
 
+    _report_quarantine(quarantined, skip)
     total = len(list(OUT_DIR.glob("*.png")))
     print(f"DONE: made {made} this run (svg={svg_ok}, png={png_ok}, failed={failed}); "
           f"total emoji PNGs: {total}.", flush=True)
-    return 0
+    return ingest_exit_code(made, failed)
 
 
 def main() -> int:
@@ -244,7 +301,7 @@ def main() -> int:
         in_dir = Path(args.in_dir)
         if not in_dir.is_dir():
             print(f"ERROR: --in folder not found: {in_dir}")
-            return 2
+            return EXIT_USAGE
         out_dir = Path(args.out_dir) if args.out_dir else in_dir.parent / f"{in_dir.name}_emoji"
         return _run_general(in_dir, out_dir, args.limit)
     return _run_legacy(args.limit)
