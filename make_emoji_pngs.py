@@ -7,7 +7,7 @@ Two modes:
 
 1. General mode (any emoji pack):
      python make_emoji_pngs.py --in input/myset --out build/myset
-   Reads every image in ``--in`` (.svg via svglib; .png/.jpg/.jpeg/.webp/.gif
+   Reads every image in ``--in`` (.svg via resvg; .png/.jpg/.jpeg/.webp/.gif
    via Pillow) and writes ``<name>.png`` (100x100) into ``--out``.
 
 2. Legacy crypto-coin mode (default, no --in/--out):
@@ -15,21 +15,21 @@ Two modes:
    Reads ``logos/svg/<ticker>.svg`` and ``logos/png/<ticker>.png`` and writes
    ``logos/emoji/<ticker>.png``.
 
-Hang protection: some SVGs make svglib spin forever. Before rendering an SVG its
-name is written to a marker file; if this process is killed while stuck, the
-next run reads the marker, blacklists that name (``.svg_skip.txt`` in the output
-dir) and moves on. Run via run_convert.ps1 which restarts until it completes.
+Hang protection: before rendering an SVG its name is written to a marker file;
+if this process is killed while stuck, the next run reads the marker, blacklists
+that name (``.svg_skip.txt`` in the output dir) and moves on. Run via
+run_convert.ps1 which restarts until it completes. (The renderer that used to
+spin has been replaced by resvg, but the guard is kept as cheap insurance.)
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 from pathlib import Path
 
-import numpy as np
+import resvg_py
 from PIL import Image
-from reportlab.graphics import renderPM
-from svglib.svglib import svg2rlg
 
 ROOT = Path(__file__).resolve().parent
 # Legacy crypto-coin defaults (used when --in/--out are not provided).
@@ -77,24 +77,17 @@ def _fit_100(img: Image.Image) -> Image.Image:
 
 
 def _render_svg(path: Path) -> Image.Image | None:
-    drawing = svg2rlg(str(path))
-    if drawing is None or not drawing.width or not drawing.height:
+    """Rasterize an SVG to an RGBA image ``RENDER`` px on its longest side.
+
+    resvg renders straight to RGBA. The previous backend had no alpha channel,
+    so it rendered twice (on white, on black) and solved for alpha per pixel;
+    it also could not paint gradients, silently producing a blank image.
+    """
+    try:
+        png = resvg_py.svg_to_bytes(svg_path=str(path), width=RENDER)
+    except Exception:  # noqa: BLE001 - a broken SVG must not stop the batch
         return None
-    scale = RENDER / max(drawing.width, drawing.height)
-    drawing.scale(scale, scale)
-    drawing.width *= scale
-    drawing.height *= scale
-    on_white = renderPM.drawToPIL(drawing, dpi=72, bg=0xFFFFFF).convert("RGB")
-    on_black = renderPM.drawToPIL(drawing, dpi=72, bg=0x000000).convert("RGB")
-    w = np.asarray(on_white, dtype=np.int16)
-    b = np.asarray(on_black, dtype=np.int16)
-    diff = (w - b).clip(0, 255).mean(axis=2)
-    alpha = (255.0 - diff).clip(0, 255)
-    a = alpha / 255.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        color = np.where(a[..., None] > 0.003, b / a[..., None], 0.0)
-    rgba = np.dstack([color.clip(0, 255), alpha]).astype(np.uint8)
-    return Image.fromarray(rgba, mode="RGBA")
+    return Image.open(io.BytesIO(bytes(png))).convert("RGBA")
 
 
 def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:

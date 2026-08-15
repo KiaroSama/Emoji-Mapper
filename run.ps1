@@ -240,7 +240,7 @@ function Install-Deps ($py) {
 }
 
 function Test-Deps ($py) {
-    & $py -c "import requests,PIL,numpy,svglib,reportlab" *> $null
+    & $py -c "import requests,PIL,numpy,resvg_py" *> $null
     return ($LASTEXITCODE -eq 0)
 }
 
