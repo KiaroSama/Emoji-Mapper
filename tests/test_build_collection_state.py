@@ -87,12 +87,19 @@ class FakeTG:
     def get_me(self):
         return {"username": "YourEmojiBot"}
 
+    # Telegram re-encodes on upload, so the live copy's file_unique_id is a
+    # FRESH one the catalog has never seen (``fuid_prefix``). The fixture
+    # pre-records "UP-item<i>", so a fake that returns those ids would hide the
+    # very window these tests are about.
+    fuid_prefix = "UP-"
+
     def _new(self, name: str, path) -> dict:
         if self.fail_after is not None and len(self.uploaded) >= self.fail_after:
             raise RuntimeError("BAD_REQUEST: STICKER_PNG_DIMENSIONS")
         stem = Path(path).stem
         self.uploaded.append(stem)
-        return _sticker(f"UP-{stem}", f"{name}-{len(self.sets.get(name, []))}")
+        return _sticker(f"{self.fuid_prefix}{stem}",
+                        f"{name}-{len(self.sets.get(name, []))}")
 
     def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
         self.sets[name] = [self._new(name, path)]
@@ -222,6 +229,106 @@ class StateFileContract(_CatalogFixture):
                 bc.save_json(path, {"base": "pk", "sets": [], "sent": ["second"]})
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sent"],
                          ["first"])
+
+    # ----- M-11: the WHOLE shape is checked, before anything mutates ------- #
+    def _bad_state(self, *sets, **top) -> None:
+        state = {"base": "pk", "sets": list(sets), "sent": []}
+        state.update(top)
+        bc.save_json(bc._state_path(self.data, "pk"), state)
+
+    def _set(self, **over) -> dict:
+        s = {"fmt": "static", "index": 1, "name": SET, "title": "Pack 1",
+             "live": 2, "logo": False, "keys": list(self.keys)}
+        s.update(over)
+        return s
+
+    def test_a_wholly_consistent_state_is_accepted(self):
+        self._bad_state(self._set())
+        self.assertEqual(len(bc.load_state(self.data, "pk")["sets"]), 1)
+
+    def test_the_same_index_in_two_formats_is_fine(self):
+        self._bad_state(self._set(keys=[self.keys[0]], live=1),
+                        self._set(fmt="video", name="pkv1_by_bot", live=1,
+                                  keys=[self.keys[1]]))
+        self.assertEqual(len(bc.load_state(self.data, "pk")["sets"]), 2)
+
+    def test_a_negative_live_count_is_rejected(self):
+        self._bad_state(self._set(live=-1, keys=[]))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_a_live_count_above_telegrams_cap_is_rejected(self):
+        self._bad_state(self._set(live=201, keys=[]))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_more_recorded_keys_than_live_stickers_is_rejected(self):
+        # The cid mapping reads live[i + offset] for every key, so this state
+        # would index past the end -- or worse, onto somebody else's sticker.
+        self._bad_state(self._set(live=1))
+        with self.assertRaises(bc.StateError) as ctx:
+            bc.load_state(self.data, "pk")
+        self.assertIn("records 2", str(ctx.exception))
+
+    def test_the_logo_slot_counts_towards_that_bound(self):
+        self._bad_state(self._set(live=2, logo=True))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_one_emoji_recorded_twice_in_a_set_is_rejected(self):
+        self._bad_state(self._set(keys=[self.keys[0], self.keys[0]]))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_one_emoji_recorded_in_two_sets_is_rejected(self):
+        self._bad_state(self._set(keys=[self.keys[0]], live=1),
+                        self._set(index=2, name=SET2, live=1,
+                                  keys=[self.keys[0]]))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_two_sets_sharing_a_name_are_rejected(self):
+        self._bad_state(self._set(keys=[self.keys[0]], live=1),
+                        self._set(index=2, keys=[self.keys[1]], live=1))
+        with self.assertRaises(bc.StateError):
+            bc.load_state(self.data, "pk")
+
+    def test_a_repeated_or_backwards_index_is_rejected(self):
+        for second in ({"index": 1}, {"index": 0}):
+            self._bad_state(self._set(index=2, keys=[self.keys[0]], live=1),
+                            self._set(name=SET2, keys=[self.keys[1]], live=1,
+                                      **second))
+            with self.assertRaises(bc.StateError):
+                bc.load_state(self.data, "pk")
+
+    def test_malformed_field_types_are_rejected(self):
+        for over in ({"keys": "not-a-list"}, {"keys": [1, 2]}, {"logo": "yes"},
+                     {"live": "two"}, {"live": True}, {"index": True},
+                     {"title": ""}, {"name": ""}):
+            self._bad_state(self._set(**over))
+            with self.assertRaises(bc.StateError):
+                bc.load_state(self.data, "pk")
+
+    def test_malformed_sent_and_skipped_entries_are_rejected(self):
+        for top in ({"sent": [None]}, {"sent": [""]}, {"skipped": [{"k": 1}]}):
+            self._bad_state(**top)
+            with self.assertRaises(bc.StateError):
+                bc.load_state(self.data, "pk")
+
+    def test_a_broken_state_stops_the_run_before_any_mutation(self):
+        self._bad_state(self._set(live=1))       # records more than it holds
+        tg = FakeTG()
+        with mock.patch.object(bc, "Telegram", lambda token: tg), \
+                mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "x"}), \
+                redirect_stdout(io.StringIO()):
+            rc = _main("--base", "pk", "--title", "T", "--user-id", "7",
+                       "--formats", "static", "--no-brand-logo",
+                       "--data-dir", str(self.data))
+        self.assertEqual(rc, EXIT_FAILED)
+        self.assertEqual(tg.uploaded, [])        # no Telegram mutation at all
+        self.assertEqual(tg.sets, {})
+        # ...not even the frozen plan was rewritten from the bad state.
+        self.assertFalse(bc._plan_path(self.data, "pk").exists())
 
     def test_main_stops_on_an_unreadable_plan(self):
         bc._plan_path(self.data, "pk").write_text("{oops", encoding="utf-8")
@@ -356,9 +463,11 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
 
     def test_content_resolution_rescues_a_re_uploaded_identical_picture(self):
         # A new id is not automatically a different emoji: if the bytes still
-        # resolve to the recorded key it is the same picture, not drift.
+        # resolve to the recorded key it is the same picture, not drift. A
+        # re-upload is a NEW sticker, so its custom_emoji_id is new too and only
+        # the content can settle it.
         self._read_back(*self.keys)
-        tg = DownloadingTG(sets={SET: [_sticker("RE-UPLOADED", "c0"),
+        tg = DownloadingTG(sets={SET: [_sticker("RE-UPLOADED", "c9"),
                                        _sticker("UP-item1", "c1")]})
         with mock.patch.object(bc.media, "content_key",
                                lambda p, fmt: self.keys[0]), \
@@ -368,14 +477,46 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
         self.assertEqual(tg.downloads, 1)
 
-    def test_a_fresh_upload_not_yet_read_back_is_not_drift(self):
+    def test_a_fresh_upload_whose_identity_was_recorded_is_not_drift(self):
         # Telegram re-encodes on upload, so the copy's id is only learnable by
-        # reading the set back -- which is exactly what _record_cids does here.
+        # reading the set back -- which _confirm_new_upload does at the moment
+        # of the upload. Once recorded, the position resolves by identity.
+        with Catalog(self.data / "catalog.db") as cat:
+            for fuid, key in zip(("BRAND-NEW-0", "BRAND-NEW-1"), self.keys):
+                cat.record_file_unique_id(fuid, key)
         tg = FakeTG(sets={SET: [_sticker("BRAND-NEW-0", "c0"),
                                 _sticker("BRAND-NEW-1", "c1")]})
         with Catalog(self.data / "catalog.db") as cat:
             bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[0]), "c0")
+
+    def test_an_unidentifiable_fresh_position_never_falls_back_to_order(self):
+        """C-02: the window that let ``sol`` inherit a Solama llama.
+
+        State from a run that uploaded both emoji but had not read the set back
+        yet -- no custom_emoji_id stored for either key. The live set was
+        reordered in the meantime; it is the SAME LENGTH, so only identity can
+        tell. Neither id is one this publisher recorded, so there is nothing to
+        trust and the ids must not be written from position.
+        """
+        tg = FakeTG(sets={SET: [_sticker("FRESH-1", "c1"),
+                                _sticker("FRESH-0", "c0")]})
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift):
+                bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
+            self.assertIsNone(cat.custom_emoji_id_for("pk", self.keys[0]))
+            self.assertIsNone(cat.custom_emoji_id_for("pk", self.keys[1]))
+
+    def test_content_resolution_failure_is_drift_not_a_positional_guess(self):
+        # The download is the last identity route; when it fails the position
+        # stays unproven, and unproven must never mean "order held".
+        tg = DownloadingTG(sets={SET: [_sticker("FRESH-0", "c0"),
+                                       _sticker("FRESH-1", "c1")]},
+                           error="connection reset")
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift):
+                bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
+        self.assertEqual(tg.downloads, 1)   # tried identity first, then stopped
 
 
 # --------------------------------------------------------------------------- #
@@ -412,6 +553,106 @@ class UnattributedTail(_CatalogFixture):
         with Catalog(self.data / "catalog.db") as cat:
             bc.reconcile_set(tg, cat, s, self.data, "pk")
         self.assertTrue(bc._set_is_open(s))
+
+
+# --------------------------------------------------------------------------- #
+# C-02: the fresh-upload window, end to end through the publisher
+# --------------------------------------------------------------------------- #
+class FreshUploadTG(FakeTG):
+    """Uploads come back with identities the catalog has never seen.
+
+    That is what Telegram really does (it re-encodes, so the live copy gets its
+    own file_unique_id), and it is the state in which a set edit used to be
+    invisible: nothing to compare against, so order was believed.
+    """
+
+    fuid_prefix = "FRESH-"
+
+
+class FreshUploadIdentity(_CatalogFixture):
+    def _publish(self, tg, edit=None) -> int:
+        """Publish both items; ``edit(tg.sets)`` runs in the window between the
+        last upload and the read-back that assigns custom_emoji_ids."""
+        record_cids = bc._record_cids
+
+        def edited(*a, **kw):
+            if edit:
+                edit(tg.sets)
+            return record_cids(*a, **kw)
+
+        with mock.patch.object(bc, "Telegram", lambda token: tg), \
+                mock.patch.object(bc, "_record_cids", edited), \
+                mock.patch.object(bc.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "x",
+                                             "PACK_LINKS_CHAT_ID": ""}):
+            with redirect_stdout(io.StringIO()):
+                return _main("--base", "pk", "--title", "Pack", "--formats",
+                             "static", "--user-id", "7", "--no-brand-logo",
+                             "--data-dir", str(self.data))
+
+    def test_a_same_length_reorder_before_read_back_fails_closed(self):
+        """Both emoji are ours, so lengths, counts and set membership all still
+        match -- only identity notices. Believing order here is exactly how a
+        ticker ended up on another project's artwork."""
+        tg = FreshUploadTG()
+        self.assertEqual(self._publish(tg, lambda sets: sets[SET].reverse()),
+                         EXIT_FAILED)
+        with Catalog(self.data / "catalog.db") as cat:
+            # item0 keeps the id of the sticker that was identified as its own
+            # at upload time, and never the one that moved into its position.
+            self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[0]),
+                             f"{SET}-0")
+            self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[1]),
+                             f"{SET}-1")
+
+    def test_a_foreign_sticker_swapped_in_never_takes_our_key(self):
+        tg = FreshUploadTG()
+
+        def swap(sets):
+            sets[SET][0] = _sticker("NEVER-SEEN", "foreign-cid")
+
+        self.assertEqual(self._publish(tg, swap), EXIT_FAILED)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertNotEqual(cat.custom_emoji_id_for("pk", self.keys[0]),
+                                "foreign-cid")
+            self.assertEqual(cat.custom_emoji_id_for("pk", self.keys[0]),
+                             f"{SET}-0")
+
+    def test_the_uploaded_copys_identity_is_recorded_at_upload_time(self):
+        tg = FreshUploadTG()
+        self.assertEqual(self._publish(tg), EXIT_OK)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(cat.seen_file_unique_id("FRESH-item0"), self.keys[0])
+            self.assertEqual(cat.seen_file_unique_id("FRESH-item1"), self.keys[1])
+
+    def test_an_upload_that_adds_no_identity_is_never_recorded(self):
+        """The API said yes but nothing new is live: there is no sticker to
+        attribute, so the key must stay pending rather than claim a position."""
+        class SilentTG(FreshUploadTG):
+            def add_emoji(self, *a, **kw):
+                pass                      # accepted, but nothing appears
+
+        tg = SilentTG()
+        self.assertEqual(self._publish(tg), EXIT_FAILED)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertTrue(cat.is_published("pk", self.keys[0]))
+            self.assertFalse(cat.is_published("pk", self.keys[1]))
+
+    def test_a_concurrent_writer_makes_the_position_ambiguous(self):
+        """Two new stickers, one of them somebody else's: which is ours is a
+        guess, and a guess is not identity."""
+        class RacedTG(FreshUploadTG):
+            def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,
+                          expected_before=None):
+                super().add_emoji(user_id, name, path, fmt, emojis, keywords,
+                                  expected_before=expected_before)
+                self.sets[name].append(_sticker("SOMEONE-ELSE", "other-cid"))
+
+        tg = RacedTG()
+        self.assertEqual(self._publish(tg), EXIT_FAILED)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertFalse(cat.is_published("pk", self.keys[1]))
+            self.assertIsNone(cat.seen_file_unique_id("SOMEONE-ELSE"))
 
 
 # --------------------------------------------------------------------------- #

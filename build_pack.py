@@ -416,6 +416,22 @@ class LiveStateUnknown(RuntimeError):
     """Live Telegram state could not be determined; callers must not guess."""
 
 
+def _usable_fuids(stickers: list) -> set[str] | None:
+    """Distinct file_unique_ids of ``stickers``, or None if they cannot identify.
+
+    Identity only works when EVERY sticker carries one and they are distinct.
+    A missing id would collapse several stickers onto the same key, making a
+    set look unchanged when it is not.
+    """
+    fuids = set()
+    for s in stickers:
+        fuid = s.get("file_unique_id")
+        if not fuid:
+            return None
+        fuids.add(str(fuid))
+    return fuids if len(fuids) == len(stickers) else None
+
+
 class BotApiError(RuntimeError):
     """Telegram answered ok:false -- a definite rejection of THIS request.
 
@@ -587,14 +603,19 @@ class Telegram:
             if not known or sset is None:
                 return None  # unknown / set vanished: reconcile, don't guess
             stickers = sset.get("stickers", [])
-            if known_before is not None:
-                now = {str(s.get("file_unique_id")) for s in stickers}
+            now = _usable_fuids(stickers)
+            if known_before is not None and now is not None:
                 new = now - known_before
                 if len(new) == 1:
                     return True
                 if not new:
                     return False
                 return None      # several new stickers: someone else wrote too
+            # No usable identities (a sticker without a file_unique_id, or two
+            # sharing one). Falling through to the count is essential: treating
+            # an unusable snapshot as "nothing new appeared" would report a
+            # landed upload as not applied and re-send it -- the exact duplicate
+            # this check exists to prevent.
             n = len(stickers)
             if n == expected_before + 1:
                 return True
@@ -605,11 +626,15 @@ class Telegram:
         return check
 
     def set_fuids(self, name: str) -> set[str] | None:
-        """Current file_unique_ids of a set, or None if the live state is unknown."""
+        """Usable identities of a set's stickers, or None when there are none.
+
+        None means "identity is not available here" -- the caller must fall
+        back to the weaker count check rather than conclude anything.
+        """
         state, sset = self.probe_set_state(name)
         if state is not SetState.EXISTS:
             return None
-        return {str(s.get("file_unique_id")) for s in sset.get("stickers", [])}
+        return _usable_fuids(sset.get("stickers", []))
 
     def _created_check(self, name: str, *, expect_first: Path | None = None):
         """applied_check for createNewStickerSet: did WE create this set?

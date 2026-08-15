@@ -826,6 +826,38 @@ class AddedCheckUsesIdentity(unittest.TestCase):
         tg = self._tg(["a", "b", "x"])
         self.assertIs(tg._added_check("s", 2)(), True)
 
+    def test_stickers_without_identity_fall_back_to_the_count(self):
+        """Regression: unusable identities must NOT read as "not applied".
+
+        A set whose stickers carry no file_unique_id collapsed to a single
+        placeholder, so the post-add snapshot equalled the pre-add one, the
+        check answered False, and the client re-sent an upload that had already
+        landed -- reintroducing the duplicate it exists to prevent.
+        """
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (
+            True, {"stickers": [{"i": 0}, {"i": 1}]})     # no identities at all
+        check = tg._added_check("s", 1, known_before={"None"})
+        self.assertIs(check(), True, "must fall back to the count, not say False")
+
+    def test_duplicate_identities_are_not_trusted(self):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (True, {"stickers": [
+            {"file_unique_id": "same"}, {"file_unique_id": "same"}]})
+        self.assertIsNone(bp._usable_fuids(
+            [{"file_unique_id": "same"}, {"file_unique_id": "same"}]))
+        # 2 stickers where 1 was expected -> count path says applied.
+        self.assertIs(tg._added_check("s", 1, known_before={"x"})(), True)
+
+    def test_usable_fuids_accepts_a_well_formed_set(self):
+        self.assertEqual(
+            bp._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": "b"}]),
+            {"a", "b"})
+
+    def test_usable_fuids_rejects_a_missing_id(self):
+        self.assertIsNone(
+            bp._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": ""}]))
+
 
 class CreateAdoptionVerifiesContent(unittest.TestCase):
     """Set existence is not proof that WE created it."""

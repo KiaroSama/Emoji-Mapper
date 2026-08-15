@@ -64,20 +64,55 @@ class EntryPointsImport(unittest.TestCase):
 class SuiteIsHermetic(unittest.TestCase):
     """The guard in tests/__init__.py must actually hold."""
 
-    def test_credentials_are_not_visible(self):
-        import os
-        for name in ("TELEGRAM_BOT_TOKEN", "GENERAL_BOT_TOKEN", "CMC_API_KEY"):
-            self.assertNotIn(name, os.environ,
-                             f"{name} is visible to tests; a stray real call "
-                             f"could authenticate")
+    def test_the_guard_is_installed_at_all(self):
+        """Canary: the guard only loads when `tests` is imported AS A PACKAGE.
 
-    def test_dotenv_cannot_put_them_back(self):
+        `unittest discover -s tests` (no -t) makes the tests directory the
+        top-level, so modules load as `test_x` instead of `tests.test_x` and
+        tests/__init__.py never runs -- silently disabling the credential
+        scrub and the socket block. Run the suite with `-t .`.
+        """
+        import socket
+        installed = getattr(socket.socket.connect, "__name__", "") == "_guarded_connect"
+        self.assertTrue(
+            installed,
+            "the hermetic guard is NOT active: this suite was started in a way "
+            "that skips tests/__init__.py. Use: "
+            "python -m unittest discover -s tests -t . -p \"test_*.py\"")
+
+    # NOTE: these deliberately do NOT assert that credential-shaped names are
+    # absent from os.environ. Other tests legitimately inject FAKE tokens via
+    # mock.patch.dict, and asserting on the name made this suite fail depending
+    # on which module ran first. What matters is that the REAL values in .env
+    # cannot reach a test, which is what these check.
+
+    def test_the_real_dotenv_values_are_not_loaded(self):
+        import os
+        from pathlib import Path
+        env_file = Path(__file__).resolve().parent.parent / ".env"
+        if not env_file.exists():
+            self.skipTest("no local .env to leak")
+        leaked = []
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip().strip('"').strip("'")
+            if len(value) >= 12 and os.environ.get(key.strip()) == value:
+                leaked.append(key.strip())
+        self.assertEqual(leaked, [], f"real .env values visible to tests: {leaked}")
+
+    def test_load_env_is_a_no_op_under_the_guard(self):
         """A module calling load_env() at import must not undo the scrub."""
         import os
 
         import build_pack
+        before = dict(os.environ)
         build_pack.load_env()
-        self.assertNotIn("TELEGRAM_BOT_TOKEN", os.environ)
+        self.assertEqual(dict(os.environ), before,
+                         "load_env() modified the environment despite "
+                         "EMOJI_MAPPER_NO_DOTENV")
 
     def test_outbound_connections_are_refused(self):
         import socket
