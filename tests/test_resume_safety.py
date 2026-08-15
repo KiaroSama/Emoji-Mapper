@@ -784,6 +784,134 @@ class PackFamilyLock(unittest.TestCase):
         self.assertNotIn("..", p.name)
 
 
+class AddedCheckUsesIdentity(unittest.TestCase):
+    """A count increase is not proof that OUR upload landed.
+
+    A second writer adding something unrelated produces the same +1 while our
+    request failed. Acting on that marks the wrong item done -- the mechanism
+    that put a Solama llama on the `sol` ticker.
+    """
+
+    TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def _tg(self, after_fuids):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (
+            True, {"stickers": [{"file_unique_id": f} for f in after_fuids]})
+        return tg
+
+    def test_our_own_new_sticker_is_recognised(self):
+        tg = self._tg(["a", "b", "MINE"])
+        check = tg._added_check("s", 2, known_before={"a", "b"})
+        self.assertIs(check(), True)
+
+    def test_nothing_new_means_not_applied(self):
+        tg = self._tg(["a", "b"])
+        check = tg._added_check("s", 2, known_before={"a", "b"})
+        self.assertIs(check(), False)
+
+    def test_someone_elses_sticker_is_not_proof(self):
+        """The audit's case: +1 from a foreign writer while our add failed."""
+        tg = self._tg(["a", "b", "THEIRS", "MINE"])
+        check = tg._added_check("s", 2, known_before={"a", "b"})
+        self.assertIsNone(check(), "two new identities must be UNKNOWN, not applied")
+
+    def test_a_replacement_is_not_read_as_our_add(self):
+        # Same count as expected+1 overall, but an old identity vanished too.
+        tg = self._tg(["a", "THEIRS", "MINE"])
+        check = tg._added_check("s", 2, known_before={"a", "b"})
+        self.assertIsNone(check())
+
+    def test_without_a_snapshot_it_falls_back_to_the_count(self):
+        tg = self._tg(["a", "b", "x"])
+        self.assertIs(tg._added_check("s", 2)(), True)
+
+
+class CreateAdoptionVerifiesContent(unittest.TestCase):
+    """Set existence is not proof that WE created it."""
+
+    TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = Path(self.tmp.name) / "ours.png"
+        _png(self.src, (12, 34, 56, 255))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _tg(self, stickers, matches):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (True, {"stickers": stickers})
+        tg._sticker_matches = lambda st, src: matches
+        return tg
+
+    def test_existence_alone_is_not_adopted(self):
+        tg = self._tg([{"file_unique_id": "foreign"}], matches=False)
+        self.assertIs(tg._created_check("s", expect_first=self.src)(), False)
+
+    def test_our_own_image_is_adopted(self):
+        tg = self._tg([{"file_unique_id": "ours"}], matches=True)
+        self.assertIs(tg._created_check("s", expect_first=self.src)(), True)
+
+    def test_a_populated_set_is_not_the_shape_we_would_have_left(self):
+        tg = self._tg([{"file_unique_id": "a"}, {"file_unique_id": "b"}],
+                      matches=True)
+        self.assertIsNone(tg._created_check("s", expect_first=self.src)())
+
+    def test_unverifiable_content_stays_unknown(self):
+        tg = self._tg([{"file_unique_id": "x"}], matches=None)
+        self.assertIsNone(tg._created_check("s", expect_first=self.src)())
+
+    def test_missing_set_is_a_definite_no(self):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (True, None)
+        self.assertIs(tg._created_check("s", expect_first=self.src)(), False)
+
+
+class PosixStaleLockReclaim(unittest.TestCase):
+    """A crashed POSIX holder must not own its lock forever."""
+
+    def test_no_such_process_is_reported_dead(self):
+        with mock.patch.object(bp.os, "name", "posix"), \
+             mock.patch.object(bp.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(bp._lock_owner_is_alive(4242))
+
+    def test_permission_denied_means_it_exists(self):
+        with mock.patch.object(bp.os, "name", "posix"), \
+             mock.patch.object(bp.os, "kill", side_effect=PermissionError):
+            self.assertTrue(bp._lock_owner_is_alive(4242))
+
+    def test_unknown_failure_stays_conservative(self):
+        with mock.patch.object(bp.os, "name", "posix"), \
+             mock.patch.object(bp.os, "kill", side_effect=OSError("weird")):
+            self.assertTrue(bp._lock_owner_is_alive(4242))
+
+    def test_a_running_process_is_alive(self):
+        with mock.patch.object(bp.os, "name", "posix"), \
+             mock.patch.object(bp.os, "kill", return_value=None):
+            self.assertTrue(bp._lock_owner_is_alive(4242))
+
+
+class CanonicalMapLock(unittest.TestCase):
+    """Every writer of ticker_to_id.json must contend for one lock."""
+
+    def test_all_callers_get_the_same_path(self):
+        a, b = bp.canonical_map_lock(), bp.canonical_map_lock()
+        self.assertEqual(a.args[0], b.args[0])
+
+    def test_it_actually_excludes(self):
+        with bp.canonical_map_lock():
+            with self.assertRaises(bp.LockBusy):
+                with bp.canonical_map_lock():
+                    self.fail("two map writers held the lock at once")
+
+    def test_it_is_not_the_pack_family_lock(self):
+        with bp.canonical_map_lock():
+            with bp.exclusive_lock(bp.pack_family_lock_path("gvcryptoemoji")):
+                pass          # different concerns must not block each other
+
+
 class SharedLogoGuard(unittest.TestCase):
     """The detector that would have caught the 129-ticker collision."""
 

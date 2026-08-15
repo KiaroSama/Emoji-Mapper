@@ -24,7 +24,8 @@ import os
 import time
 from pathlib import Path
 
-from build_pack import (Telegram, load_env, safe_int_env, write_json_atomic)
+from build_pack import (BotApiError, Telegram, load_env, safe_int_env,
+                        write_json_atomic)
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 log = logging.getLogger("emoji_bot")
@@ -264,14 +265,28 @@ def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | No
                 d["reply_to_message_id"] = reply_to
             return d
         try:
-            tg._call("sendMessage", data=_data(text))
-        except Exception as exc:  # noqa: BLE001 - a bad custom_emoji must not drop the reply
-            # Retry without <tg-emoji> (some ids may not be renderable by the bot).
-            log.warning("rich reply failed (%s); retrying with plain fallback chars",
+            # retries=1: sendMessage is not idempotent and has no dedup key, so
+            # a timeout AFTER Telegram accepted the message is indistinguishable
+            # from one before it. Retrying turns one outage into several
+            # identical replies.
+            tg._call("sendMessage", retries=1, data=_data(text))
+        except BotApiError as exc:
+            # Telegram answered and REJECTED this message -- typically an id the
+            # bot cannot render as <tg-emoji>. It definitely did not arrive, so
+            # sending the plain variant cannot duplicate anything.
+            log.warning("rich reply rejected (%s); sending plain fallback chars",
                         redact(str(exc)))
             if plain is None:
                 plain = build_payloads(ids, labels, rich=False)
-            tg._call("sendMessage", data=_data(plain[i][0]))
+            tg._call("sendMessage", retries=1, data=_data(plain[i][0]))
+        except Exception as exc:  # noqa: BLE001
+            # No answer from Telegram: the rich message MAY have arrived. Sending
+            # the fallback here is what posted the same reply twice. Report and
+            # stop instead of guessing.
+            log.error("reply to chat %s is unresolved (%s); not sending a "
+                      "fallback, which could duplicate it", chat_id,
+                      redact(str(exc)))
+            return
 
 
 DENIED_TEXT = ("This is a private bot and you are not on its access list.\n"
