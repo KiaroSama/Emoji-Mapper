@@ -36,9 +36,13 @@ jobs:
       - name: Byte-compile all sources
         run: python -m compileall -q .
 
-      - name: Import smoke test
-        run: |
-          python -c "import build_pack, make_emoji_pngs, fetch_pack, add_media, build_collection, emoji_bot, panel; from emojikit import media, catalog, logsetup; print('imports OK')"
+      # The hand-written module list this replaced could not go stale loudly:
+      # coins/verify_logos.py imported a name build_pack no longer exported and
+      # nothing caught it, because no list mentioned coins/*. tests/
+      # test_entry_points.py DISCOVERS every entry point, so a new tool is
+      # covered as soon as it exists.
+      - name: Import smoke test (all entry points, discovered)
+        run: python -m unittest tests.test_entry_points -v
 
       - name: Unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
