@@ -35,7 +35,8 @@ from PIL import Image  # noqa: E402
 import add_media  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_USAGE  # noqa: E402
 from emojikit import media  # noqa: E402
-from emojikit.catalog import Catalog, PHASH_BITS  # noqa: E402
+from emojikit.catalog import (Catalog, PHASH_BITS,  # noqa: E402
+                              PHASH_MAX_THRESHOLD, check_phash_threshold)
 
 # The stand-in binaries block forever; this timeout is the only thing that can
 # stop them. Kept at the 1 s floor so the suite spends ~1 s per call site.
@@ -113,8 +114,18 @@ class TestChildProcessTimeout(unittest.TestCase):
         self.assertLess(time.monotonic() - started, MAX_ELAPSED)
 
 
+def _pseudo_noise(seed: int) -> Image.Image:
+    """A deterministic, version-independent image unrelated to any other seed.
+
+    Built arithmetically rather than with ``random`` so the Hamming distances
+    asserted below are the same on every machine and Python build.
+    """
+    px = bytes(((i * 2654435761 + seed * 40503) >> 7) & 0xFF for i in range(64 * 64))
+    return Image.frombytes("L", (64, 64), px).convert("RGBA")
+
+
 class TestPhashThresholdRange(unittest.TestCase):
-    """A dHash is 64 bits: a bigger threshold merges every same-format item."""
+    """A dHash is 64 bits: a big threshold merges unrelated same-format items."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -123,17 +134,42 @@ class TestPhashThresholdRange(unittest.TestCase):
     def _catalog(self, threshold: int) -> Catalog:
         return Catalog(self.tmp / "catalog.db", phash_threshold=threshold)
 
+    def _file(self, name: str) -> Path:
+        p = self.tmp / name
+        Image.new("RGBA", (8, 8), (1, 2, 3, 255)).save(p)
+        return p
+
     def test_usable_thresholds_are_accepted(self):
-        for value in (-1, 0, 8, PHASH_BITS):
+        for value in (-1, 0, 8, PHASH_MAX_THRESHOLD):
             with self.subTest(threshold=value):
                 with self._catalog(value) as cat:
                     self.assertEqual(cat.phash_threshold, value)
 
     def test_out_of_range_thresholds_are_refused(self):
-        for value in (-2, PHASH_BITS + 1, 999):
+        # PHASH_BITS itself is the worst case, not the widest usable setting:
+        # `hamming(a, b) <= 64` is true for EVERY pair of 64-bit hashes.
+        for value in (-2, PHASH_MAX_THRESHOLD + 1, PHASH_BITS, 999):
             with self.subTest(threshold=value):
                 with self.assertRaises(ValueError):
                     self._catalog(value)
+
+    def test_unrelated_images_survive_the_widest_allowed_threshold(self):
+        """The bound is what stops a whole catalog collapsing into one emoji."""
+        a, b = _pseudo_noise(1), _pseudo_noise(2)
+        distance = media.hamming(media._dhash(a), media._dhash(b))
+        # Two unrelated pictures land near half the hash. The old ceiling (64)
+        # is >= any distance at all, so it merged them; the new one cannot.
+        self.assertGreater(distance, PHASH_MAX_THRESHOLD)
+        self.assertLessEqual(distance, PHASH_BITS)
+
+        with self._catalog(PHASH_MAX_THRESHOLD) as cat:
+            cat.add(content_key="k-a", fmt="static", file_path=self._file("a.png"),
+                    phash=media._dhash(a))
+            _, is_new = cat.add(content_key="k-b", fmt="static",
+                                file_path=self._file("b.png"),
+                                phash=media._dhash(b))
+            self.assertTrue(is_new, "unrelated image merged into the first one")
+            self.assertEqual(len(cat.all_items()), 2)
 
     def test_cli_rejects_an_out_of_range_threshold(self):
         stderr = io.StringIO()
@@ -144,6 +180,12 @@ class TestPhashThresholdRange(unittest.TestCase):
                             str(self.tmp)])
         self.assertEqual(ctx.exception.code, EXIT_USAGE)
         self.assertIn("out of range", stderr.getvalue())
+
+    def test_check_phash_threshold_refuses_the_full_hash_width(self):
+        # The exact value the old bound allowed, and the one that collapses
+        # every same-format item onto a single catalog row.
+        with self.assertRaises(ValueError):
+            check_phash_threshold(PHASH_BITS)
 
 
 class TestBlankMediaRefused(unittest.TestCase):

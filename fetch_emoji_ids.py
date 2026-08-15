@@ -32,7 +32,7 @@ from pathlib import Path
 
 from build_pack import Telegram, ingest_exit_code, load_env
 from emojikit import media
-from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
+from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -205,8 +205,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--token-env", default="GENERAL_BOT_TOKEN",
                     help="Env var holding the bot token (default GENERAL_BOT_TOKEN).")
     ap.add_argument("--data-dir", default="collection", help="Catalog/media directory.")
-    ap.add_argument("--phash-threshold", type=int, default=DEFAULT_PHASH_THRESHOLD,
-                    help="Hamming distance for near-duplicate merging (-1 disables).")
+    # Same argparse-level validation as fetch_pack/add_media: Catalog() raises
+    # its ValueError long after argparse could have reported a usage error.
+    ap.add_argument("--phash-threshold", type=phash_threshold_arg,
+                    default=DEFAULT_PHASH_THRESHOLD,
+                    help="Hamming distance for near-duplicate merging "
+                         "(-1 disables, else 0..16).")
     args = ap.parse_args(argv)
 
     if not args.ids_file and not args.inline_ids:

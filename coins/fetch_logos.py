@@ -173,11 +173,19 @@ def main() -> int:
         rows.setdefault(t, {"ticker": t, "name": "", "format": "svg",
                             "file": f"logos/svg/{t}.svg"})
 
-    # Record every PNG already on disk, even from pages not reached this run.
-    for p in PNG_DIR.glob("*.png"):
+    # Record every PNG already on disk, even from pages not reached this run --
+    # but only after it decodes. These files were never checked here, so a
+    # cached error page or a body truncated by an earlier run was advertised in
+    # keywords.csv as that ticker's logo and fed straight into the pack.
+    for p in sorted(PNG_DIR.glob("*.png")):
         t = p.stem.lower()
-        rows.setdefault(t, {"ticker": t, "name": "", "format": "png",
-                            "file": f"logos/png/{t}.png"})
+        if t in rows:
+            continue          # already validated on the download/resume path
+        if not _valid_image(p):
+            print(f"  skip cached {p.name}: not a usable image", flush=True)
+            continue
+        rows[t] = {"ticker": t, "name": "", "format": "png",
+                   "file": f"logos/png/{t}.png"}
 
     with open(KEYWORDS_CSV, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)

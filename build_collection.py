@@ -31,14 +31,14 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
                         AmbiguousUploadError, LiveStateUnknown, LockBusy,
-                        SetState, Telegram, exclusive_lock, links_chat_id,
-                        load_env, safe_int_env, write_json_atomic)
+                        SetState, Telegram, exclusive_lock, ingest_exit_code,
+                        links_chat_id, load_env, safe_int_env,
+                        write_json_atomic)
 from emojikit import media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, redact, setup_logging
@@ -254,28 +254,59 @@ def _probe(tg, name: str) -> tuple[SetState, dict | None]:
         return SetState.UNKNOWN, None
 
 
-def _manifest_mismatch(cat: Catalog, live: list[dict], keys: list[str],
-                       offset: int, name: str) -> str | None:
+def _manifest_mismatch(tg, cat: Catalog, live: list[dict], keys: list[str],
+                       offset: int, name: str, *, base: str,
+                       tmp_dir: Path) -> str | None:
     """Why ``live`` no longer matches the recorded ``keys`` -- None if it does.
 
-    Identity comes from ``file_unique_id``: every live sticker whose id we have
-    already attributed must still sit on ITS key. A freshly uploaded copy has no
-    known id yet (Telegram re-encodes the file, so neither its bytes nor its id
-    can be predicted before reading the set back), so those positions are the
-    only ones still bound by order -- and only inside a manifest whose length
-    and known ids all check out.
+    EVERY recorded position must resolve to the key recorded there. Checking
+    only ids we happen to know already let an *unknown* identity pass: a
+    foreign sticker swapped onto one of our positions is by definition one we
+    have never seen, so ``seen_file_unique_id`` returns None and the position
+    was accepted on order alone -- after which its custom_emoji_id was written
+    onto our key.
+
+    A position is allowed to hold an unknown id in exactly one window: before
+    it has ever been read back. Telegram re-encodes on upload, so a fresh
+    copy's file_unique_id (and its content hash) cannot be predicted; the add
+    itself is what was verified, by ``expected_before``. That window closes the
+    first time :func:`_record_cids` stores the position's custom_emoji_id,
+    because it records the file_unique_id in the same step. An unknown id on a
+    position whose cid is already stored therefore means the sticker was
+    replaced: resolve it by content, or fail closed.
     """
     if len(live) < offset + len(keys):
         return (f"{name} holds {len(live)} sticker(s) but this publisher "
                 f"recorded {offset + len(keys)}: emoji were removed from the set.")
     for i, key in enumerate(keys):
-        fuid = str(live[i + offset].get("file_unique_id") or "")
+        st = live[i + offset]
+        fuid = str(st.get("file_unique_id") or "")
         known = cat.seen_file_unique_id(fuid) if fuid else None
-        if known is not None and known != key:
-            return (f"{name} position {i + offset} now holds {known}, but this "
-                    f"publisher recorded {key} there: the set was reordered, "
-                    f"replaced or edited by hand.")
+        if known == key:
+            continue
+        if known is None and not cat.custom_emoji_id_for(base, key):
+            continue                     # never read back yet: our fresh upload
+        # Last chance before failing closed: the owner may have re-uploaded the
+        # very same picture, which is a new id but not a different emoji.
+        if _resolve_sticker_key(tg, cat, st, tmp_dir) == key:
+            continue
+        return (f"{name} position {i + offset} now holds "
+                f"{known or 'a sticker this publisher cannot identify'}, but "
+                f"this publisher recorded {key} there: the set was reordered, "
+                f"replaced or edited by hand.")
     return None
+
+
+def _set_is_open(s: dict) -> bool:
+    """True while EVERY live sticker of ``s`` is one this publisher attributed.
+
+    A live position nobody could attribute (the owner appended a sticker, or
+    reconcile could not recognize one) gets no slot in ``keys``. Since
+    :func:`_record_cids` maps ``keys[i]`` onto ``live[i + offset]``, anything
+    added after that hole would hand a new key the foreign sticker's
+    custom_emoji_id. Such a set is closed: publishing rolls to a new one.
+    """
+    return s.get("live", 0) == (1 if s.get("logo") else 0) + len(s.get("keys") or [])
 
 
 def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | None:
@@ -339,7 +370,8 @@ def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path, base: str) -> int:
     live = sset.get("stickers", [])
     keys = s.setdefault("keys", [])
     offset = 1 if s.get("logo") else 0
-    why = _manifest_mismatch(cat, live, keys, offset, s["name"])
+    why = _manifest_mismatch(tg, cat, live, keys, offset, s["name"], base=base,
+                             tmp_dir=data_dir / "tmp")
     if why:
         raise SetDrift(f"{why} Refusing to publish into a set that no longer "
                        f"matches its manifest.")
@@ -416,7 +448,11 @@ def _video_is_blank(path: Path, min_visible: int = 8) -> bool:
     cmd = [media.ffmpeg_path(), "-v", "error", "-t", str(media.WEBM_MAX_SECONDS),
            "-i", str(path), "-an", "-vf", "fps=4,scale=64:64,format=rgba",
            "-f", "rawvideo", "-"]
-    raw = subprocess.run(cmd, check=True, capture_output=True).stdout
+    # Bounded child, like every other ffmpeg call in the project: media._run
+    # enforces the wall limit and kills the whole process tree on timeout. A
+    # bare subprocess.run had no timeout at all, so one corrupt clip could
+    # freeze the publish indefinitely -- exactly what that runner exists for.
+    raw = media._run(cmd, capture=True).stdout
     if len(raw) < _FRAME_BYTES:
         return False                # nothing decoded: let the upload decide
     for start in range(0, len(raw) - _FRAME_BYTES + 1, _FRAME_BYTES):
@@ -461,15 +497,20 @@ def write_manifest(data_dir: Path, cat: Catalog, s: dict, base: str) -> None:
 def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str],
                    base: str, title: str, user_id: int, default_emoji: str,
                    per_set: int, data_dir: Path, state: dict, bot: str,
-                   logo: "BrandLogo | None" = None) -> None:
-    """Publish all pending items of one format into per-format sets.
+                   logo: "BrandLogo | None" = None) -> tuple[int, int]:
+    """Publish all pending items of one format; returns (uploaded, failed).
 
     Duplicate-proof: "already uploaded" is decided by the catalog's per-item
     (committed) ``uploaded`` flag, NOT by a positional offset, so skipped items
     can never shift the boundary and cause a re-upload on resume.
+
+    ``failed`` counts items that stayed pending because an upload errored or
+    could not be confirmed -- i.e. work a later run must retry. Items dropped
+    by :func:`skip` are a recorded permanent decision (missing or blank media),
+    not retryable work, so they are not counted as failures.
     """
     if not plan_keys:
-        return
+        return 0, 0
     fmt_sets = [s for s in state["sets"] if s["fmt"] == fmt]
     skipped = set(state.setdefault("skipped", []))
 
@@ -481,8 +522,15 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     if fmt_sets:
         reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
         save_json(_state_path(data_dir, base), state)
-    if fmt_sets and fmt_sets[-1]["live"] < per_set:
-        cur = fmt_sets[-1]
+    # A set holding a position we could not attribute is CLOSED: see
+    # _set_is_open. Rolling to a fresh set is the only way to keep keys[] and
+    # the live positions aligned once a foreign sticker sits between them.
+    cur = fmt_sets[-1] if fmt_sets else None
+    if cur and not _set_is_open(cur):
+        log.warning("[%s] %s holds unattributed live sticker(s); publishing "
+                    "continues in a new set", fmt, cur["name"])
+        cur = None
+    if cur and cur["live"] < per_set:
         set_index, set_name, in_set = cur["index"], cur["name"], cur["live"]
     else:
         set_index = max((s["index"] for s in fmt_sets), default=0)
@@ -504,7 +552,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         state["skipped"] = sorted(skipped)
         save_json(_state_path(data_dir, base), state)
 
-    n = 0
+    n = failed = 0
     for key in pending:
         item = cat.get(key)
         if item is None or cat.is_published(base, key):
@@ -572,9 +620,10 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                     save_json(_state_path(data_dir, base), state)
                     if cat.is_published(base, key):
                         continue  # this very item was the set's first sticker
-                    if in_set > (1 if logo_png else 0) + len(fmt_sets[-1]["keys"]):
+                    if not _set_is_open(fmt_sets[-1]):
                         log.warning("[%s] %s has unattributed live stickers; not "
                                     "adding %s yet (will retry)", fmt, set_name, key)
+                        failed += 1
                         continue
                     tg.add_emoji(user_id, set_name, path, fmt, emojis,
                                  item.keywords, expected_before=in_set)
@@ -595,6 +644,10 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             elif fmt_sets:
                 in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
                 save_json(_state_path(data_dir, base), state)
+                if not _set_is_open(fmt_sets[-1]):
+                    in_set = 0   # closed by an unattributed position: new set
+            if not cat.is_published(base, key):
+                failed += 1      # still pending -> a later run must retry it
             continue
         except RuntimeError as exc:
             if not placed and in_set == 0:
@@ -602,6 +655,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             # Transient/non-blank failure: log and retry on a later run (NOT
             # added to skipped), while the catalog flag keeps it dup-proof.
             log.warning("[%s] upload failed for %s (will retry): %s", fmt, key, redact(str(exc)))
+            failed += 1
             continue
         in_set += 1
         fmt_sets[-1]["live"] = in_set
@@ -620,17 +674,18 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
 
     save_json(_state_path(data_dir, base), state)
     # Assign real custom_emoji_ids (drift-proof, from recorded order) + manifests.
-    _record_cids(tg, cat, fmt_sets, base)
+    _record_cids(tg, cat, fmt_sets, base, data_dir)
     for s in fmt_sets:
         write_manifest(data_dir, cat, s, base)
 
     if fmt_sets:
         last = fmt_sets[-1]
         notify(tg, user_id, state, data_dir, base, last["name"], last["title"])
+    return n, failed
 
 
-def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict],
-                 base: str) -> None:
+def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict], base: str,
+                 data_dir: Path) -> None:
     """Store each item's real custom_emoji_id, verified against the live set.
 
     A bare positional mapping is wrong the moment the owner deletes, reorders or
@@ -638,19 +693,30 @@ def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict],
     every id we publish (manifests, the bot, remaps) points at the wrong
     picture. The ids are taken only from a manifest that still matches by
     identity -- see :func:`_manifest_mismatch`.
+
+    Every recorded set is checked here, not just the active one, and a set that
+    cannot be read is never shrugged off: warning and continuing turned a pack
+    that had been DELETED into a clean success, and a network blip into a
+    permanent "done" for ids that were never written.
     """
     for s in fmt_sets:
         keys = s.get("keys") or []
         if not keys:
             continue
         state, sset = _probe(tg, s["name"])
-        if state is not SetState.EXISTS:
-            log.warning("could not read %s for cid mapping (%s); ids unchanged",
-                        s["name"], state.value)
-            continue
+        if state is SetState.MISSING:
+            raise SetDrift(
+                f"{s['name']} no longer exists on Telegram, but this publisher "
+                f"recorded {len(keys)} emoji in it. Refusing to report a "
+                f"complete publication for a pack that is gone.")
+        if state is SetState.UNKNOWN:
+            raise LiveStateUnknown(
+                f"live state of {s['name']} is unknown; its custom_emoji_ids "
+                f"were not written")
         live = sset.get("stickers", [])
         offset = 1 if s.get("logo") else 0  # skip the brand logo at position 0
-        why = _manifest_mismatch(cat, live, keys, offset, s["name"])
+        why = _manifest_mismatch(tg, cat, live, keys, offset, s["name"],
+                                 base=base, tmp_dir=data_dir / "tmp")
         if why:
             raise SetDrift(f"{why} Refusing to write custom_emoji_ids that "
                            f"would point at the wrong emoji.")
@@ -795,17 +861,24 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
                 log.warning("brand logo requested but not found: %s", args.brand_logo)
 
         state = load_state(data_dir, base)
+        ok = failed = 0
         for fmt in formats:
-            publish_format(tg, cat, fmt=fmt, plan_keys=plan.get(fmt, []),
-                           base=base, title=args.title, user_id=args.user_id,
-                           default_emoji=args.emoji, per_set=args.per_set,
-                           data_dir=data_dir, state=state, bot=bot, logo=logo)
+            done, bad = publish_format(
+                tg, cat, fmt=fmt, plan_keys=plan.get(fmt, []),
+                base=base, title=args.title, user_id=args.user_id,
+                default_emoji=args.emoji, per_set=args.per_set,
+                data_dir=data_dir, state=state, bot=bot, logo=logo)
+            ok += done
+            failed += bad
         save_json(_state_path(data_dir, base), state)
 
-        print("\nDONE.", flush=True)
+        # A run whose every upload failed used to print DONE and exit 0, so any
+        # retry logic or menu action treated a dead run as a finished pack.
+        print(f"\nDONE: {ok} uploaded, {failed} failed." if failed
+              else "\nDONE.", flush=True)
         for s in state["sets"]:
             print(f"  https://t.me/addemoji/{s['name']}  [{s['fmt']}]", flush=True)
-    return EXIT_OK
+    return ingest_exit_code(ok, failed)
 
 
 if __name__ == "__main__":

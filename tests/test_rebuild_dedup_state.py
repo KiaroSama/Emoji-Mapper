@@ -9,14 +9,21 @@ stopped knowing what was live:
   an entry that already landed (C-06),
 * an old pack that survived deletion still completed the delete phase (H-15),
 * a truncated plan file was read as the whole (frozen) plan (M-13),
-* two runs could mutate one pack family at the same time (H-05).
+* two runs could mutate one pack family at the same time (H-05),
+* a retryable upload failure consuming the plan position forever (12),
+* an in-flight upload judged "landed" by a count any stranger's sticker
+  satisfies (13).
 
 No network and no real sleeps: Telegram is a fake object.
 """
 
 from __future__ import annotations
 
+import importlib
+import io
 import json
+import os
+import random
 import sys
 import tempfile
 import unittest
@@ -32,25 +39,63 @@ import build_pack as bp  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
 
 
-def _png(path: Path, color=(10, 20, 30, 255)) -> None:
+def _image(key: str) -> Image.Image:
+    """Deterministic per-key noise; two different keys never look alike.
+
+    Flat colours are useless for identity: a dHash compares neighbouring
+    pixels, so every solid image hashes to the same value and "is this sticker
+    our upload?" would always answer yes.
+    """
+    rnd = random.Random(key)
+    img = Image.new("RGBA", (100, 100))
+    px = img.load()
+    for x in range(100):
+        for y in range(100):
+            v = rnd.randrange(256)
+            px[x, y] = (v, v, v, 255)
+    return img
+
+
+def _png_bytes(key: str) -> bytes:
+    buf = io.BytesIO()
+    _image(key).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _png(path: Path, key: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGBA", (100, 100), color).save(path, "PNG")
+    _image(key or path.stem).save(path, "PNG")
 
 
 class FakeTelegram:
-    """Records mutations; every live answer is scripted per test."""
+    """Records mutations; every live answer is scripted per test.
+
+    Sets carry real image bytes, because resume decides what landed by
+    comparing sticker CONTENT with the PNG that was sent.
+    """
 
     def __init__(self, live: dict[str, int] | None = None):
-        self.live = dict(live or {})          # set name -> live sticker count
+        self.images: dict[str, list[bytes]] = {}   # set name -> sticker images
+        self.live: dict[str, int] = {}             # set name -> live count
         self.unknown: set[str] = set()        # sets whose live state is unreadable
         self.missing: set[str] = set()        # sets that are definitively gone
         self.add_calls: list[tuple] = []
         self.create_calls: list[tuple] = []
         self.deleted: list[str] = []
         self.messages: list[str] = []
+        self.message_retries: list[int | None] = []
         self.add_error: BaseException | None = None
         self.create_error: BaseException | None = None
         self.delete_error: BaseException | None = None
+        for name, count in (live or {}).items():
+            for i in range(count):
+                self.append(name, _png_bytes(f"{name}-seed{i}"))
+
+    # --- fake wire ------------------------------------------------------ #
+    def append(self, name: str, data: bytes) -> None:
+        """Put a sticker into a set outside our add path (a manual edit)."""
+        self.images.setdefault(name, []).append(data)
+        self.live[name] = len(self.images[name])
 
     # --- live state ---------------------------------------------------- #
     def probe_set_state(self, name: str):
@@ -59,7 +104,9 @@ class FakeTelegram:
         if name in self.missing or name not in self.live:
             return bp.SetState.MISSING, None
         return bp.SetState.EXISTS, {
-            "stickers": [{"custom_emoji_id": f"{name}-{i}"}
+            "stickers": [{"custom_emoji_id": f"{name}-{i}",
+                          "file_id": f"{name}#{i}",
+                          "file_unique_id": f"{name}#{i}"}
                          for i in range(self.live[name])]}
 
     def probe_sticker_set(self, name: str):
@@ -72,18 +119,24 @@ class FakeTelegram:
             raise bp.LiveStateUnknown(f"live state of {name} is unknown")
         return len(sset.get("stickers", [])) if sset else 0
 
+    def download_file(self, file_id: str, dest: Path) -> Path:
+        name, _, index = str(file_id).rpartition("#")
+        Path(dest).write_bytes(self.images[name][int(index)])
+        return Path(dest)
+
     # --- mutations ------------------------------------------------------ #
     def add_sticker(self, user_id, name, png, emoji, kw, *, expected_before=None):
         self.add_calls.append((name, png.stem))
         if self.add_error:
             raise self.add_error
-        self.live[name] = self.live.get(name, 0) + 1
+        self.append(name, Path(png).read_bytes())
 
     def create_set(self, user_id, name, title, png, emoji, kw):
         self.create_calls.append((name, png.stem))
         if self.create_error:
             raise self.create_error
-        self.live[name] = 1
+        self.images[name] = []
+        self.append(name, Path(png).read_bytes())
 
     def _call(self, method, *, data=None, **kw):
         if method == "deleteStickerSet":
@@ -91,10 +144,12 @@ class FakeTelegram:
             if self.delete_error:
                 raise self.delete_error
             self.live.pop(data["name"], None)
+            self.images.pop(data["name"], None)
             self.missing.add(data["name"])
             return {}
         if method == "sendMessage":
             self.messages.append(data["text"])
+            self.message_retries.append(kw.get("retries"))
             return {}
         if method == "getStickerSet":
             # Same contract as the real client: a missing set is an error here,
@@ -147,7 +202,7 @@ class RebuildCase(unittest.TestCase):
         bp.write_json_atomic(self.plan, [
             {"rep": r, "tickers": [r], "kw": r, "hash": r} for r in reps])
         for r in reps:
-            _png(self.emoji / f"{r}.png", (10 + 7 * len(r), 40, 90, 255))
+            _png(self.emoji / f"{r}.png")
 
     def write_state(self, **kw) -> dict:
         state = {"sets": [], "sent": [], "deleted_old": True, "final_sent": False,
@@ -265,6 +320,135 @@ class ResumeReconcilesTheMarker(RebuildCase):
         self.assertEqual(caught.exception.code, bp.EXIT_PARTIAL)
         self.assertEqual(tg.mutations, 0)
         self.assertEqual(self.saved(), before, "state must be untouched")
+
+
+class InFlightIsResolvedByIdentity(RebuildCase):
+    """13: "the set grew by one" is not proof that OUR upload grew it.
+
+    A sticker added by hand, or by a concurrent tool, satisfies the count just
+    as well -- and the resume then records the plan entry as uploaded, so the
+    image is never sent and its ticker is mapped onto a stranger's sticker.
+    """
+
+    MARKER = {"key": "aaa", "operation": "add", "set_name": "s1",
+              "set_index": 1, "expected_before": 1, "phase": "upload"}
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(["aaa"])
+        self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
+                         order=["seed"], cursor=1, in_flight=dict(self.MARKER))
+
+    def test_a_manual_sticker_cannot_satisfy_the_marker(self):
+        tg = FakeTelegram(live={"s1": 1})
+        tg.append("s1", _png_bytes("added-by-hand"))   # not our image
+        self.run_build(tg)
+        saved = self.saved()
+        self.assertNotIn("aaa", saved["order"],
+                         "a stranger's sticker was accepted as our upload")
+        self.assertEqual(saved["cursor"], 0, "the entry must be retried")
+        self.assertIsNone(saved["in_flight"])
+        self.assertEqual(tg.mutations, 0,
+                         "an unexplained sticker must stop the run, not be "
+                         "built upon")
+
+    def test_our_own_image_is_recognised(self):
+        tg = FakeTelegram(live={"s1": 1})
+        tg.append("s1", (self.emoji / "aaa.png").read_bytes())  # it did land
+        rd.build(tg, "bot")
+        saved = self.saved()
+        self.assertEqual(saved["order"], ["seed", "aaa"])
+        self.assertEqual(tg.mutations, 0, "it landed; do not send it again")
+        self.assertIsNone(saved["in_flight"])
+
+    def test_an_upload_that_never_landed_is_retried(self):
+        tg = FakeTelegram(live={"s1": 1})            # nothing was added
+        rd.build(tg, "bot")
+        self.assertEqual([c[1] for c in tg.add_calls], ["aaa"])
+        self.assertEqual(self.saved()["order"], ["seed", "aaa"])
+
+    def test_an_unreadable_set_stops_instead_of_deciding(self):
+        tg = FakeTelegram(live={"s1": 1})
+        tg.unknown.add("s1")
+        before = self.saved()
+        code = self.run_build(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL)
+        self.assertEqual(tg.mutations, 0)
+        self.assertEqual(self.saved(), before, "state must be untouched")
+
+
+class RetryableFailureKeepsThePlanPosition(RebuildCase):
+    """12: the cursor moves past an entry BEFORE the upload is attempted.
+
+    A failure that definitely did not apply must put it back, or that image is
+    skipped forever -- silently, because the run still ends "successfully".
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(["aaa", "bbb"])
+        self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
+                         order=["seed"], cursor=0)
+        self.tg = FakeTelegram(live={"s1": 1})
+
+    def test_a_transport_failure_leaves_the_cursor_on_the_item(self):
+        self.tg.add_error = RuntimeError(
+            "addStickerToSet failed after 5 attempts")
+        code = self.run_build(self.tg)
+        saved = self.saved()
+        self.assertEqual(saved["cursor"], 0,
+                         "a not-applied failure must not consume the position")
+        self.assertEqual(saved["order"], ["seed"])
+        self.assertEqual(self.tg.mutations, 1,
+                         "the run must stop; walking on with a rolled-back "
+                         "cursor re-uploads everything after it")
+        self.assertEqual(code, bp.EXIT_PARTIAL)
+
+    def test_a_media_rejection_is_still_skipped_for_good(self):
+        self.tg.add_error = RuntimeError(
+            "addStickerToSet failed: Bad Request: STICKER_PNG_NOPNG")
+        code = self.run_build(self.tg)
+        saved = self.saved()
+        self.assertEqual(saved["cursor"], 2, "both images are permanently bad")
+        self.assertEqual(saved["order"], ["seed"])
+        self.assertEqual(self.tg.mutations, 2, "each entry is tried once")
+        self.assertIsNone(code, "a permanent skip is not a retryable stop")
+
+
+class LinkMessagesAreBounded(RebuildCase):
+    """19: sendMessage has no dedup key, so five retries can post five links."""
+
+    def test_the_link_message_retries_at_most_twice(self):
+        self.write_plan(["aaa"])
+        self.write_state()
+        tg = FakeTelegram()
+        rd.build(tg, "bot")
+        self.assertEqual(len(tg.messages), 1)
+        self.assertEqual(tg.message_retries, [2],
+                         "the default retry count multiplies accepted posts")
+
+
+class OwnerIdIsParsedSafely(unittest.TestCase):
+    """18: int() on a .env typo raised before argparse could explain anything."""
+
+    def test_a_typo_falls_back_instead_of_killing_the_import(self):
+        self.addCleanup(importlib.reload, rd)
+        with mock.patch.dict(os.environ, {"PACK_OWNER_USER_ID": "42abc"},
+                             clear=False):
+            self.assertEqual(importlib.reload(rd).USER_ID, 0)
+
+    def test_a_valid_value_is_still_used(self):
+        self.addCleanup(importlib.reload, rd)
+        with mock.patch.dict(os.environ, {"PACK_OWNER_USER_ID": "12345"},
+                             clear=False):
+            self.assertEqual(importlib.reload(rd).USER_ID, 12345)
+
+
+class RebuildTakesThePackFamilyLock(unittest.TestCase):
+    """6: a lock named after this tool's state file excludes nobody else."""
+
+    def test_the_lock_is_keyed_on_the_pack_base(self):
+        self.assertEqual(rd.LOCK, bp.pack_family_lock_path(rd.BASE))
 
 
 class LiveStateUnknownStopsTheRun(RebuildCase):

@@ -20,6 +20,7 @@ Why this design eliminates the old duplicate pain:
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import sqlite3
@@ -37,22 +38,43 @@ SCHEMA_VERSION = 1
 # content (normalized pixels) + file_unique_id only. Set a >=0 Hamming threshold
 # (e.g. via --phash-threshold) to opt in to merging near-identical images.
 DEFAULT_PHASH_THRESHOLD = -1
-# A dHash is 64 bits, so 64 is the largest distance two hashes can have: at that
-# threshold every same-format item matches every other one and the whole catalog
-# collapses into a single emoji. Anything above it is not "very fuzzy", it is
-# broken, and anything below -1 is meaningless.
+# A dHash is 64 bits, so 64 is the largest distance two hashes can have.
 PHASH_BITS = 64
+# ...which is exactly why 64 must NOT be accepted: `hamming(a, b) <= 64` holds
+# for every pair, so that threshold merges every same-format item into one
+# emoji. The whole range near 64 is just as broken, only less obviously: each
+# dHash bit is an independent "is this pixel brighter than the next" comparison,
+# so two UNRELATED images already differ in ~32 bits on average. A quarter of
+# the hash is the conservative ceiling -- two random hashes land within 16 bits
+# of each other with probability ~1e-5, so merging still means "the same
+# picture, recompressed" and never "some other picture".
+PHASH_MAX_THRESHOLD = PHASH_BITS // 4
 
 
 def check_phash_threshold(value: int) -> int:
-    """Validate a near-duplicate threshold: -1 disables merging, else 0..64."""
+    """Validate a near-duplicate threshold: -1 disables merging, else 0..16."""
     value = int(value)
-    if value != -1 and not 0 <= value <= PHASH_BITS:
+    if value != -1 and not 0 <= value <= PHASH_MAX_THRESHOLD:
         raise ValueError(
             f"phash threshold {value} is out of range: use -1 to disable "
-            f"near-duplicate merging, or 0..{PHASH_BITS} (a dHash is "
-            f"{PHASH_BITS} bits).")
+            f"near-duplicate merging, or 0..{PHASH_MAX_THRESHOLD}. A dHash is "
+            f"{PHASH_BITS} bits and two unrelated images already differ in "
+            f"about {PHASH_BITS // 2} of them, so a larger threshold merges "
+            f"emoji that have nothing in common.")
     return value
+
+
+def phash_threshold_arg(raw: str) -> int:
+    """argparse ``type=`` for --phash-threshold.
+
+    Validating inside Catalog() alone is too late for a CLI: the ValueError is
+    raised well after argparse has finished, so a bad value exits with a stack
+    trace instead of the standard usage error.
+    """
+    try:
+        return check_phash_threshold(int(raw))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 @dataclass

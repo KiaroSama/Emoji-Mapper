@@ -9,6 +9,7 @@ writes outside a temp directory.
 from __future__ import annotations
 
 import contextlib
+import csv
 import gzip
 import importlib.util
 import io
@@ -27,8 +28,10 @@ from urllib import error, request
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
+import build_pack as bp  # noqa: E402
 import fetch_pack  # noqa: E402
 import make_emoji_pngs as m  # noqa: E402
 import panel as p  # noqa: E402
@@ -110,6 +113,24 @@ class FetchPackExitCodes(unittest.TestCase):
         self.assertEqual(code, EXIT_USAGE)
         self.assertEqual(tg.lookups, [])  # rejected before touching the API
 
+    def test_out_of_range_phash_threshold_is_a_usage_error(self):
+        # Catalog() raises ValueError for this, but only long after argparse is
+        # done: the run died with a stack trace instead of the usage exit.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as ctx:
+            fetch_pack.main(["somepack", "--data-dir", str(self.tmp),
+                             "--phash-threshold", "64"])
+        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+        self.assertIn("out of range", stderr.getvalue())
+
+    def test_usable_phash_threshold_is_still_accepted(self):
+        tg = DeadTelegram()
+        with mock.patch.object(fetch_pack, "Telegram", lambda *a, **k: tg):
+            code, _ = self._main("somepack", "--phash-threshold", "4")
+        self.assertEqual(code, EXIT_FAILED)  # the pack fails, the argument does not
+        self.assertEqual(tg.lookups, ["somepack"])
+
 
 # --------------------------------------------------------------------------- #
 # make_emoji_pngs: --limit validation and source fallback
@@ -165,6 +186,62 @@ class MakeEmojiPngsContracts(unittest.TestCase):
         (self.src / "foo.svg").write_text(EMPTY_SVG, encoding="utf-8")
         self._raster("foo.png")
         self.assertEqual([s.name for s in m._pick_sources(self.src)], ["foo.svg"])
+
+
+class MakeEmojiPngsLegacyFallback(unittest.TestCase):
+    """Legacy mode must count failure per OUTPUT STEM, like general mode.
+
+    A blank SVG followed by a healthy logos/png/<t>.png produces the emoji just
+    fine, but the SVG attempt stayed on the failed counter -- so a completely
+    successful run reported PARTIAL and the launcher retried it forever.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        logos = self.tmp / "logos"
+        self.svg = logos / "svg"
+        self.png = logos / "png"
+        self.out = logos / "emoji"
+        for d in (self.svg, self.png):
+            d.mkdir(parents=True)
+        self.patch = mock.patch.multiple(
+            m, ROOT=self.tmp, SVG_DIR=self.svg, PNG_DIR=self.png, OUT_DIR=self.out)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, limit: int = 0) -> str:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.code = m._run_legacy(limit)
+        return buf.getvalue()
+
+    def test_blank_svg_with_healthy_png_fallback_exits_ok(self):
+        (self.svg / "btc.svg").write_text(EMPTY_SVG, encoding="utf-8")
+        Image.new("RGBA", (40, 70), RED).save(self.png / "btc.png")
+        out = self._run()
+        self.assertEqual(self.code, EXIT_OK)
+        self.assertIn("failed=0", out)
+        with Image.open(self.out / "btc.png") as im:
+            self.assertEqual(im.size, (100, 100))
+
+    def test_stem_with_no_usable_source_anywhere_still_fails(self):
+        (self.svg / "bad.svg").write_text(EMPTY_SVG, encoding="utf-8")
+        self._run()
+        self.assertEqual(self.code, EXIT_FAILED)
+        self.assertFalse((self.out / "bad.png").exists())
+
+    def test_blank_png_fallback_is_counted_once_not_twice(self):
+        (self.svg / "bad.svg").write_text(EMPTY_SVG, encoding="utf-8")
+        Image.new("RGBA", (40, 70), (0, 0, 0, 0)).save(self.png / "bad.png")
+        Image.new("RGBA", (40, 70), RED).save(self.png / "good.png")
+        out = self._run()
+        # One broken stem, one good one -> PARTIAL, and "failed" counts the
+        # stem once even though both of its sources failed.
+        self.assertIn("failed=1", out)
+        self.assertEqual(self.code, 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +421,36 @@ class FetchLogosCacheValidation(unittest.TestCase):
 
         self.assertNotIn("http://img.test/btc.png", asked)
 
+    def _keywords_rows(self) -> dict[str, dict]:
+        with open(self.tmp / "keywords.csv", encoding="utf-8", newline="") as fh:
+            return {r["ticker"]: r for r in csv.DictReader(fh)}
+
+    def test_corrupt_leftover_png_is_not_advertised(self):
+        """The final PNG_DIR sweep never validated what it advertised.
+
+        These files are not on the download path at all -- they come from a
+        previous run's pages -- so an error page cached as ``<ticker>.png``
+        went straight into keywords.csv and from there into a pack.
+        """
+        (self.png_dir / "junk.png").write_bytes(HTML_ERROR)
+        (self.png_dir / "cut.png").write_bytes(_png_bytes()[:60])
+        (self.png_dir / "ok.png").write_bytes(_png_bytes())
+
+        def fake_get(url, *, binary=False, retries=6):
+            return []            # no market pages this run: only the sweep runs
+
+        with mock.patch.multiple(self.mod, _get=fake_get, MAX_PAGES=1,
+                                 PAGE_DELAY=0, IMG_DELAY=0,
+                                 PNG_DIR=self.png_dir, SVG_DIR=self.tmp / "svg",
+                                 KEYWORDS_CSV=self.tmp / "keywords.csv"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.mod.main(), 0)
+
+        rows = self._keywords_rows()
+        self.assertIn("ok", rows)
+        self.assertNotIn("junk", rows)
+        self.assertNotIn("cut", rows)
+
 
 # --------------------------------------------------------------------------- #
 # coins/alias_map: an ambiguous normalized name must not be guessed
@@ -402,6 +509,247 @@ class AliasMapAmbiguity(unittest.TestCase):
         mapping, filled, _ = self._run()
         self.assertEqual(mapping["eee"], "333")
         self.assertIn("premium-id: 333", filled)
+
+    def test_an_interrupted_write_leaves_the_canonical_map_intact(self):
+        """ticker_to_id.json is the only copy of the ticker -> emoji mapping.
+
+        write_text truncates the real file first, so a crash before the bytes
+        landed emptied it. The atomic write can only fail on a temp file.
+        """
+        path = self.tmp / "ticker_to_id.json"
+        original = json.loads(path.read_text("utf-8"))
+        # os.replace is the last step of write_json_atomic and nothing else in
+        # this run uses it: failing it simulates dying just before publication.
+        with mock.patch("os.replace", side_effect=OSError("interrupted")), \
+                mock.patch.multiple(self.mod, ROOT=self.tmp,
+                                    INV=self.tmp / "inv.md",
+                                    OUT_INV=self.tmp / "out.md"), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(OSError):
+            self.mod.main()
+        self.assertEqual(json.loads(path.read_text("utf-8")), original)
+
+
+# --------------------------------------------------------------------------- #
+# coins/verify_logos: --fix must be retry-safe, identity-checked and honest
+#                     about failure
+# --------------------------------------------------------------------------- #
+OLD_CID, NEW_CID = "cid-old", "cid-new"
+
+
+class FakeResponse:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def json(self):
+        return self._payload
+
+
+class ReplaceSession:
+    """requests.Session stand-in serving ONE sticker set.
+
+    ``lose_reply`` models the dangerous case: Telegram APPLIES the replacement
+    and the response is lost on the way back. A blind retry then re-sends a
+    non-idempotent call against an ``old_sticker`` that no longer exists.
+    """
+
+    def __init__(self, before: list[str], after: list[str], *, lose_reply: bool):
+        self.stickers = [{"custom_emoji_id": c, "file_id": f"fid-{c}"}
+                         for c in before]
+        self.after = [{"custom_emoji_id": c, "file_id": f"fid-{c}"} for c in after]
+        self.lose_reply = lose_reply
+        self.calls: list[tuple[str, dict, dict]] = []
+
+    def post(self, url, data=None, files=None, timeout=None):
+        method = url.rsplit("/", 1)[-1]
+        self.calls.append((method, dict(data or {}), dict(files or {})))
+        if method == "getStickerSet":
+            return FakeResponse({"ok": True, "result": {
+                "name": data["name"], "stickers": self.stickers}})
+        if method == "replaceStickerInSet":
+            self.stickers = list(self.after)          # Telegram applied it...
+            if self.lose_reply:                       # ...and the reply vanished
+                raise requests.ConnectionError("connection reset by peer")
+            return FakeResponse({"ok": True, "result": True})
+        raise AssertionError(f"unexpected Bot API method: {method}")
+
+    def method(self, name: str) -> list[tuple[str, dict, dict]]:
+        return [c for c in self.calls if c[0] == name]
+
+
+class VerifyLogosFix(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_standalone(ROOT / "coins" / "verify_logos.py",
+                                   "coins_verify_logos_probe")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.emoji = self.tmp / "emoji"
+        self.emoji.mkdir()
+        Image.new("RGBA", (48, 48), (10, 200, 40, 255)).save(self.emoji / "btc.png")
+        # Two tickers share one custom emoji: BOTH must be repointed, and only
+        # at an identity we can prove.
+        self.mp = {"btc": OLD_CID, "wbtc": OLD_CID, "eth": "cid-eth"}
+        self.sets = [{"name": "gvcryptoemoji1_by_bot", "index": 1}]
+        self.patches = [
+            mock.patch.object(self.mod, "ROOT", self.tmp),
+            mock.patch.object(self.mod, "fetch_markets", lambda top: [
+                {"symbol": "btc", "name": "Bitcoin", "image": "http://x/btc.png"}]),
+            mock.patch.object(self.mod, "fetch_image", lambda url: _png_bytes()),
+            mock.patch.object(bp.time, "sleep", lambda *_a: None),
+        ]
+        for pt in self.patches:
+            pt.start()
+
+    def tearDown(self):
+        for pt in reversed(self.patches):
+            pt.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fix(self, before, after, *, lose_reply):
+        session = ReplaceSession(before, after, lose_reply=lose_reply)
+        tg = bp.Telegram("unit-test-token")
+        tg.s = session
+        ok = self.mod.fix_one(tg, 42, self.sets, self.mp, self.emoji, "btc")
+        return ok, session
+
+    def test_timeout_after_apply_is_verified_not_resent(self):
+        ok, session = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                                lose_reply=True)
+        self.assertTrue(ok)
+        # Exactly one attempt: the applied_check saw the change live, so the
+        # non-idempotent call was never repeated.
+        self.assertEqual(len(session.method("replaceStickerInSet")), 1)
+        self.assertEqual(self.mp["btc"], NEW_CID)
+
+    def test_the_uploaded_body_is_bytes_a_retry_can_resend(self):
+        _, session = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                               lose_reply=True)
+        _, _, files = session.method("replaceStickerInSet")[0]
+        _name, body, _mime = files["file0"]
+        # An open handle is exhausted after attempt 1: every retry would have
+        # uploaded an empty sticker.
+        self.assertIsInstance(body, bytes)
+        self.assertTrue(body.startswith(b"\x89PNG"))
+
+    def test_every_entry_sharing_the_old_cid_is_repointed(self):
+        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                          lose_reply=False)
+        self.assertTrue(ok)
+        self.assertEqual(self.mp, {"btc": NEW_CID, "wbtc": NEW_CID,
+                                   "eth": "cid-eth"})
+
+    def test_a_shifted_set_is_not_trusted_as_the_replacement(self):
+        """Someone deleted an earlier sticker while we replaced ours.
+
+        Position 1 now holds "c", an unrelated emoji. Reading live[pos] blindly
+        repointed btc AND wbtc at it, silently and permanently.
+        """
+        before = dict(self.mp)
+        ok, _ = self._fix(["a", OLD_CID, "c"], [NEW_CID, "c"], lose_reply=False)
+        self.assertFalse(ok)
+        self.assertEqual(self.mp, before)
+
+    def test_an_unchanged_set_is_not_trusted_either(self):
+        before = dict(self.mp)
+        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", OLD_CID, "c"],
+                          lose_reply=False)
+        self.assertFalse(ok)
+        self.assertEqual(self.mp, before)
+
+    def test_fix_locks_on_the_pack_family_not_on_this_script(self):
+        # --fix REPLACES stickers in the same gvcryptoemoji* sets the coin
+        # fetchers append to. A lock named after this file was a different name
+        # from theirs, so the exclusion it claimed never actually held.
+        self.assertEqual(self.mod.SET_BASE, "gvcryptoemoji")
+        self.assertEqual(self.mod.PACK_LOCK,
+                         bp.pack_family_lock_path(self.mod.SET_BASE))
+
+    def test_verified_new_cid_rules(self):
+        v = self.mod.verified_new_cid
+        self.assertEqual(v(["a", OLD_CID], ["a", NEW_CID], 1), NEW_CID)
+        self.assertIsNone(v(["a", OLD_CID], [NEW_CID], 1))          # length drift
+        self.assertIsNone(v(["a", OLD_CID], ["z", NEW_CID], 1))     # neighbour moved
+        self.assertIsNone(v(["a", OLD_CID], ["a", "a"], 1))         # id already present
+        self.assertIsNone(v(["a", OLD_CID], ["a", OLD_CID], 1))     # nothing changed
+
+
+class VerifyLogosMainContracts(unittest.TestCase):
+    """--fix exit code and configuration errors."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_standalone(ROOT / "coins" / "verify_logos.py",
+                                   "coins_verify_logos_main")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.emoji = self.tmp / "emoji"
+        self.emoji.mkdir()
+        (self.tmp / "state.json").write_text(json.dumps(
+            {"sets": [{"name": "gvcryptoemoji1_by_bot", "index": 1}]}),
+            encoding="utf-8")
+        (self.tmp / "map.json").write_text(json.dumps({"sol": OLD_CID}),
+                                           encoding="utf-8")
+        self.patches = [
+            mock.patch.object(self.mod, "setup_logging", lambda *a, **k: None),
+            mock.patch.object(self.mod, "load_env", lambda *a, **k: None),
+            mock.patch.object(self.mod, "PACK_LOCK", self.tmp / "pack.lock"),
+            # The requested ticker is simply not in the market data: fix_one
+            # returns False without touching Telegram.
+            mock.patch.object(self.mod, "fetch_markets", lambda top: []),
+            mock.patch.object(self.mod.time, "sleep", lambda *_a: None),
+        ]
+        for pt in self.patches:
+            pt.start()
+
+    def tearDown(self):
+        for pt in reversed(self.patches):
+            pt.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _main(self, env: dict, *extra) -> int:
+        argv = ["verify_logos.py", "--emoji-dir", str(self.emoji),
+                "--map", str(self.tmp / "map.json"),
+                "--state", str(self.tmp / "state.json"), *extra]
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(sys, "argv", argv), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return self.mod.main()
+
+    def test_a_requested_fix_that_failed_exits_nonzero(self):
+        code = self._main({"TELEGRAM_BOT_TOKEN": "t", "PACK_OWNER_USER_ID": "7"},
+                          "--fix", "--only", "sol")
+        # Nothing was repaired although a repair was explicitly requested.
+        self.assertEqual(code, EXIT_FAILED)
+
+    def test_missing_owner_id_is_a_usage_error_not_a_traceback(self):
+        env = {"TELEGRAM_BOT_TOKEN": "t"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PACK_OWNER_USER_ID", None)
+            self.assertEqual(
+                self._main(env, "--fix", "--only", "sol"), EXIT_USAGE)
+
+    def test_non_numeric_owner_id_is_a_usage_error(self):
+        code = self._main({"TELEGRAM_BOT_TOKEN": "t",
+                           "PACK_OWNER_USER_ID": "not-a-number"},
+                          "--fix", "--only", "sol")
+        self.assertEqual(code, EXIT_USAGE)
+
+    def test_missing_token_is_a_usage_error(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            self.assertEqual(
+                self._main({"PACK_OWNER_USER_ID": "7"}, "--fix", "--only", "sol"),
+                EXIT_USAGE)
+
+    def test_unreadable_state_file_is_a_usage_error(self):
+        (self.tmp / "state.json").write_text("{not json", encoding="utf-8")
+        code = self._main({"TELEGRAM_BOT_TOKEN": "t", "PACK_OWNER_USER_ID": "7"},
+                          "--fix", "--only", "sol")
+        self.assertEqual(code, EXIT_USAGE)
 
 
 if __name__ == "__main__":
