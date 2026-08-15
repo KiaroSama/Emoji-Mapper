@@ -24,6 +24,9 @@ from PIL import Image  # noqa: E402
 from emojikit import media  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+# Generating a 2-second clip takes well under a second; anything near this bound
+# means ffmpeg is stuck, and an unbounded child can hang the whole suite.
+FFMPEG_TIMEOUT = 120
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
@@ -206,7 +209,7 @@ class TestVideo(unittest.TestCase):
         subprocess.run(
             [media.ffmpeg_path(), "-y", "-f", "lavfi", "-i",
              f"testsrc2=size={size}:rate={rate}:duration={duration}", *extra,
-             str(out)], capture_output=True, check=True)
+             str(out)], capture_output=True, check=True, timeout=FFMPEG_TIMEOUT)
         return out
 
     VP9 = ("-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "50",
@@ -227,7 +230,7 @@ class TestVideo(unittest.TestCase):
              "-f", "lavfi", "-i", "testsrc2=size=100x100:rate=30:duration=2",
              "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
              *self.VP9, "-c:a", "libopus", "-shortest", str(out)],
-            capture_output=True, check=True)
+            capture_output=True, check=True, timeout=FFMPEG_TIMEOUT)
         with self.assertRaises(media.MediaError) as cm:
             media.validate_video(out)
         self.assertIn("audio", str(cm.exception))
