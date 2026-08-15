@@ -32,7 +32,7 @@ from emojikit.logsetup import setup_logging
 from emojikit.media import hamming
 
 ROOT = Path(__file__).resolve().parent
-ASSET_DIR = ROOT / "assets" / "vendor"
+ASSET_DIR = ROOT / "assets"
 log = logging.getLogger("panel")
 
 _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
@@ -221,9 +221,14 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 return
             if self.path.startswith("/static/"):
                 name = unquote(self.path[len("/static/"):])
-                f = (ASSET_DIR / name)
-                if f.is_file() and f.parent == ASSET_DIR:   # no traversal
-                    ctype = "application/javascript" if f.suffix == ".js" else "application/octet-stream"
+                f = (ASSET_DIR / name).resolve()
+                # Resolve first, then require physical containment: comparing
+                # parents would reject assets/vendor/ and would not stop a
+                # symlink pointing outside the tree.
+                if f.is_file() and f.is_relative_to(ASSET_DIR.resolve()):
+                    ctype = ("application/javascript" if f.suffix == ".js"
+                             else _MIME.get(f.suffix.lower(),
+                                            "application/octet-stream"))
                     self._send(200, f.read_bytes(), ctype, cache=_IMMUTABLE)
                 else:
                     self._send(404, b"not found", "text/plain")
@@ -335,7 +340,7 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Emoji Mapper — Curate</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='10' fill='%2322d3ee'/></svg>">
+<link rel="icon" type="image/png" href="/static/logo-128.png">
 <style>
 /* No webfont import: this panel runs offline on localhost, and an @import to
    fonts.googleapis.com blocks first paint until it times out. */
@@ -349,6 +354,7 @@ body{margin:0;background:radial-gradient(1200px 800px at 70% -10%,#0b1a2b 0%,var
 header{position:sticky;top:0;z-index:5;backdrop-filter:blur(10px);
   background:linear-gradient(180deg,#0a0f1aee,#0a0f1abb);border-bottom:1px solid var(--line);
   padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.brand{border-radius:8px;flex:none;filter:drop-shadow(0 0 8px #22d3ee55)}
 h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px;
   text-shadow:0 0 12px #22d3ee66}
 h1 .dot{color:var(--neon)}
@@ -418,6 +424,7 @@ body.bg-gray  .thumb{background:#808a96}
 </style></head>
 <body class="bg-checker">
 <header>
+  <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
   <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
   <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
     <span style="color:#8aa0b8">· click = toggle · drag = reorder · hover = play</span></span>
@@ -431,7 +438,7 @@ body.bg-gray  .thumb{background:#808a96}
 <div class="grid" id="grid"></div>
 <div id="toast"></div>
 <script id="items-data" type="application/json">__ITEMS__</script>
-<script src="/static/lottie_svg.min.js"></script>
+<script src="/static/vendor/lottie_svg.min.js"></script>
 <script>
 // Catalog labels are attacker-influenced (they come from downloaded packs), so
 // item data is parsed from an inert JSON block and only ever written to the DOM
