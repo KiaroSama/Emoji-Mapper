@@ -41,6 +41,9 @@ from pathlib import Path
 # Project root = parent of this package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
+# Each execution writes its own file, so without pruning the directory grows
+# without bound. Override with EMOJI_LOG_RETENTION_DAYS (0 disables pruning).
+LOG_RETENTION_DAYS = int(os.environ.get("EMOJI_LOG_RETENTION_DAYS", "30") or 30)
 
 # Env vars whose *values* are secrets and must be masked wherever they appear.
 SECRET_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "GENERAL_BOT_TOKEN", "CMC_API_KEY",
@@ -185,12 +188,17 @@ def setup_logging(script_name: str, *, console_level: int = logging.INFO,
 
     # Startup context block.
     logger.info("=== %s started | run %s ===", base, _RUN["id"])
-    logger.info("Python %s on %s (%s)", sys.version.split()[0], sys.platform, os.name)
+    logger.info("Python %s on %s (%s) | pid %d", sys.version.split()[0],
+                sys.platform, os.name, os.getpid())
     logger.info("Project root: %s", PROJECT_ROOT)
     logger.info("Args: %s", redact(" ".join(sys.argv)))
     if _RUN["log_path"]:
         logger.info("Log file: %s", _RUN["log_path"])
     logger.debug("CWD: %s", os.getcwd())
+    pruned = prune_old_logs()
+    if pruned:
+        logger.debug("pruned %d log file(s) older than %d days",
+                     pruned, LOG_RETENTION_DAYS)
     return logger
 
 
@@ -222,7 +230,41 @@ def _install_summary(logger: logging.Logger) -> None:
     def summary():
         dur = time.time() - (_RUN["start"] or time.time())
         c = _RUN["counts"]
-        logger.info("=== run %s finished in %.2fs | warnings=%d errors=%d critical=%d ===",
-                    _RUN["id"], dur, c["WARNING"], c["ERROR"], c["CRITICAL"])
+        # The exit code is the one thing an operator reading a log after the
+        # fact always wants and could not previously find in it.
+        code = _RUN.get("exit_code")
+        code_txt = "?" if code is None else str(code)
+        outcome = ("OK" if code == 0 else
+                   "UNKNOWN" if code is None else f"FAILED({code_txt})")
+        logger.info("=== run %s finished in %.2fs | %s | exit=%s | "
+                    "warnings=%d errors=%d critical=%d ===",
+                    _RUN["id"], dur, outcome, code_txt,
+                    c["WARNING"], c["ERROR"], c["CRITICAL"])
         logging.shutdown()
     atexit.register(summary)
+
+
+def record_exit_code(code: int) -> int:
+    """Remember a command's exit code so the run summary can report it."""
+    _RUN["exit_code"] = int(code)
+    return code
+
+
+def prune_old_logs(keep_days: int = LOG_RETENTION_DAYS) -> int:
+    """Delete run logs older than ``keep_days``; returns how many were removed.
+
+    Every execution writes a fresh file, so an unattended box accumulated them
+    forever. Failures here are ignored: log housekeeping must never break a run.
+    """
+    if keep_days <= 0 or not LOG_DIR.is_dir():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    for path in LOG_DIR.glob("*.log"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed

@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from build_pack import Telegram, load_env, write_json_atomic
-from emojikit.logsetup import redact, setup_logging
+from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 log = logging.getLogger("emoji_bot")
 
@@ -274,12 +274,55 @@ def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | No
             tg._call("sendMessage", data=_data(plain[i][0]))
 
 
-def handle_update(tg: Telegram, owner_id: int, upd: dict) -> None:
+DENIED_TEXT = ("This is a private bot and you are not on its access list.\n"
+               "If you should have access, ask the owner to add your numeric "
+               "Telegram user id.")
+
+
+def allowed_user_ids() -> set[int]:
+    """Numeric ids allowed to use the bot.
+
+    ``BOT_ALLOWED_USER_IDS`` is a comma-separated list; when it is unset the
+    pack owner is the only allowed user. An empty allowlist is treated as
+    "nobody" rather than "everybody" -- a misconfiguration must fail closed.
+    """
+    raw = os.environ.get("BOT_ALLOWED_USER_IDS", "").strip()
+    if not raw:
+        owner = int(os.environ.get("PACK_OWNER_USER_ID", "0") or 0)
+        return {owner} if owner > 0 else set()
+    out: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            log.warning("ignoring non-numeric entry in BOT_ALLOWED_USER_IDS: %r", part)
+    return out
+
+
+def handle_update(tg: Telegram, owner_id: int, upd: dict,
+                  allowed: set[int] | None = None) -> None:
+    allowed = allowed_user_ids() if allowed is None else allowed
     # Menu / commands and private messages.
     msg = upd.get("message")
     if msg:
         chat = msg.get("chat", {})
         chat_id = chat["id"]
+        sender = (msg.get("from") or {}).get("id")
+        if sender not in allowed:
+            # Answer once in private so a real person is not left guessing;
+            # stay silent in groups so the bot cannot be used to spam them.
+            log.info("ignoring message from unauthorized user %s in %s chat",
+                     sender, chat.get("type"))
+            if chat.get("type") == "private":
+                try:
+                    tg._call("sendMessage",
+                             data={"chat_id": chat_id, "text": DENIED_TEXT})
+                except Exception as exc:  # noqa: BLE001 - denial is best-effort
+                    log.debug("could not send denial: %s", redact(str(exc)))
+            return
         text = msg.get("text", "") or ""
         if text.startswith("/start") or text.startswith("/help") or text.startswith("/menu"):
             tg._call("sendMessage", data={"chat_id": chat_id, "text": START_TEXT,
@@ -316,6 +359,12 @@ def main() -> int:
         # only fails later, per message, when it tries to reply.
         log.error("PACK_OWNER_USER_ID is not set to a valid numeric id (.env).")
         return 2
+    allowed = allowed_user_ids()
+    if not allowed:
+        log.error("no authorized users: set BOT_ALLOWED_USER_IDS or "
+                  "PACK_OWNER_USER_ID. Refusing to run an open bot.")
+        return 2
+    log.info("access list: %d authorized user id(s)", len(allowed))
     tg = Telegram(token)
     me = tg.get_me()
     log.info("Emoji Mapper bot @%s started (owner=%s)", me.get("username"), owner_id)
@@ -353,7 +402,7 @@ def main() -> int:
             continue
         for upd in updates or []:
             try:
-                handle_update(tg, owner_id, upd)
+                handle_update(tg, owner_id, upd, allowed)
             except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
                 # Explicitly dead-lettered: acknowledged so a poison update
                 # cannot wedge the queue, but recorded at error level rather
@@ -366,5 +415,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(record_exit_code(main()))
 

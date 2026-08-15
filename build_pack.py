@@ -110,6 +110,19 @@ def api_base() -> str:
     return os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 
 
+def links_chat_id(owner_id: int) -> str | int:
+    """Where finished-pack links are announced.
+
+    ``PACK_LINKS_CHAT_ID`` may be a channel id (``-100...``) or an ``@name``.
+    Falls back to the owner's private chat so existing setups keep working.
+    The bot must be an administrator of that channel to post in it.
+    """
+    raw = os.environ.get("PACK_LINKS_CHAT_ID", "").strip()
+    if not raw:
+        return owner_id
+    return raw if raw.startswith("@") else int(raw)
+
+
 def load_env() -> None:
     env = ROOT / ".env"
     if env.is_file():
@@ -269,7 +282,7 @@ class Telegram:
     def get_me(self) -> dict:
         return self._call("getMe")
 
-    def send_message(self, chat_id: int, text: str) -> None:
+    def send_message(self, chat_id: int | str, text: str) -> None:
         self._call("sendMessage", data={
             "chat_id": chat_id, "text": text, "disable_web_page_preview": False,
         })
@@ -577,7 +590,7 @@ def main() -> int:
             return
         try:
             tg.send_message(
-                args.user_id,
+                links_chat_id(args.user_id),
                 f"\u2705 {title}\nhttps://t.me/addemoji/{name}",
             )
             sent.add(name)
