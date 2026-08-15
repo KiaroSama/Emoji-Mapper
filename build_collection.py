@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -52,7 +53,9 @@ DEFAULT_EMOJI = "\U0001F600"
 # first emoji. The coin bot (@YourCoinEmojiBot) is intentionally
 # excluded, so it is NOT in this set.
 BRAND_LOGO_BOTS = {"youremojibot"}
-BRAND_LOGO_DEFAULT = r"F:\documents\My Logo\YourBrand\YourBrand Emoji Logo.png"
+# Ships with the repository. This used to be an absolute F:\ path, so on any
+# other machine the "mandatory" logo silently vanished from every pack.
+BRAND_LOGO_DEFAULT = str(ROOT / "assets" / "emoji-mapper-logo.png")
 BRAND_LOGO_EMOJI = "\u2705"          # ✅ associated standard emoji for the logo
 BRAND_LOGO_KW = ["yourbrand", "logo"]
 
@@ -75,14 +78,21 @@ class BrandLogo:
         return bool(self.src and self.src.is_file())
 
     def static_png(self) -> Path | None:
-        """Return a ready 100x100 PNG logo path, or None if unavailable."""
+        """Return a ready 100x100 PNG logo path, or None if unavailable.
+
+        The cache file is named after a digest of the SOURCE image, so
+        replacing the logo produces a different name and is picked up. A fixed
+        ``logo.png`` was reused forever, so a changed brand logo kept
+        publishing the old pixels.
+        """
         if not self.available():
             return None
         if self._png and self._png.is_file():
             return self._png
         from emojikit import media
-        out = self.dir / "logo.png"
         try:
+            digest = hashlib.sha256(self.src.read_bytes()).hexdigest()[:12]
+            out = self.dir / f"logo_{digest}.png"
             if not out.is_file():
                 media.to_static_png(self.src, out)
             self._png = out
