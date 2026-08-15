@@ -147,14 +147,18 @@ def _render_svg(path: Path) -> Image.Image | None:
 
 
 def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:
-    """True if an RGBA image is effectively empty (too few non-transparent pixels)."""
+    """True if an RGBA image is effectively empty (too few non-transparent pixels).
+
+    Counted through the alpha histogram (buckets 11..255 == "a > 10") rather than
+    a per-pixel Python loop: every existing output is now checked on every run,
+    so 10k pixels per image adds up over a large emoji folder.
+    """
     if img.mode != "RGBA":
         img = img.convert("RGBA")
-    alpha = img.split()[3]
+    alpha = img.getchannel("A")
     if alpha.getbbox() is None:
         return True
-    visible = sum(1 for a in alpha.get_flattened_data() if a > 10)
-    return visible <= min_visible
+    return sum(alpha.histogram()[11:]) <= min_visible
 
 
 def _convert_svg(p: Path, out: Path) -> bool:
