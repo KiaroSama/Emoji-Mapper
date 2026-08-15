@@ -37,7 +37,7 @@ from build_pack import Telegram, ingest_exit_code, load_env
 # verified publisher, so this fetcher cannot drift back into its own copy.
 # Package-qualified so the module also imports as ``coins.fetch_cmc``.
 from coins.fetch_paprika import (
-    EMOJI, TICKER_IDS,
+    EMOJI, TICKER_IDS, incoming_dir,
     base_ticker, classify, http_bytes, parse_missing, publish_logos,
     refill_inventory, to_emoji_png,
 )
@@ -135,7 +135,7 @@ def main() -> int:
             print(f"  download failed: {tk}", flush=True)
             failed += 1
             continue
-        if to_emoji_png(data, EMOJI / f"{tk}.png"):
+        if to_emoji_png(data, incoming_dir() / f"{tk}.png"):
             fetched.append(tk)
             print(f"  got logo: {tk} <- cmc:{cid}", flush=True)
         else:
