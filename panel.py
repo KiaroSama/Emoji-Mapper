@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import html
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import webbrowser
@@ -39,6 +39,25 @@ _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
          ".webm": "video/webm", ".tgs": "application/gzip"}
 FMT_ORDER = {"static": 0, "video": 1, "animated": 2}
 LOGO_KEY = "__brand_logo__"  # pseudo content_key: preview-only, never saved/counted
+
+MAX_BODY = 4 * 1024 * 1024  # generous for an order list, small enough to bound
+
+# Media is content-addressed (the key IS the content hash), so a served file can
+# never change under a key -- immutable caching is safe and stops the browser
+# re-fetching every thumbnail while you scroll or re-sort.
+_IMMUTABLE = "public, max-age=31536000, immutable"
+
+
+def _json_for_script(value) -> str:
+    """JSON safe to embed in an inert <script type=application/json> block.
+
+    ``</script>`` inside a catalog label would otherwise close the block and
+    everything after it becomes markup. U+2028/U+2029 are escaped because they
+    are literal line terminators in JS string context.
+    """
+    return (json.dumps(value)
+            .replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
 
 
 def order_by_similarity(items: list) -> list:
@@ -103,14 +122,28 @@ def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
     return view, by_key
 
 
-def make_handler(view: list[dict], by_key: dict, db_path: Path):
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _is_loopback(netloc: str) -> bool:
+    """True if a Host/Origin authority points at this machine's loopback."""
+    host = netloc.rsplit("://", 1)[-1]
+    if host.startswith("["):                    # [::1]:8765
+        host = host[:host.index("]") + 1] if "]" in host else host
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in LOOPBACK_HOSTS
+
+
+def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet default logging
             pass
 
-        def _send(self, code, body: bytes, ctype="application/json"):
+        def _send(self, code, body: bytes, ctype="application/json", *,
+                  cache: str = ""):
             # Swallow benign disconnects (browser navigated away / cancelled a
             # media request): these raise ConnectionAbortedError/BrokenPipeError
             # on Windows and only spam the log with harmless tracebacks.
@@ -118,10 +151,34 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                if cache:
+                    self.send_header("Cache-Control", cache)
                 self.end_headers()
                 self.wfile.write(body)
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
                 pass
+
+        def _mutation_allowed(self) -> str:
+            """Guard state-changing requests. Returns "" when allowed.
+
+            The panel listens on localhost, so any page in the user's browser
+            can POST to it. A per-run token in a custom header cannot be sent
+            by a cross-origin ``no-cors`` request and cannot be read by one, so
+            it is what actually stops a hostile page from re-ordering or
+            de-selecting the catalog.
+            """
+            if not secrets.compare_digest(
+                    self.headers.get("X-Panel-Token", ""), token):
+                return "bad or missing panel token"
+            if not _is_loopback(self.headers.get("Host", "")):
+                return "unexpected Host"
+            origin = self.headers.get("Origin")
+            if origin is not None and not _is_loopback(origin):
+                return "unexpected Origin"
+            ctype = self.headers.get("Content-Type", "").split(";")[0].strip()
+            if ctype != "application/json":
+                return "Content-Type must be application/json"
+            return ""
 
         def handle_one_request(self):
             # Same for header/parse-level disconnects.
@@ -132,8 +189,10 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
 
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/index"):
-                self._send(200, PAGE.replace("__ITEMS__", json.dumps(view))
-                           .encode("utf-8"), "text/html; charset=utf-8")
+                page = (PAGE.replace("__ITEMS__", _json_for_script(view))
+                            .replace("__TOKEN__", token))
+                self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
+                           cache="no-store")
                 return
             if self.path.startswith("/img/"):
                 key = unquote(self.path[len("/img/"):])
@@ -142,7 +201,9 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
                     self._send(404, b"not found", "text/plain")
                     return
                 data = it.read_bytes()
-                self._send(200, data, _MIME.get(it.suffix.lower(), "application/octet-stream"))
+                self._send(200, data,
+                           _MIME.get(it.suffix.lower(), "application/octet-stream"),
+                           cache=_IMMUTABLE)
                 return
             if self.path.startswith("/lottie/"):
                 key = unquote(self.path[len("/lottie/"):])
@@ -154,7 +215,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
                     raw = it.read_bytes()
                     if raw[:2] == b"\x1f\x8b":          # gzip-compressed .tgs
                         raw = gzip.decompress(raw)
-                    self._send(200, raw, "application/json")
+                    self._send(200, raw, "application/json", cache=_IMMUTABLE)
                 except Exception:  # noqa: BLE001
                     self._send(500, b"{}")
                 return
@@ -163,21 +224,66 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
                 f = (ASSET_DIR / name)
                 if f.is_file() and f.parent == ASSET_DIR:   # no traversal
                     ctype = "application/javascript" if f.suffix == ".js" else "application/octet-stream"
-                    self._send(200, f.read_bytes(), ctype)
+                    self._send(200, f.read_bytes(), ctype, cache=_IMMUTABLE)
                 else:
                     self._send(404, b"not found", "text/plain")
                 return
             self._send(404, b"not found", "text/plain")
 
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
+        def _body_length(self):
+            """Declared body size, or None after sending the right 4xx."""
             try:
-                payload = json.loads(self.rfile.read(n) or b"{}")
+                n = int(self.headers.get("Content-Length"))
+            except (TypeError, ValueError):
+                self._send(411, b'{"error":"Content-Length required"}')
+                return None
+            if n < 0 or n > MAX_BODY:
+                self._send(413, b'{"error":"body too large"}')
+                return None
+            return n
+
+        def _read_body(self, n: int) -> bytes | None:
+            try:
+                return self.rfile.read(n)
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                return None
+
+        def do_POST(self):
+            n = self._body_length()
+            if n is None:
+                return
+            # Read the body BEFORE answering, even when the request is going to
+            # be rejected: replying to a request whose body is still in flight
+            # resets the connection, so the client sees an abort instead of the
+            # 403 explaining what was wrong.
+            raw = self._read_body(n)
+            if raw is None:
+                return
+
+            why = self._mutation_allowed()
+            if why:
+                self._send(403, json.dumps({"error": why}).encode())
+                return
+
+            try:
+                payload = json.loads(raw or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                self._send(400, b'{"error":"malformed JSON"}')
+                return
+            if not isinstance(payload, dict):
+                self._send(400, b'{"error":"expected a JSON object"}')
                 return
 
             if self.path == "/api/save":
-                excluded = set(payload.get("excluded", []))
+                if set(payload) - {"excluded"}:
+                    self._send(400, b'{"error":"unknown keys"}')
+                    return
+                raw = payload.get("excluded", [])
+                if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
+                    self._send(400, b'{"error":"excluded must be a list of keys"}')
+                    return
+                known = {v["key"] for v in view if not v.get("isLogo")}
+                excluded = set(raw) & known
                 with lock:
                     cat = Catalog(db_path)
                     try:
@@ -191,8 +297,22 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path):
 
             if self.path == "/api/order":
                 # Persist the manual drag-drop order. The logo preview key is
-                # ignored (it's not a catalog item).
-                keys = [k for k in payload.get("order", []) if k != LOGO_KEY]
+                # ignored (it's not a catalog item). Anything other than an
+                # exact permutation of the current keys is rejected: a partial
+                # or padded list would silently drop items from the publish
+                # order.
+                if set(payload) - {"order"}:
+                    self._send(400, b'{"error":"unknown keys"}')
+                    return
+                raw = payload.get("order", [])
+                if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
+                    self._send(400, b'{"error":"order must be a list of keys"}')
+                    return
+                keys = [k for k in raw if k != LOGO_KEY]
+                expected = [v["key"] for v in view if not v.get("isLogo")]
+                if sorted(keys) != sorted(expected):
+                    self._send(400, b'{"error":"order must be a permutation of current keys"}')
+                    return
                 with lock:
                     cat = Catalog(db_path)
                     try:
@@ -216,9 +336,9 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Emoji Mapper — Curate</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='10' fill='%2322d3ee'/></svg>">
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+/* No webfont import: this panel runs offline on localhost, and an @import to
+   fonts.googleapis.com blocks first paint until it times out. */
 :root{
   --bg:#06080d; --panel:#0c111b; --panel2:#11182633; --line:#1e2a3a;
   --txt:#e6eef8; --muted:#8aa0b8; --neon:#22d3ee; --neon2:#38bdf8; --bad:#f43f5e;
@@ -246,7 +366,10 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   gap:14px;padding:18px 20px 80px}
 .card{position:relative;border:1px solid var(--line);border-radius:14px;background:var(--panel);
   padding:12px 10px 10px;text-align:center;cursor:pointer;user-select:none;
-  transition:border-color .18s,box-shadow .18s,opacity .18s,transform .05s}
+  transition:border-color .18s,box-shadow .18s,opacity .18s,transform .05s;
+  /* Skip layout/paint for off-screen cards. This is what keeps thousands of
+     emoji scrolling smoothly; the size hint stops the scrollbar jumping. */
+  content-visibility:auto;contain-intrinsic-size:auto 186px}
 .card:hover{border-color:var(--neon2);box-shadow:0 0 0 1px #38bdf855,0 0 18px #38bdf833}
 .card:active{transform:scale(.985)}
 .card.on{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee66,0 0 16px #22d3ee2e}
@@ -307,153 +430,217 @@ body.bg-gray  .thumb{background:#808a96}
 </header>
 <div class="grid" id="grid"></div>
 <div id="toast"></div>
+<script id="items-data" type="application/json">__ITEMS__</script>
 <script src="/static/lottie_svg.min.js"></script>
 <script>
-const ITEMS = __ITEMS__;
-let lastIdx = null;
+// Catalog labels are attacker-influenced (they come from downloaded packs), so
+// item data is parsed from an inert JSON block and only ever written to the DOM
+// with textContent -- never interpolated into markup.
+const ITEMS = JSON.parse(document.getElementById('items-data').textContent);
+const TOKEN = "__TOKEN__";
 const grid = document.getElementById('grid');
-
-function thumb(it){
-  if(it.isLogo) return `<div class="thumb"><img loading="lazy" src="/img/${encodeURIComponent(it.key)}" alt="${it.label}"></div>`;
-  if(it.fmt==='static') return `<div class="thumb"><img loading="lazy" src="/img/${encodeURIComponent(it.key)}" alt="${it.label}"></div>`;
-  if(it.fmt==='video') return `<div class="thumb"><video src="/img/${encodeURIComponent(it.key)}" muted loop autoplay playsinline preload="metadata"></video></div>`;
-  return `<div class="thumb lottie" data-key="${encodeURIComponent(it.key)}"><span class="ph">${it.emoji||'▶'}</span></div>`;
-}
 const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
-// Performance: animated .tgs are rendered with the lightweight CANVAS renderer
-// and shown as a STATIC first frame at rest (near-zero CPU). Only the card you
-// hover actually plays — so hundreds of emoji no longer melt the CPU / hang the
-// page the way autoplay+loop SVG did. Off-screen players are destroyed.
+const cards = new Map();          // key -> card element
+let lastIdx = null;
+
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if(cls) n.className = cls;
+  if(text !== undefined) n.textContent = text;
+  return n;
+}
+
+function makeThumb(it){
+  const box = el('div','thumb');
+  const src = '/img/' + encodeURIComponent(it.key);
+  if(it.fmt === 'video'){
+    const v = el('video');
+    v.muted = true; v.loop = true; v.playsInline = true;
+    // No autoplay -- every video playing at once was the main CPU sink. With
+    // preload=metadata the browser fetches only headers, and #t=0.001 makes it
+    // paint the first frame as a still. Playback starts on hover.
+    v.preload = 'metadata';
+    v.src = src + '#t=0.001';
+    box.appendChild(v);
+  } else if(it.fmt === 'animated'){
+    box.classList.add('lottie');
+    box.dataset.key = encodeURIComponent(it.key);
+    box.appendChild(el('span','ph', it.emoji || '▶'));
+  } else {
+    const img = el('img');
+    // Native lazy loading: the browser already defers off-screen images, and
+    // unlike a JS observer it still works if IntersectionObserver never fires.
+    img.loading = 'lazy'; img.decoding = 'async';
+    img.width = 104; img.height = 104;
+    img.alt = it.label || '';     // property assignment: no attribute injection
+    img.src = src;
+    box.appendChild(img);
+  }
+  return box;
+}
+
+function makeCard(it){
+  const card = el('div', it.isLogo ? 'card logo' : 'card ' + (it.included ? 'on' : 'off'));
+  card.dataset.key = it.key;
+  if(!it.isLogo) card.draggable = true;
+  card.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
+  if(!it.isLogo) card.appendChild(el('span','tick', it.included ? '✓' : '✕'));
+  card.appendChild(makeThumb(it));
+  card.appendChild(el('div','lbl', it.label || ''));
+  card.appendChild(el('div','sub', it.isLogo
+    ? 'always first, not part of the catalog'
+    : it.key.slice(0,10) + '…'));
+  cards.set(it.key, card);
+  return card;
+}
+
+// --- lazy media: nothing loads or animates until it is actually on screen ---
 const anims = new Map();
-function playAnim(div){ const a=anims.get(div); if(a && !RM){ try{a.play();}catch(_){}}}
-function stopAnim(div){ const a=anims.get(div); if(a){ try{a.goToAndStop(0,true);}catch(_){}}}
-const io = new IntersectionObserver(entries=>{
+function playAnim(div){ const a=anims.get(div); if(a && !RM){ try{a.play();}catch(_){} } }
+function stopAnim(div){ const a=anims.get(div); if(a){ try{a.goToAndStop(0,true);}catch(_){} } }
+
+// Only .tgs needs an observer: a lottie player is expensive to keep alive, so
+// one is built when its card nears the viewport and destroyed when it leaves.
+// Images and video are handled natively (loading=lazy / preload=metadata).
+const io = window.IntersectionObserver ? new IntersectionObserver(entries=>{
   for(const e of entries){
-    const div = e.target, key = div.dataset.key;
+    const box = e.target;
     if(e.isIntersecting){
-      if(!anims.has(div) && window.lottie){
-        const ph = div.querySelector('.ph'); if(ph) ph.remove();
-        // SVG renderer (the only one in the vendored build). The key to not
-        // melting the CPU is NOT autoplaying: we render the first frame and
-        // stop, so no requestAnimationFrame runs until you hover this card.
-        const a = lottie.loadAnimation({container:div, renderer:'svg', loop:true,
-          autoplay:false, path:'/lottie/'+key});
-        a.addEventListener('DOMLoaded',()=>{ try{a.goToAndStop(0,true);}catch(_){}});
-        anims.set(div,a);
+      if(!anims.has(box) && window.lottie){
+        const ph = box.querySelector('.ph'); if(ph) ph.remove();
+        // Render the first frame and stop: no requestAnimationFrame runs until
+        // you hover this card, so a screen full of .tgs costs almost nothing.
+        const a = lottie.loadAnimation({container:box, renderer:'svg', loop:true,
+          autoplay:false, path:'/lottie/'+box.dataset.key});
+        a.addEventListener('DOMLoaded',()=>{ try{a.goToAndStop(0,true);}catch(_){} });
+        anims.set(box,a);
       }
     } else {
-      const a = anims.get(div);
-      if(a){ try{a.destroy();}catch(_){} anims.delete(div); div.innerHTML='<span class="ph">▶</span>'; }
+      const a = anims.get(box);
+      if(a){
+        try{a.destroy();}catch(_){}
+        anims.delete(box);
+        box.textContent = '';
+        box.appendChild(el('span','ph','▶'));
+      }
     }
   }
-},{root:null, rootMargin:'120px'});
-function cleanupLottie(){ anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims.clear(); io.disconnect(); }
-function observeLottie(){ document.querySelectorAll('.thumb.lottie').forEach(d=>io.observe(d)); }
+},{root:null, rootMargin:'200px'}) : null;
+
 function render(){
-  cleanupLottie();
-  grid.innerHTML = ITEMS.map((it,i)=>{
-    if(it.isLogo){
-      return `<div class="card logo" data-i="${i}">
-        <span class="badge">logo</span>
-        ${thumb(it)}
-        <div class="lbl">${(it.label||'').toString().replace(/</g,'&lt;')}</div>
-        <div class="sub">always first, not part of the catalog</div>
-      </div>`;
-    }
-    return `<div class="card ${it.included?'on':'off'}" data-i="${i}" draggable="true">
-      <span class="badge">${it.fmt}</span>
-      <span class="tick">${it.included?'✓':'✕'}</span>
-      ${thumb(it)}
-      <div class="lbl">${(it.label||'').toString().replace(/</g,'&lt;')}</div>
-      <div class="sub">${it.key.slice(0,10)}…</div>
-    </div>`;
-  }).join('');
+  anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims.clear();
+  if(io) io.disconnect();
+  cards.clear();
+  const frag = document.createDocumentFragment();
+  for(const it of ITEMS) frag.appendChild(makeCard(it));
+  grid.textContent = '';
+  grid.appendChild(frag);
+  if(io) grid.querySelectorAll('.thumb.lottie').forEach(t=>io.observe(t));
   updateCount();
-  observeLottie();
-  // Play the hovered emoji only; keep the rest as static first frames.
-  grid.querySelectorAll('.thumb.lottie').forEach(div=>{
-    const card = div.closest('.card');
-    card.addEventListener('mouseenter',()=>playAnim(div));
-    card.addEventListener('mouseleave',()=>stopAnim(div));
-  });
 }
 function updateCount(){
   const real = ITEMS.filter(x=>!x.isLogo);
   document.getElementById('selCount').textContent = real.filter(x=>x.included).length;
   document.getElementById('totCount').textContent = real.length;
 }
-function setCard(i){
-  const el = grid.querySelector(`.card[data-i="${i}"]`);
-  const it = ITEMS[i];
-  el.classList.toggle('on',it.included); el.classList.toggle('off',!it.included);
-  el.querySelector('.tick').textContent = it.included?'✓':'✕';
+// In-place update: never rebuild the grid just to flip a selection.
+function setCard(it){
+  const el2 = cards.get(it.key); if(!el2) return;
+  el2.classList.toggle('on',it.included); el2.classList.toggle('off',!it.included);
+  const tick = el2.querySelector('.tick');
+  if(tick) tick.textContent = it.included ? '✓' : '✕';
 }
+function setAll(fn){ for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); } updateCount(); }
+
+// Hover play/pause, by delegation -- no per-card listeners to leak.
+grid.addEventListener('mouseover',e=>{
+  const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
+  if(box.classList.contains('lottie')) playAnim(box);
+  const v = box.querySelector('video'); if(v && !RM){ try{v.play();}catch(_){} }
+});
+grid.addEventListener('mouseout',e=>{
+  const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
+  if(box.classList.contains('lottie')) stopAnim(box);
+  const v = box.querySelector('video'); if(v){ try{v.pause(); v.currentTime=0;}catch(_){} }
+});
+
 grid.addEventListener('click',e=>{
   const card = e.target.closest('.card'); if(!card) return;
-  const i = +card.dataset.i;
-  if(ITEMS[i].isLogo) return;   // preview-only card: not toggleable
+  const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
+  if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
   if(e.shiftKey && lastIdx!==null){
     const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
     const val = !ITEMS[i].included;
-    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; ITEMS[k].included=val;setCard(k); }
+    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; ITEMS[k].included=val; setCard(ITEMS[k]); }
   } else {
-    ITEMS[i].included=!ITEMS[i].included; setCard(i);
+    ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
   }
   lastIdx=i; updateCount();
 });
 
 // --- Drag & drop reordering (sets the publish order) --------------------
-let dragFrom = null;
+let dragKey = null;
 let orderTimer = null;
 function saveOrder(){
   clearTimeout(orderTimer);
   orderTimer = setTimeout(async ()=>{
     const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
     try{
-      await fetch('/api/order',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r = await fetch('/api/order',{method:'POST',
+        headers:{'Content-Type':'application/json','X-Panel-Token':TOKEN},
         body:JSON.stringify({order})});
-      toast('Order saved ✓');
+      toast(r.ok ? 'Order saved ✓' : 'Could not save order');
     }catch(_){ toast('Could not save order'); }
   }, 400);
 }
 grid.addEventListener('dragstart',e=>{
   const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
-  const i=+card.dataset.i;
-  if(ITEMS[i].isLogo){ e.preventDefault(); return; }   // logo is fixed first
-  dragFrom=i; card.classList.add('drag');
+  const it = ITEMS.find(x=>x.key===card.dataset.key);
+  if(!it || it.isLogo){ e.preventDefault(); return; }   // logo is fixed first
+  dragKey=card.dataset.key; card.classList.add('drag');
   e.dataTransfer.effectAllowed='move';
-  try{e.dataTransfer.setData('text/plain',String(i));}catch(_){}
+  try{e.dataTransfer.setData('text/plain',dragKey);}catch(_){}
 });
+let overCard = null;
 grid.addEventListener('dragover',e=>{
-  if(dragFrom===null) return;
+  if(dragKey===null) return;
   e.preventDefault(); e.dataTransfer.dropEffect='move';
   const card=e.target.closest('.card');
-  grid.querySelectorAll('.card.over').forEach(c=>c.classList.remove('over'));
-  if(card && !ITEMS[+card.dataset.i].isLogo) card.classList.add('over');
+  if(card === overCard) return;
+  if(overCard) overCard.classList.remove('over');
+  const it = card && ITEMS.find(x=>x.key===card.dataset.key);
+  overCard = (it && !it.isLogo) ? card : null;
+  if(overCard) overCard.classList.add('over');
 });
 grid.addEventListener('drop',e=>{
-  if(dragFrom===null) return;
+  if(dragKey===null) return;
   e.preventDefault();
   const card=e.target.closest('.card');
-  let to = card ? +card.dataset.i : ITEMS.length-1;
+  const from = ITEMS.findIndex(x=>x.key===dragKey);
+  let to = card ? ITEMS.findIndex(x=>x.key===card.dataset.key) : ITEMS.length-1;
   const firstMovable = ITEMS.findIndex(x=>!x.isLogo);
   if(to < firstMovable) to = firstMovable;            // never before the logo
-  if(to!==dragFrom){
-    const [moved]=ITEMS.splice(dragFrom,1);
+  if(from>=0 && to>=0 && to!==from){
+    const [moved]=ITEMS.splice(from,1);
     ITEMS.splice(to,0,moved);
-    render();
+    // Move the one node instead of rebuilding every card (which would drop
+    // every loaded thumbnail and lottie player and re-request them all).
+    const node = cards.get(moved.key);
+    const ref = cards.get(ITEMS[to+1] ? ITEMS[to+1].key : null);
+    grid.insertBefore(node, ref || null);
     saveOrder();
   }
-  dragFrom=null;
+  dragKey=null;
 });
 grid.addEventListener('dragend',()=>{
-  dragFrom=null;
-  grid.querySelectorAll('.card.over,.card.drag').forEach(c=>c.classList.remove('over','drag'));
+  dragKey=null;
+  if(overCard){ overCard.classList.remove('over'); overCard=null; }
+  grid.querySelectorAll('.card.drag').forEach(c=>c.classList.remove('drag'));
 });
 
-document.getElementById('all').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=true;});render();};
-document.getElementById('none').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=false;});render();};
-document.getElementById('inv').onclick=()=>{ITEMS.forEach(x=>{if(!x.isLogo)x.included=!x.included;});render();};
+document.getElementById('all').onclick=()=>setAll(()=>true);
+document.getElementById('none').onclick=()=>setAll(()=>false);
+document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
 // Preview backdrop switcher: makes black / hollow / faint emoji visible.
 const BGS=['checker','light','dark','gray'];
 const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};
@@ -470,10 +657,14 @@ document.getElementById('bg').onclick=()=>{
 applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){return 'checker';}})());
 document.getElementById('save').onclick=async()=>{
   const excluded = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
-  const r = await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({excluded})});
-  const j = await r.json();
-  toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded`);
+  try{
+    const r = await fetch('/api/save',{method:'POST',
+      headers:{'Content-Type':'application/json','X-Panel-Token':TOKEN},
+      body:JSON.stringify({excluded})});
+    const j = await r.json();
+    toast(r.ok ? `Saved ✓  ${j.included} included · ${j.excluded} excluded`
+               : `Save failed: ${j.error||r.status}`);
+  }catch(_){ toast('Save failed'); }
 };
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;
   t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
@@ -523,7 +714,11 @@ def main() -> int:
         cat.close()
     log.info("loaded %d emoji from %s", len(view), db_path)
 
-    handler = make_handler(view, by_key, db_path)
+    # Per-run mutation token: a page on another origin can neither read it nor
+    # attach it to a no-cors POST, so it cannot re-order or de-select the
+    # catalog behind the user's back.
+    token = secrets.token_urlsafe(24)
+    handler = make_handler(view, by_key, db_path, token)
 
     class QuietServer(ThreadingHTTPServer):
         # Don't dump a traceback when a browser simply drops a connection

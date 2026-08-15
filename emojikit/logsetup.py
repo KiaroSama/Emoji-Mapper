@@ -34,6 +34,7 @@ import secrets
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -197,10 +198,16 @@ def _install_excepthooks(logger: logging.Logger) -> None:
     prev = sys.excepthook
 
     def hook(exc_type, exc, tb):
-        if not issubclass(exc_type, KeyboardInterrupt):
-            logger.critical("UNCAUGHT %s", exc_type.__name__,
-                            exc_info=(exc_type, exc, tb))
-        prev(exc_type, exc, tb)
+        if issubclass(exc_type, KeyboardInterrupt):
+            prev(exc_type, exc, tb)
+            return
+        logger.critical("UNCAUGHT %s", exc_type.__name__,
+                        exc_info=(exc_type, exc, tb))
+        # Render the traceback ourselves instead of delegating to ``prev``:
+        # the default hook prints it raw, and a requests exception carries the
+        # full bot-token URL. Redacting the log but not stderr leaks it anyway.
+        sys.stderr.write(redact("".join(
+            traceback.format_exception(exc_type, exc, tb))))
 
     sys.excepthook = hook
     if hasattr(threading, "excepthook"):

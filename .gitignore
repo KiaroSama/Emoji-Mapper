@@ -109,3 +109,17 @@ launch_test.txt
 # Playwright MCP test artifacts
 .playwright-mcp/
 *.jpeg
+
+# Hook Maker: local/private files (auto-managed)
+/explain-AI.md
+/reference.md
+/.claude/
+/.kiro/
+/.codex/
+/graphify-out/
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+!/.env.template
+!/.env.dist
