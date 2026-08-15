@@ -74,6 +74,12 @@ class FakeTG:
         # file_unique_id -> the bytes that were uploaded for it, so a later
         # download can prove the live sticker is the one we sent.
         self.bodies: dict[str, bytes] = {}
+        # Which stickers were actually fetched: content attribution is the
+        # expensive route, so its bound has to be assertable.
+        self.downloaded: list[str] = []
+        # file_unique_ids whose fetch FAILS -- "I could not look", as distinct
+        # from "I looked and it is not ours".
+        self.undownloadable: set[str] = set()
 
     def probe_set_state(self, name):
         if name in self.unknown:
@@ -111,11 +117,28 @@ class FakeTG:
         return st
 
     def download_file(self, file_id, dest):
-        """Serve the stored body for a sticker, as Telegram would."""
+        """Serve the sticker's bytes, as Telegram would.
+
+        A sticker nobody uploaded through this fake is still a REAL, fetchable
+        image -- it just is not in our catalog. Raising here instead would make
+        "someone else's sticker" and "the download failed" the same event, and
+        those are the two cases the publisher must tell apart: the first is a
+        proven negative, the second is no answer at all. Use ``undownloadable``
+        for the genuine failure.
+        """
         fuid = str(file_id)[2:] if str(file_id).startswith("f-") else str(file_id)
+        self.downloaded.append(fuid)
+        if fuid in self.undownloadable:
+            raise RuntimeError(f"download failed: {file_id}")
         body = self.bodies.get(fuid)
         if body is None:
-            raise RuntimeError(f"no such file: {file_id}")
+            # Deterministic per-fuid art so two foreign stickers never collide
+            # onto one content key, which would read as a duplicate of ours.
+            seed = sum(fuid.encode()) % 200
+            foreign = Path(dest).with_suffix(".foreign.png")
+            _make_png(foreign, color=(seed, 255 - seed, 90, 255))
+            body = foreign.read_bytes()
+            foreign.unlink(missing_ok=True)
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(body)
         return dest
@@ -555,19 +578,46 @@ class UnattributedTail(_CatalogFixture):
         self.assertEqual(s["keys"], [self.keys[0]])   # the tail stayed unowned
         self.assertFalse(bc._set_is_open(s))
 
-    def test_a_tail_whose_download_fails_closes_the_set(self):
-        # Attribution by content is the only remaining route for an unrecorded
-        # tail sticker; when the download fails the position stays unowned, so
-        # the set must not receive another emoji behind it.
+    def test_a_tail_whose_download_fails_is_refused_not_closed(self):
+        """Closing the set on a failed fetch is how the emoji gets duplicated.
+
+        Content is the only remaining route for an unrecorded tail sticker. If
+        the fetch fails and the set is merely closed, publishing rolls to a new
+        set -- and when that sticker WAS ours, its emoji is now live twice. The
+        run that left it unrecorded usually died of a network fault, so this is
+        the correlated case, not an exotic one. An unreadable position has to be
+        a refusal.
+        """
         tg = DownloadingTG(sets={SET: [_sticker("UP-item0", "c0"),
                                        _sticker("UNSEEN", "cx")]},
                            error="connection reset")
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 2)
+            with self.assertRaises(bc.SetDrift) as ctx:
+                bc.reconcile_set(tg, cat, s, self.data, "pk")
+        self.assertIn("could not be examined", str(ctx.exception))
         self.assertEqual(tg.downloads, 1)
+        self.assertEqual(s["keys"], [self.keys[0]])   # nothing was recorded
+
+    def test_an_unreadable_sticker_behind_a_foreign_one_is_not_read_as_absent(self):
+        """The look-behind must not report "nothing of ours" when it could not look.
+
+        Layout [ours, FOREIGN, ours-but-unrecorded] with the last one's fetch
+        failing. Treating that failure as absence breaks the loop, closes the
+        set, and publishing rolls to a new one -- a second live copy of the same
+        emoji, silently. This is the whole defect, reached through the error path
+        instead of through the id lookup it replaced.
+        """
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("OWNER", "cx"),
+                                _sticker("FRESH-item1", "c2")]})
+        tg.undownloadable.add("FRESH-item1")
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift) as ctx:
+                bc.reconcile_set(tg, cat, s, self.data, "pk")
+        self.assertIn("could not be examined", str(ctx.exception))
         self.assertEqual(s["keys"], [self.keys[0]])
-        self.assertFalse(bc._set_is_open(s))
 
     def test_a_fully_attributed_set_stays_open(self):
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
@@ -576,6 +626,72 @@ class UnattributedTail(_CatalogFixture):
         with Catalog(self.data / "catalog.db") as cat:
             bc.reconcile_set(tg, cat, s, self.data, "pk")
         self.assertTrue(bc._set_is_open(s))
+
+
+# --------------------------------------------------------------------------- #
+# H-01: an emoji of OURS hiding behind a foreign sticker is found by CONTENT
+# --------------------------------------------------------------------------- #
+class OurEmojiBehindAForeignSticker(_CatalogFixture):
+    """The look-behind used to be an id lookup only.
+
+    A sticker this program uploaded moments before the run died never got its
+    file_unique_id recorded, so ``seen_file_unique_id`` never heard of it: the
+    look-behind answered "nothing of ours behind", attribution stopped quietly,
+    and the emoji stayed live-but-pending -- i.e. uploaded again, into a new
+    set, on the next run. Exactly the duplicate this project exists to prevent.
+    """
+
+    def _unrecorded(self, tg: FakeTG, i: int) -> dict:
+        """A live sticker holding item<i>'s pixels, with an id nobody recorded.
+
+        Only a download can see it: the catalog knows the CONTENT, never this
+        copy's Telegram identity.
+        """
+        st = _sticker(f"FRESH-item{i}", f"fresh-c{i}")
+        tg.bodies[st["file_unique_id"]] = (
+            self.data / "media" / "static" / f"item{i}.png").read_bytes()
+        return st
+
+    def test_an_unrecorded_upload_behind_a_foreign_sticker_is_refused(self):
+        # [..ours.., FOREIGN, OURS_UNRECORDED]
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("OWNER", "owner-cid")]})
+        tg.sets[SET].append(self._unrecorded(tg, 1))
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift) as ctx:
+                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            # Still pending would mean re-uploaded; the run refuses instead.
+            self.assertFalse(cat.is_published("pk", self.keys[1]))
+        self.assertIn(self.keys[1], str(ctx.exception))
+        self.assertIn("position 2", str(ctx.exception))
+        self.assertEqual(s["keys"], [self.keys[0]])  # never attributed by order
+
+    def test_the_look_behind_stops_at_the_first_of_ours(self):
+        # Bound: the rest of the tail at worst, and not one download further
+        # than the sticker that proves the set was edited by hand.
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("OWNER", "owner-cid")]})
+        tg.sets[SET] += [self._unrecorded(tg, 1), _sticker("OWNER2", "owner-cid2")]
+        s = self._state_set(keys=[self.keys[0]], live=1)
+        with Catalog(self.data / "catalog.db") as cat:
+            with self.assertRaises(bc.SetDrift):
+                bc.reconcile_set(tg, cat, s, self.data, "pk")
+        self.assertEqual(tg.downloaded, ["OWNER", "FRESH-item1"])
+
+    def test_a_foreign_sticker_at_the_very_end_still_stops_quietly(self):
+        # The case the id-only check got right, and the reason this cannot just
+        # raise on every unrecognized sticker: nothing of ours is behind it, so
+        # the set is merely closed and publishing rolls to a fresh one.
+        tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
+                                _sticker("UP-item1", "c1"),
+                                _sticker("OWNER", "owner-cid")]})
+        s = self._state_set(live=2)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 3)
+        self.assertEqual(s["keys"], self.keys)
+        self.assertFalse(bc._set_is_open(s))
+        self.assertEqual(tg.downloaded, ["OWNER"])   # nothing past the stop
 
 
 # --------------------------------------------------------------------------- #
