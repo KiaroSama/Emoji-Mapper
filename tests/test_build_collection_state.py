@@ -58,6 +58,8 @@ class FakeTG:
     def __init__(self, sets=None, unknown=()):
         self.sets: dict[str, list[dict]] = dict(sets or {})
         self.unknown = set(unknown)          # names whose live state is unknown
+        self.uploaded: list[str] = []
+        self.sent: list[str] = []
 
     def probe_set_state(self, name):
         if name in self.unknown:
@@ -70,6 +72,25 @@ class FakeTG:
         if name not in self.sets:
             raise RuntimeError("getStickerSet failed: STICKERSET_INVALID")
         return {"stickers": list(self.sets[name])}
+
+    # ----- publishing side (the uploaded copy gets its own file_unique_id) --- #
+    def get_me(self):
+        return {"username": "YourEmojiBot"}
+
+    def _new(self, name: str, path) -> dict:
+        stem = Path(path).stem
+        self.uploaded.append(stem)
+        return _sticker(f"UP-{stem}", f"{name}-{len(self.sets.get(name, []))}")
+
+    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+        self.sets[name] = [self._new(name, path)]
+
+    def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,
+                  expected_before=None):
+        self.sets[name].append(self._new(name, path))
+
+    def send_message(self, chat_id, text):
+        self.sent.append(text)
 
 
 def _sticker(fuid: str, cid: str) -> dict:
@@ -316,6 +337,55 @@ class CliContract(_CatalogFixture):
         self.assertEqual(
             self._dry_run("--per-set", "1", "--brand-logo", str(logo))[0],
             EXIT_USAGE)
+
+
+class PublishThroughMain(_CatalogFixture):
+    """The real entry point: publish, then resume without re-uploading."""
+
+    def _run(self, tg) -> int:
+        with mock.patch.object(bc, "Telegram", lambda token: tg), \
+                mock.patch.object(bc.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "x",
+                                             "PACK_LINKS_CHAT_ID": ""}):
+            return _main("--base", "pk", "--title", "Pack", "--formats", "static",
+                         "--user-id", "7", "--no-brand-logo",
+                         "--data-dir", str(self.data))
+
+    def test_publish_then_resume_uploads_each_emoji_once(self):
+        tg = FakeTG()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self.assertEqual(tg.uploaded, ["item0", "item1"])
+
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(state["sets"][0]["keys"], self.keys)
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(cat.get(self.keys[0]).custom_emoji_id, f"{SET}-0")
+            self.assertEqual(cat.get(self.keys[1]).custom_emoji_id, f"{SET}-1")
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self.assertEqual(tg.uploaded, ["item0", "item1"])   # nothing re-uploaded
+        self.assertEqual(len(tg.sets[SET]), 2)
+
+    def test_a_set_emptied_between_runs_stops_the_resume(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        tg.sets[SET] = []                     # owner emptied the pack by hand
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_FAILED)
+        self.assertEqual(tg.uploaded, ["item0", "item1"])
+
+    def test_unreachable_telegram_is_retryable_not_a_failure(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        tg.unknown.add(SET)                   # network down on the next run
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_PARTIAL)
+        self.assertEqual(tg.uploaded, ["item0", "item1"])
 
 
 # --------------------------------------------------------------------------- #
