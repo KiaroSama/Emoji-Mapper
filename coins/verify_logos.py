@@ -72,6 +72,25 @@ def _intent_path() -> Path:
     return ROOT / "verify_logos_intent.json"
 
 
+def _run_targets(map_path, state_path=None) -> dict:
+    """The files this run is bound to, normalized for comparison.
+
+    The intent file has ONE fixed location but --map and --state are chosen per
+    run. A crash under ``--map A.json`` followed by a restart under
+    ``--map B.json`` used to reconcile the pending replacement into B: a ticker
+    is repointed inside a file that never held the old id, while A keeps naming
+    a sticker that no longer exists. Recording the resolved targets is what lets
+    the recovery refuse.
+
+    normcase + resolve so the same file reached by a different spelling (case,
+    a relative path, a symlink) still compares equal on Windows and POSIX.
+    """
+    def norm(p) -> str:
+        return os.path.normcase(str(Path(p).resolve())) if p else ""
+
+    return {"map_target": norm(map_path), "state_target": norm(state_path)}
+
+
 def fetch_markets(top: int) -> list[dict]:
     out: list[dict] = []
     per = 250
@@ -215,7 +234,7 @@ def repoint(map_path: Path, old_cid: str, new_cid: str) -> int:
     return changed
 
 
-def reconcile_intent(tg: Telegram, map_path: Path) -> bool:
+def reconcile_intent(tg: Telegram, map_path: Path, state_path=None) -> bool:
     """Resolve a replacement recorded before the last mutation. True when clear.
 
     Telegram can apply the replacement and still leave us without the
@@ -223,18 +242,41 @@ def reconcile_intent(tg: Telegram, map_path: Path) -> bool:
     map then still names the OLD cid -- which no longer exists -- so no later
     run can locate it and the ticker is stranded on a dead sticker forever.
     The intent written before the mutation is what makes that recoverable.
+
+    Recoverable INTO THE FILE IT WAS RECORDED AGAINST, and no other: an intent
+    whose target is different from -- or missing for -- this run's --map/--state
+    is refused rather than applied to the wrong map.
     """
     path = _intent_path()
     if not path.is_file():
         return True
     try:
         intent = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.error("replacement intent %s is unreadable (%s); resolve it by hand "
+                  "before mutating the packs again.", path.name, exc)
+        return False
+
+    want = _run_targets(map_path, state_path)
+    got = {key: str((intent or {}).get(key) or "") for key in want}
+    if got != want:
+        log.error("the pending replacement in %s was recorded against map %s / "
+                  "state %s, not this run's map %s / state %s. Refusing to "
+                  "reconcile it into a different map -- re-run with the "
+                  "original --map/--state, or resolve %s by hand.", path.name,
+                  got["map_target"] or "<unrecorded>",
+                  got["state_target"] or "<unrecorded>",
+                  want["map_target"], want["state_target"] or "<none>",
+                  path.name)
+        return False
+
+    try:
         sname = str(intent["set_name"])
         pos = int(intent["set_index"])
         old_cid = str(intent["old_cid"])
         before = [str(c) for c in intent["before"]]
-        want = int(intent["source_dhash"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        want_hash = int(intent["source_dhash"])
+    except (ValueError, KeyError, TypeError) as exc:
         log.error("replacement intent %s is unreadable (%s); resolve it by hand "
                   "before mutating the packs again.", path.name, exc)
         return False
@@ -254,7 +296,7 @@ def reconcile_intent(tg: Telegram, map_path: Path) -> bool:
         return True
 
     new_cid = verified_new_cid(before, after, pos)
-    if new_cid is None or not is_our_image(tg, sset["stickers"][pos], want):
+    if new_cid is None or not is_our_image(tg, sset["stickers"][pos], want_hash):
         log.error("pending replacement of %s in %s cannot be proven, and %s "
                   "still names an id that is gone. Review the pack, repair the "
                   "map, then delete %s.", old_cid, sname, map_path.name,
@@ -268,7 +310,7 @@ def reconcile_intent(tg: Telegram, map_path: Path) -> bool:
 
 
 def fix_one(tg: Telegram, uid: int, sets: list[dict], map_path: Path,
-            emoji_dir: Path, sym: str) -> bool:
+            emoji_dir: Path, sym: str, state_path=None) -> bool:
     """Replace one ticker's sticker with the official CoinGecko logo."""
     # Resolve official image for this exact symbol via market lookup.
     coins = fetch_markets(250)
@@ -310,7 +352,10 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], map_path: Path,
     intent = make_intent(key=sym, operation="replace", set_name=sname,
                          set_index=pos, expected_before=len(before))
     intent.update({"old_cid": old_cid, "before": before,
-                   "source": str(src), "source_dhash": dh(Image.open(src))})
+                   "source": str(src), "source_dhash": dh(Image.open(src)),
+                   # Which map/state this replacement belongs to. The intent
+                   # file's own path is fixed; its target is not.
+                   **_run_targets(map_path, state_path)})
     write_json_atomic(_intent_path(), intent)
 
     # Immutable bytes, not an open handle: _call retries the POST, and a file
@@ -407,8 +452,9 @@ def main() -> int:
 
     tg = Telegram(token)
     map_path = Path(args.map)
+    state_path = Path(args.state)
     try:
-        state = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
         sets = sorted(state["sets"], key=lambda s: s["index"])
         json.loads(map_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -423,12 +469,12 @@ def main() -> int:
         with exclusive_lock(PACK_LOCK):
             # An unresolved replacement must be settled before anything else is
             # mutated: the next fix would overwrite the only record of it.
-            if not reconcile_intent(tg, map_path):
+            if not reconcile_intent(tg, map_path, state_path):
                 log.error("refusing to replace anything while a previous "
                           "replacement is unresolved.")
                 return EXIT_FAILED
             for sym in syms:
-                if fix_one(tg, uid, sets, map_path, emoji_dir, sym):
+                if fix_one(tg, uid, sets, map_path, emoji_dir, sym, state_path):
                     fixed += 1
                 time.sleep(0.3)
     except LockBusy as exc:

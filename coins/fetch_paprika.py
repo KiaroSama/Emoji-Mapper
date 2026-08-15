@@ -45,8 +45,8 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (AmbiguousUploadError, LiveStateUnknown, LockBusy,
-                        SetState, Telegram, exclusive_lock, ingest_exit_code,
-                        load_env, load_keywords, make_intent,
+                        SetState, Telegram, canonical_map_lock, exclusive_lock,
+                        ingest_exit_code, load_env, load_keywords, make_intent,
                         pack_family_lock_path, safe_int_env, write_json_atomic)
 from emojikit.media import _dhash, hamming
 # The pipeline's single definition of "this image is effectively empty".
@@ -66,6 +66,11 @@ SET_TITLE = "@GodVerify Crypto Emoji"
 # fetch_cmc, verify_logos --fix and rebuild_dedup all mutate the same
 # gvcryptoemoji* sets; a lock named after whichever state file each tool happens
 # to read let them hold three different locks and append concurrently.
+#
+# LOCK ORDER, project-wide: this pack-family lock FIRST, canonical_map_lock()
+# second, never the reverse. Tools that only rewrite the map (alias_map,
+# enhance_map, remap_ids --apply, rebuild_dedup map) take the map lock alone,
+# so the two orders can never form a cycle.
 PACK_LOCK = pack_family_lock_path(SET_BASE)
 # A live sticker within this perceptual distance of the PNG we uploaded IS that
 # upload: Telegram re-encodes PNG to WEBP, so identical content still differs by
@@ -362,11 +367,25 @@ def publish_logos(tg: Telegram, tickers: list[str],
     Every mutation is written to a durable in-flight ledger in STATE first, so
     an outcome this run cannot verify is resolved by the next one instead of
     being silently re-sent.
+
+    ``ticker_to_id`` is REFRESHED FROM DISK once the locks are held, in place,
+    so the caller sees the merged map too.
     """
     keywords = load_keywords(KEYWORDS_CSV)
     added = failed = 0
     try:
-        with exclusive_lock(PACK_LOCK):
+        # Pack lock first, canonical map lock second -- the project-wide order
+        # (see PACK_LOCK). The map lock is held for the whole batch because the
+        # per-sticker writes below are one read-modify-write of the same file.
+        with exclusive_lock(PACK_LOCK), canonical_map_lock():
+            # RE-READ under the lock. main() loaded the map BEFORE waiting here,
+            # so its snapshot predates whatever the tool we queued behind wrote.
+            # Writing the whole file back from it drops that tool's ids -- the
+            # two tools serialise their Telegram mutations and still lose each
+            # other's map update.
+            if TICKER_IDS.is_file():
+                ticker_to_id.clear()
+                ticker_to_id.update(json.loads(TICKER_IDS.read_text("utf-8")))
             bot = tg.get_me()["username"]
             state = json.loads(STATE.read_text("utf-8"))
             try:
