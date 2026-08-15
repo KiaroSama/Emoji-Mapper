@@ -20,6 +20,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Sampled WHILE THIS MODULE IS IMPORTED, which is the only moment that answers
+# "was the guard there before anything could read .env?". Reading it later is
+# useless: test_outbound_connections_are_refused below does `import tests`, so
+# the package installs itself MID-RUN and every later look reports "installed"
+# -- long after the credentials are already in os.environ.
+_GUARD_PRESENT_AT_IMPORT = "tests" in sys.modules
+
 TIMEOUT = 120          # a clean import is well under a second
 
 
@@ -64,20 +71,22 @@ class EntryPointsImport(unittest.TestCase):
 class SuiteIsHermetic(unittest.TestCase):
     """The guard in tests/__init__.py must actually hold."""
 
-    def test_the_guard_is_installed_at_all(self):
-        """Canary: the guard only loads when `tests` is imported AS A PACKAGE.
+    def test_the_guard_was_installed_before_the_test_modules(self):
+        """Canary: the guard must be there FIRST, not merely eventually.
 
-        `unittest discover -s tests` (no -t) makes the tests directory the
-        top-level, so modules load as `test_x` instead of `tests.test_x` and
-        tests/__init__.py never runs -- silently disabling the credential
-        scrub and the socket block. Run the suite with `-t .`.
+        The old form asked whether socket.connect was patched AT ASSERT TIME.
+        Under `unittest discover -s tests` (no -t) the tests package is skipped
+        at import, so the modules load as `test_x` and nothing is scrubbed --
+        but test_outbound_connections_are_refused below does `import tests`, the
+        patch appears mid-run, and this canary passed while the real .env values
+        had ALREADY been read into os.environ at import time. A check a later
+        import can satisfy cannot fail at the moment it is needed.
         """
-        import socket
-        installed = getattr(socket.socket.connect, "__name__", "") == "_guarded_connect"
         self.assertTrue(
-            installed,
-            "the hermetic guard is NOT active: this suite was started in a way "
-            "that skips tests/__init__.py. Use: "
+            _GUARD_PRESENT_AT_IMPORT,
+            "the hermetic guard was NOT active when the test modules were "
+            "imported: this suite was started in a way that skips "
+            "tests/__init__.py. Use: "
             "python -m unittest discover -s tests -t . -p \"test_*.py\"")
 
     # NOTE: these deliberately do NOT assert that credential-shaped names are

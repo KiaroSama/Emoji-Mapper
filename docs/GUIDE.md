@@ -404,6 +404,12 @@ Behaviour:
 - **Blank guard**: if an SVG renders blank (e.g. an unsupported gradient), it is
   **not** saved — the loop falls back to the raster `png/` source; a blank raster
   is skipped too. No blank emoji is ever produced.
+- **`logos/.incoming/`** is staging, not a source folder. The coin fetchers
+  download there and promote a logo into `logos/emoji/` only once its upload is
+  confirmed and the map records its id, so `logos/emoji/<ticker>.png` always
+  describes a sticker that really exists — the other tools use that file to
+  decide which live sticker belongs to which ticker. Leftovers there after an
+  interrupted run are harmless; the next run reuses or replaces them.
 
 Examples:
 
