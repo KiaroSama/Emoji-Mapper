@@ -8,8 +8,11 @@ secrets out of logs.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,54 @@ class TestRedaction(unittest.TestCase):
         out = fmt.format(rec)
         self.assertNotIn(TOKEN, out)
         self.assertIn("deadbeef", out)
+
+
+class TestRunOutcome(unittest.TestCase):
+    """The summary line must state how the run actually ended."""
+
+    def setUp(self):
+        self._orig = L._RUN.get("exit_code")
+
+    def tearDown(self):
+        # _RUN is process-global and the atexit summary reads it; leaving a
+        # test value behind makes the suite's own final log line lie.
+        L._RUN["exit_code"] = self._orig
+
+    def test_exit_code_is_recorded_and_returned(self):
+        self.assertEqual(L.record_exit_code(3), 3)
+        self.assertEqual(L._RUN["exit_code"], 3)
+
+
+class TestLogRetention(unittest.TestCase):
+    """Each run writes a new file, so old ones must age out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig = L.LOG_DIR
+        L.LOG_DIR = Path(self.tmp.name)
+
+    def tearDown(self):
+        L.LOG_DIR = self._orig
+        self.tmp.cleanup()
+
+    def _log(self, name, age_days):
+        p = L.LOG_DIR / name
+        p.write_text("x", encoding="utf-8")
+        old = time.time() - age_days * 86400
+        os.utime(p, (old, old))
+        return p
+
+    def test_old_logs_are_pruned_and_recent_ones_kept(self):
+        old = self._log("old.log", 90)
+        new = self._log("new.log", 1)
+        self.assertEqual(L.prune_old_logs(keep_days=30), 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
+
+    def test_retention_can_be_disabled(self):
+        old = self._log("old.log", 900)
+        self.assertEqual(L.prune_old_logs(keep_days=0), 0)
+        self.assertTrue(old.exists())
 
 
 class TestNoCommittedSecrets(unittest.TestCase):

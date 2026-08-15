@@ -40,10 +40,12 @@ $exit = 0
 $quarantined = @()
 $finished = $false
 
-# Pass 1: SVGs (hang-prone) under the watchdog.
+# Pass 1: SVGs (hang-prone) under the watchdog. Start-Process joins -ArgumentList
+# with plain spaces, so every path must carry its own quotes -- this project
+# lives under "G:\Program Files\...".
+$svgArgs = @("`"$convert`"", '--in', "`"$svgDir`"", '--out', "`"$emojiDir`"")
 for ($iter = 1; $iter -le 100; $iter++) {
-    $proc = Start-Process -FilePath $py `
-        -ArgumentList @($convert, '--in', $svgDir, '--out', $emojiDir) `
+    $proc = Start-Process -FilePath $py -ArgumentList $svgArgs `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput 'emoji_conv.txt' -RedirectStandardError 'emoji_err.txt'
     $state = Get-MarkerState $marker
@@ -63,25 +65,36 @@ for ($iter = 1; $iter -le 100; $iter++) {
         break
     }
     [void]$proc.WaitForExit(10000)   # let the redirected output flush before reading
+    if ($killed) { continue }        # the culprit is quarantined; retry the rest
 
+    # Only a kill justifies a restart. A converter that exited on its own without
+    # printing DONE hit a real error, and rerunning it 99 more times just hides it.
     $tail = Get-Content 'emoji_conv.txt' -Tail 1
-    if (-not $killed -and $tail -match '^DONE:') {
+    if ($tail -match '^DONE:') {
         Write-Host "[watchdog] SVG conversion complete: $tail"
         if ($proc.ExitCode -gt $exit) { $exit = $proc.ExitCode }
         $finished = $true
-        break
+    } else {
+        Write-Host "[watchdog] converter exited (code $($proc.ExitCode)) without finishing - see emoji_err.txt"
+        $exit = if ($proc.ExitCode -gt 1) { $proc.ExitCode } else { 1 }
     }
+    break
 }
 
+# Surface the converter's own quarantine notice (entries recorded by an earlier
+# run) plus anything this run killed: a skipped source must never be dropped
+# silently, and the run is not "clean" while one is waiting for review.
+$review = Get-Content 'emoji_conv.txt' | Select-String -Pattern '^(REVIEW|QUARANTINE):'
+foreach ($line in $review) { Write-Host "[watchdog] $($line.Line)" }
 if ($quarantined.Count) {
-    Write-Host "[watchdog] REVIEW these quarantined sources: $($quarantined -join ', ')"
-    Write-Host "[watchdog] They are listed in $(Join-Path $emojiDir '.svg_skip.txt'); delete a line to retry it."
-    if ($exit -lt 3) { $exit = 3 }
+    Write-Host "[watchdog] REVIEW killed sources: $($quarantined -join ', ') - listed in $(Join-Path $emojiDir '.svg_skip.txt'); delete a line to retry one."
 }
+if (($review -or $quarantined.Count) -and $exit -lt 3) { $exit = 3 }
 
 if (-not $finished) {
-    Write-Host "[watchdog] SVG conversion did NOT complete after 100 attempts - giving up."
-    exit 1
+    if ($exit -eq 0) { $exit = 1 }
+    Write-Host "[watchdog] SVG conversion did NOT complete - giving up (exit $exit)."
+    exit $exit
 }
 
 # Pass 2: raster PNGs (fast, no watchdog needed). Also the fallback for SVGs
