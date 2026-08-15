@@ -988,6 +988,61 @@ class VerifyLogosFix(unittest.TestCase):
         self.assertEqual(self.mapping(), before)
         self.assertIsNotNone(self.intent(), "an unresolved intent must survive")
 
+    def test_a_map_writer_cannot_repoint_the_ticker_mid_replacement(self):
+        """8: the id was chosen from the map with no lock held.
+
+        alias_map / enhance_map / remap_ids --apply rewrite ticker_to_id.json
+        under canonical_map_lock() alone, so one of them landing between the
+        read and the repoint left --fix replacing the live sticker for an id
+        the map no longer names: the sticker is destroyed and the repoint,
+        which looks entries up by the OLD id, finds nothing to move.
+
+        btc alone is on OLD_CID here so the race leaves nothing at all to
+        update -- the honest outcomes are "the replacement is what the map now
+        names" or "the run refused".
+        """
+        other = "cid-written-by-the-other-tool"
+        self.map_path.write_text(json.dumps({"btc": OLD_CID}), encoding="utf-8")
+        real = bp.canonical_map_lock
+
+        @contextlib.contextmanager
+        def racing():
+            """The map-only writer gets in the instant this run takes the lock."""
+            with real() as beat:
+                mp = json.loads(self.map_path.read_text("utf-8"))
+                mp["btc"] = other
+                bp.write_json_atomic(self.map_path, mp)
+                yield beat
+
+        with mock.patch.object(self.mod, "canonical_map_lock", racing):
+            ok, session = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"])
+
+        if session.method("replaceStickerInSet"):
+            self.assertTrue(ok)
+            self.assertEqual(self.mapping()["btc"], NEW_CID,
+                             "a live sticker was replaced for an id the map "
+                             "had already been repointed away from")
+        else:
+            self.assertFalse(ok)
+            self.assertEqual(self.mapping(), {"btc": other})
+
+    def test_a_busy_map_lock_stops_the_fix_before_it_touches_the_pack(self):
+        """No live replacement may happen that cannot then be repointed.
+
+        The lock has to be taken BEFORE the id is read, so a map editor already
+        holding it stops this run while the packs are still untouched. Taking
+        it only at the repoint meant the sticker was long gone by the time the
+        run discovered it could not record what it had done.
+        """
+        before = self.mapping()
+        tg, session = self._session(["a", OLD_CID, "c"], ["a", NEW_CID, "c"])
+        with bp.canonical_map_lock(), self.assertRaises(bp.LockBusy):
+            self.mod.fix_one(tg, 42, self.sets, self.map_path, self.emoji, "btc")
+        self.assertEqual(session.method("replaceStickerInSet"), [],
+                         "a sticker was replaced while the map was unwritable")
+        self.assertEqual(self.mapping(), before)
+        self.assertIsNone(self.intent())
+
     def test_fix_locks_on_the_pack_family_not_on_this_script(self):
         # --fix REPLACES stickers in the same cryptoemoji* sets the coin
         # fetchers append to. A lock named after this file was a different name

@@ -9,6 +9,9 @@ These lock down the defects that put wrong or blank emoji into the live packs:
 * a run with failed adds still reporting success,
 * an ambiguous add whose verification ALSO failed leaving no record, so the
   next run added the same image again,
+* a ticker another provider mapped while this run waited for the lock being
+  uploaded a second time, because the upload loop walked the list built before
+  the wait,
 * coin tools locking on three different files while mutating one pack family,
 * coins/verify_logos.py dying on an import that no longer exists.
 
@@ -279,15 +282,16 @@ class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
 
     CONCURRENT = {"zzz": "written-by-the-other-tool"}
 
-    def _racing_lock(self):
+    def _racing_lock(self, concurrent: dict | None = None):
         """The other tool's map update lands as this run takes the lock."""
         real = fp.canonical_map_lock
+        landed = self.CONCURRENT if concurrent is None else concurrent
 
         @contextlib.contextmanager
         def racing():
             with real() as beat:
                 current = json.loads(self.ids.read_text("utf-8"))
-                current.update(self.CONCURRENT)
+                current.update(landed)
                 bp.write_json_atomic(self.ids, current)
                 yield beat
 
@@ -306,6 +310,37 @@ class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
         self.assertEqual(stale["zzz"], self.CONCURRENT["zzz"],
                          "the caller refills the inventory from this dict, so "
                          "it must be refreshed in place too")
+
+    def test_a_ticker_mapped_while_we_waited_is_not_uploaded_again(self):
+        """Re-reading the map only helps if the ticker list is re-filtered too.
+
+        Two providers both saw 'aaa' unmapped and both downloaded it. The one
+        that won the lock uploaded it and mapped it; this one must not add the
+        same coin a second time -- that is a duplicate emoji in the live pack,
+        and 'aaa' would end up naming the copy instead of the sticker that is
+        already published.
+        """
+        tg = FakeTelegram(existing=2)
+        stale = json.loads(self.ids.read_text("utf-8"))   # loaded before the lock
+        with self._racing_lock({"aaa": "c-from-the-other-provider"}):
+            self.assertEqual(fp.publish_logos(tg, ["aaa"], stale), (0, 0))
+        self.assertEqual(tg.adds, [], "the coin is already live in the pack")
+        self.assertEqual(len(tg.sets[SET]), 2, "no second copy may be added")
+        saved = json.loads(self.ids.read_text("utf-8"))
+        self.assertEqual(saved["aaa"], "c-from-the-other-provider",
+                         "the published sticker's id was overwritten")
+        self.assertEqual(stale["aaa"], "c-from-the-other-provider",
+                         "the caller refills the inventory from this dict")
+
+    def test_the_rest_of_the_batch_is_still_published(self):
+        """Skipping the coin that was taken must not abandon the others."""
+        tg = FakeTelegram(existing=2)
+        (self.emoji / "bbb.png").write_bytes((self.emoji / "aaa.png").read_bytes())
+        stale = json.loads(self.ids.read_text("utf-8"))
+        with self._racing_lock({"aaa": "c-from-the-other-provider"}):
+            self.assertEqual(fp.publish_logos(tg, ["aaa", "bbb"], stale), (1, 0))
+        self.assertEqual([a[1] for a in tg.adds], ["bbb"])
+        self.assertEqual(stale["bbb"], tg.sets[SET][-1]["custom_emoji_id"])
 
     def test_a_map_writer_blocks_the_publisher(self):
         """Proof the publisher takes the map lock at all, in the right order."""
@@ -390,6 +425,32 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self.assertEqual((intent or {}).get("operation"), "add")
         self.assertEqual((intent or {}).get("set_name"), SET)
         self.assertEqual((intent or {}).get("expected_before"), 2)
+
+    def test_a_re_downloaded_source_does_not_unmake_the_recovery(self):
+        """The recovery oracle must be the image we SENT, not the file's art now.
+
+        EMOJI/<ticker>.png is shared and written by main() with no lock held, and
+        main() re-downloads a ticker whenever the map has no entry -- which is
+        exactly the state an unresolved upload leaves behind. Re-hashing the file
+        at recovery time therefore compares the live sticker against the NEW art,
+        concludes "it did not land", and uploads a second copy. No concurrency is
+        needed: two sequential runs of the same tool do it.
+        """
+        tg = FakeTelegram(existing=2)
+        self._blind_after_apply(tg)
+        mapping: dict[str, str] = {}
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
+        live_before = len(tg.sets[SET])
+
+        # Between the runs, the ticker is resolved again and the shared path is
+        # overwritten with a DIFFERENT image for the same coin.
+        _gradient(reverse=True).save(self.emoji / "aaa.png", "PNG")
+
+        tg.unreadable.clear()
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (1, 0))
+        self.assertEqual(len(tg.sets[SET]), live_before,
+                         "the already-live upload was sent a second time")
+        self.assertEqual(len(tg.adds), 1)
 
     def test_an_upload_that_never_landed_is_retried_once(self):
         """The mirror case: a recorded intent must not block a real retry."""

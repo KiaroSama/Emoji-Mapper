@@ -21,6 +21,11 @@ Usage:
 ``--apply`` refuses to overwrite the canonical map from incomplete or ambiguous
 data and writes a reviewable candidate file instead.
 
+Both phases run under the coin pack-family lock -- the same one the fetchers and
+rebuild_dedup take before touching those sets -- because the live read has to
+still describe the live packs at the moment the map is replaced. If a provider
+run holds it this exits EXIT_FAILED without writing anything; re-run afterwards.
+
 Resumable: live signatures are cached in remap_live_cache.json keyed by set name
 plus a digest of that set's live sticker manifest, so an interrupted run
 continues without re-downloading while an edited pack is still re-read.
@@ -48,13 +53,19 @@ import requests
 from PIL import Image
 
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LockBusy,
-                        Telegram, api_base, canonical_map_lock, load_env,
-                        write_json_atomic)
+                        Telegram, api_base, canonical_map_lock, exclusive_lock,
+                        load_env, pack_family_lock_path, write_json_atomic)
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("remap_ids")
 SIG_PX = 16  # signature is a SIG_PX x SIG_PX RGB thumbnail (robust to re-encode)
+# The pack family this tool reads. Keyed on the same base name as fetch_paprika,
+# fetch_cmc, verify_logos --fix and rebuild_dedup, so it resolves to the SAME
+# lock file those take before mutating these sets -- a lock of our own would
+# exclude nobody.
+SET_BASE = "cryptoemoji"
+PACK_LOCK = pack_family_lock_path(SET_BASE)
 
 
 def signature(img: Image.Image) -> np.ndarray:
@@ -233,6 +244,34 @@ def main() -> int:
                   "--apply first and pick a cutoff from the reported distances.")
         return EXIT_USAGE
 
+    # The pack-family lock is held across the WHOLE run -- the live read, the
+    # matching and the write -- not just the write. --apply replaces the map
+    # wholesale, so serialising the write alone still writes a value computed
+    # from a pack that has moved since: a provider appending a sticker AND its
+    # map entry in that window had its entry erased by our replacement, even
+    # though both writes were "locked". Under this lock the provider either
+    # finishes first (its sticker is in our live read and gets matched by
+    # content) or waits until after our write and adds to the fresh map.
+    # Merging instead of replacing is NOT the fix: --apply exists to throw a
+    # corrupted map away, and a merge would carry that corruption straight back.
+    #
+    # LOCK ORDER, project-wide: this pack-family lock FIRST, canonical_map_lock()
+    # (inside _remap) SECOND, never the reverse. exclusive_lock is not reentrant,
+    # and _remap takes no pack lock of its own.
+    try:
+        with exclusive_lock(PACK_LOCK):
+            return _remap(args, token)
+    except LockBusy as exc:
+        log.error("%s", exc)
+        return EXIT_FAILED
+
+
+def _remap(args: argparse.Namespace, token: str) -> int:
+    """Match live stickers to local logos; with --apply, replace the map.
+
+    Runs entirely inside the pack-family lock main() takes, so the live pack
+    state this reads is still the live pack state when the map is written.
+    """
     state = json.loads(Path(args.state).read_text(encoding="utf-8"))
     sets = sorted(state["sets"], key=lambda s: s["index"])
     tg = Telegram(token)
@@ -243,7 +282,7 @@ def main() -> int:
     incomplete = download_live(tg, token, sets, cache, cache_path)
 
     cids = list(cache["sigs"].keys())
-    tickers, local = build_local(emoji_dir)
+    tickers, local = build_local(Path(args.emoji_dir))
     if not tickers or not cids:
         log.error("nothing to match: %d local logos, %d live signatures",
                   len(tickers), len(cids))
@@ -326,22 +365,19 @@ def main() -> int:
     # other writer of the canonical map takes it too, so this replacement cannot
     # interleave with -- or be silently overwritten by -- a concurrent
     # read-modify-write, and the backup is of what was actually replaced.
-    try:
-        with canonical_map_lock():
-            # Re-read under the lock: `old` above was sampled before waiting for
-            # it, so it may already describe a file that no longer exists.
-            current = json.loads(outp.read_text(encoding="utf-8")) if outp.is_file() else {}
-            log.info("replacing the map: %d tickers, %d differ from the file on "
-                     "disk now", len(new_map),
-                     sum(1 for t, c in new_map.items() if current.get(t) != c))
-            bak = outp.with_suffix(".prebroken.json")
-            if outp.is_file() and not bak.exists():
-                shutil.copyfile(outp, bak)
-                log.info("backed up old map -> %s", bak.name)
-            write_json_atomic(outp, new_map)
-    except LockBusy as exc:
-        log.error("%s", exc)
-        return EXIT_FAILED
+    # LockBusy from either lock is handled by main(): EXIT_FAILED, nothing written.
+    with canonical_map_lock():
+        # Re-read under the lock: `old` above was sampled before waiting for
+        # it, so it may already describe a file that no longer exists.
+        current = json.loads(outp.read_text(encoding="utf-8")) if outp.is_file() else {}
+        log.info("replacing the map: %d tickers, %d differ from the file on "
+                 "disk now", len(new_map),
+                 sum(1 for t, c in new_map.items() if current.get(t) != c))
+        bak = outp.with_suffix(".prebroken.json")
+        if outp.is_file() and not bak.exists():
+            shutil.copyfile(outp, bak)
+            log.info("backed up old map -> %s", bak.name)
+        write_json_atomic(outp, new_map)
     log.info("WROTE corrected map -> %s", outp)
     return EXIT_OK
 

@@ -10,6 +10,10 @@ blindly:
      overwrote the canonical ticker->custom_emoji_id map with it.
   4. ``check_all_packs`` counted cached ids that are no longer live and cached an
      analyse failure as ``blank=true`` forever, reporting healthy coins as blank.
+  5. ``--apply`` computed its whole-map replacement from a live read taken
+     BEFORE any lock and took the map lock only around the write, so a provider
+     that appended a sticker AND its map entry in between had that entry erased
+     by a replacement that was, formally, correctly locked.
 
 Everything here uses fakes: no network, no Telegram, no real sleeping.
 """
@@ -34,9 +38,12 @@ import numpy as np  # noqa: E402
 import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE  # noqa: E402
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
+                        LockBusy, canonical_map_lock, exclusive_lock,
+                        pack_family_lock_path, write_json_atomic)
 
 import check_all_packs as cap  # noqa: E402
+import rebuild_dedup  # noqa: E402  - imported for its BASE, see PackFamilyLockTest
 import remap_ids  # noqa: E402
 
 
@@ -85,13 +92,18 @@ class FakeSession:
 class FakeTelegram:
     """Live packs: {set name: [{custom_emoji_id, file_unique_id, file_id}, ...]}."""
 
-    def __init__(self, sets: dict[str, list[dict]]):
+    def __init__(self, sets: dict[str, list[dict]], on_read=None):
         self.sets = sets
+        # Runs inside the live read -- the window a concurrent provider used to
+        # slip through between remap's read of the packs and its write.
+        self.on_read = on_read
 
     def get_me(self):
         return {"username": "coinbot"}
 
     def get_sticker_set(self, name):
+        if self.on_read:
+            self.on_read()
         return {"stickers": [dict(s) for s in self.sets[name]]}
 
     def _call(self, method, data=None):
@@ -105,6 +117,23 @@ class FakeTelegram:
 def _sticker(cid: str, fuid: str | None = None) -> dict:
     return {"custom_emoji_id": cid, "file_unique_id": fuid or f"fu-{cid}",
             "file_id": cid}
+
+
+def _provider_top_up(pack_lock: Path, out: Path, ticker: str, cid: str):
+    """A provider adding one sticker and its map entry, as fetch_paprika does.
+
+    Same locks in the same documented order (pack family first, canonical map
+    second). Returns the LockBusy it hit, or None when it got all the way
+    through -- which is the whole question this file's race tests ask.
+    """
+    try:
+        with exclusive_lock(pack_lock), canonical_map_lock():
+            mapping = json.loads(out.read_text("utf-8")) if out.is_file() else {}
+            mapping[ticker] = cid
+            write_json_atomic(out, mapping)
+    except LockBusy as exc:
+        return exc
+    return None
 
 
 class DownloadLiveTest(unittest.TestCase):
@@ -212,6 +241,8 @@ class MainApplyTest(unittest.TestCase):
         self.emoji.mkdir()
         self.out = self.dir / "ticker_to_id.json"
         self.cand = self.dir / "ticker_to_id.candidate.json"
+        # The real family lock lives in the repo; keep the suite off it.
+        self.pack_lock = self.dir / "pack_cryptoemoji.lock"
         (self.dir / "state.json").write_text(
             json.dumps({"sets": [{"index": 1, "name": "s1"}]}), encoding="utf-8")
 
@@ -227,6 +258,7 @@ class MainApplyTest(unittest.TestCase):
                 "--cache", str(self.dir / "cache.json"),
                 "--out", str(self.out), "--candidates", str(self.cand), *extra]
         with mock.patch.object(remap_ids, "Telegram", lambda token: tg), \
+                mock.patch.object(remap_ids, "PACK_LOCK", self.pack_lock), \
                 mock.patch.object(remap_ids.requests, "Session", lambda: session), \
                 mock.patch.object(remap_ids, "load_env", lambda: None), \
                 mock.patch.object(remap_ids, "setup_logging", lambda *a, **k: None), \
@@ -294,6 +326,98 @@ class MainApplyTest(unittest.TestCase):
         tg = FakeTelegram({"s1": [_sticker("a")]})
         rc = self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}))
         self.assertEqual(rc, EXIT_FAILED)
+
+
+class ApplyIsSerialisedAgainstThePackFamily(unittest.TestCase):
+    """5: the VALUE written has to come from a pack that cannot move.
+
+    ``--apply`` replaces the whole map, so locking only the write is not enough:
+    the replacement was computed from a live read taken before any lock, and a
+    provider that appended a sticker and its map entry in between was erased by
+    it. Merging instead is not the answer either -- ``--apply`` exists to throw a
+    corrupted map away, and a merge would carry the corruption back in. So the
+    guarantee tested here is the stricter one: the window does not exist,
+    because the pack-family lock is held from the live read through the write.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.emoji = self.dir / "emoji"
+        self.emoji.mkdir()
+        (self.emoji / "btc.png").write_bytes(_png((200, 20, 20, 255)))
+        self.out = self.dir / "ticker_to_id.json"
+        self.out.write_text(json.dumps({"btc": "STALE"}), encoding="utf-8")
+        self.pack_lock = self.dir / "pack_cryptoemoji.lock"
+        (self.dir / "state.json").write_text(
+            json.dumps({"sets": [{"index": 1, "name": "s1"}]}), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _main(self, tg, session):
+        argv = ["remap_ids", "--emoji-dir", str(self.emoji),
+                "--state", str(self.dir / "state.json"),
+                "--cache", str(self.dir / "cache.json"),
+                "--out", str(self.out),
+                "--candidates", str(self.dir / "cand.json"),
+                "--max-distance", "100", "--apply"]
+        with mock.patch.object(remap_ids, "Telegram", lambda token: tg), \
+                mock.patch.object(remap_ids, "PACK_LOCK", self.pack_lock), \
+                mock.patch.object(remap_ids.requests, "Session", lambda: session), \
+                mock.patch.object(remap_ids, "load_env", lambda: None), \
+                mock.patch.object(remap_ids, "setup_logging", lambda *a, **k: None), \
+                mock.patch.object(remap_ids.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "TOKEN123"}), \
+                mock.patch.object(sys, "argv", argv):
+            return remap_ids.main()
+
+    def test_a_provider_cannot_land_a_map_entry_during_the_live_read(self):
+        landed = []
+
+        def provider():
+            landed.append(_provider_top_up(self.pack_lock, self.out, "new", "z"))
+
+        tg = FakeTelegram({"s1": [_sticker("a")]}, on_read=provider)
+        rc = self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}))
+
+        self.assertEqual(rc, EXIT_OK)
+        # Refused, not raced: the provider never got to write an entry that this
+        # run's whole-file replacement would then have thrown away.
+        self.assertIsInstance(landed[0], LockBusy)
+        self.assertEqual(json.loads(self.out.read_text("utf-8")), {"btc": "a"})
+
+        # And the lock is released afterwards, so the provider's retry lands on
+        # the freshly rebuilt map instead of fighting it.
+        self.assertIsNone(_provider_top_up(self.pack_lock, self.out, "new", "z"))
+        self.assertEqual(json.loads(self.out.read_text("utf-8")),
+                         {"btc": "a", "new": "z"})
+
+    def test_a_held_pack_lock_stops_apply_before_it_reads_anything(self):
+        """LockBusy is an exit, not a traceback, and not a partial write."""
+        sess = FakeSession({"a": _png((200, 20, 20, 255))})
+        tg = FakeTelegram({"s1": [_sticker("a")]})
+        with exclusive_lock(self.pack_lock):
+            rc = self._main(tg, sess)
+
+        self.assertEqual(rc, EXIT_FAILED)
+        self.assertEqual(sess.fetched, [])       # the lock precedes the live read
+        self.assertEqual(json.loads(self.out.read_text("utf-8")), {"btc": "STALE"})
+        self.assertFalse(self.out.with_suffix(".prebroken.json").exists())
+
+
+class PackFamilyLockTest(unittest.TestCase):
+    def test_it_is_the_same_lock_the_pack_mutators_take(self):
+        """A lock of our own would serialise nothing.
+
+        rebuild_dedup, the fetchers and verify_logos --fix all key their lock on
+        this same base name; a drifted copy here reads as locked and excludes
+        nobody.
+        """
+        self.assertEqual(remap_ids.SET_BASE, rebuild_dedup.BASE)
+        self.assertEqual(remap_ids.PACK_LOCK, rebuild_dedup.LOCK)
+        self.assertEqual(remap_ids.PACK_LOCK,
+                         pack_family_lock_path(remap_ids.SET_BASE))
 
 
 class CheckAllPacksTest(unittest.TestCase):
