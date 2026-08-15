@@ -188,7 +188,13 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         tg.add_sticker.return_value = None
         tg.create_set.return_value = None
         tg.send_message.return_value = None
-        tg._sticker_matches.return_value = matches
+        if isinstance(matches, list):
+            # Per-sticker verdicts, in the order the reconciler examines them:
+            # "which of the arrivals is ours" is the question, so a fake that
+            # can only answer one way for all of them cannot pose it.
+            tg._sticker_matches.side_effect = list(matches)
+        else:
+            tg._sticker_matches.return_value = matches
         return tg
 
     def _run(self, tg):
@@ -238,6 +244,32 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         saved = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertNotIn("b", saved["done"],
                          "a stranger's sticker must not mark our item done")
+
+    def test_ours_behind_a_foreign_sticker_is_reconciled_not_stranded(self):
+        """expected + 2 is the NORMAL shape of the sequence this exists for.
+
+        Our attempt fails, a foreign sticker lands, our retry succeeds: the set
+        is two bigger than the snapshot. Demanding expected or expected+1 made
+        that a permanent EXIT_FAILED -- our sticker live, unrecorded, on every
+        subsequent run, one transient blip turned terminal. What decides it is
+        whether OUR image is among the arrivals, not how many arrived.
+        """
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": [], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
+            "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
+                          "set_index": 1, "expected_before": 0},
+        })
+        # Two stickers arrived; only the SECOND is ours.
+        tg = self._fake_tg(live_count=2, matches=[False, True])
+        self.assertNotEqual(self._run(tg), bp.EXIT_FAILED)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("b", saved["done"], "our live sticker was left off the books")
+        # The reconcile booked the size it actually SAW (2), not expected+1 (1);
+        # the run then continued and published the remaining item on top of it.
+        self.assertGreaterEqual(saved["sets"][0]["count"], 2,
+                                "the recorded size came from our own arithmetic, "
+                                "not from the set")
 
     def test_unexplained_drift_refuses_to_guess(self):
         # Two extra live stickers and no in-flight record: the old code silently
@@ -431,6 +463,68 @@ class PublisherLock(unittest.TestCase):
         os.utime(self.lock, (old, old))
         with bp.exclusive_lock(self.lock, stale_after=3600):
             pass          # must not raise
+
+    def _make_stale(self) -> None:
+        self.lock.write_text(json.dumps({"token": "gone", "pid": 999999999,
+                                         "started": "2020-01-01 00:00:00 UTC"}),
+                             encoding="utf-8")
+        old = time.time() - 10_000
+        os.utime(self.lock, (old, old))
+
+    def test_a_reclaiming_run_never_deletes_a_fresh_claim(self):
+        """Two runs judge the SAME dead record stale; only one may end up holding it.
+
+        The window is between deciding "the holder is gone" and acting on that
+        decision. An unconditional unlink there deletes whatever is on disk NOW,
+        including the lock a faster run has just claimed -- so the recovery path
+        itself hands the pack family to two live writers.
+
+        The other run's claim is planted inside the liveness check, which is the
+        last thing that happens before the old code would have unlinked.
+        """
+        self._make_stale()
+        real_alive = bp._lock_owner_is_alive
+        planted = {"done": False}
+
+        def alive(pid):
+            gone = real_alive(pid)              # the recorded pid really is gone
+            if not planted["done"]:
+                planted["done"] = True
+                self.lock.write_text('{"token": "other", "pid": 1}',
+                                     encoding="utf-8")
+            return gone
+
+        with mock.patch.object(bp, "_lock_owner_is_alive", alive):
+            with self.assertRaises(bp.LockBusy):
+                with bp.exclusive_lock(self.lock, stale_after=3600):
+                    self.fail("took a lock another run was already holding")
+        self.assertIn("other", self.lock.read_text(encoding="utf-8"),
+                      "the other run's claim was deleted")
+
+    def test_the_loser_of_a_reclaim_race_gets_the_ordinary_busy_answer(self):
+        """Both delete before either creates: O_EXCL decides, the loser backs off.
+
+        The loser used to take an uncaught FileExistsError out of the reclaim's
+        second _claim(), so callers that handle LockBusy saw a bare OSError from
+        a path that is simply "someone else got there first".
+        """
+        self._make_stale()
+        real_open = bp.os.open
+        calls = {"n": 0}
+
+        def racing_open(path, flags, *a, **kw):
+            calls["n"] += 1
+            # Call 1 is the opening claim (fails: the stale lock is still there).
+            # Call 2 is the reclaim's claim -- the other run wins it by a hair.
+            if calls["n"] == 2 and Path(path) == self.lock:
+                self.lock.write_text('{"token": "other", "pid": 1}',
+                                     encoding="utf-8")
+            return real_open(path, flags, *a, **kw)
+
+        with mock.patch.object(bp.os, "open", racing_open):
+            with self.assertRaises(bp.LockBusy):
+                with bp.exclusive_lock(self.lock, stale_after=3600):
+                    self.fail("claimed a lock another run had just taken")
 
 
 class TriStateLiveReads(unittest.TestCase):
@@ -653,6 +747,27 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
         saved = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertNotIn("t2_by_bot", [s["name"] for s in saved["sets"]],
                          "a foreign set must not be adopted")
+
+    def test_a_create_target_holding_EXTRA_stickers_is_never_adopted(self):
+        """A create leaves exactly ONE sticker.
+
+        A matching first sticker in a set of several proves only that our image
+        is in there somewhere; the set was not left by our interrupted create
+        alone. Adopting it books whatever else is in there as this run's work,
+        and the recorded count then drives every later expectation.
+        """
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"},
+                                                            {"file_unique_id": "extra"}]}),
+        }, matches=True)          # even a matching FIRST sticker is not enough
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED)
+        tg.create_set.assert_not_called()
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertNotIn("t2_by_bot", [s["name"] for s in saved["sets"]],
+                         "a set we may not have created must not be adopted")
+        self.assertNotIn("b", saved["done"])
 
     def test_an_unverifiable_create_target_stops_retryably(self):
         self._state()
@@ -1053,6 +1168,138 @@ class SharedLogoGuard(unittest.TestCase):
         self.assertLess(biggest, 20,
                         f"an emoji id is shared by {biggest} unreviewed tickers; "
                         f"this is the positional-drift signature")
+
+
+class _Resp:
+    """Minimal stand-in for a requests Response."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def json(self):
+        return self._payload
+
+
+class _ForeignWriterServer:
+    """Bot API fake in which the FIRST add lets a stranger's sticker in.
+
+    Our request fails at the network level while Telegram accepts someone
+    else's sticker -- exactly the shape ``_added_check`` answers False for, so
+    the retry uploads ours and the set ends up TWO bigger than it started.
+    """
+
+    def __init__(self, live: int = 1, on_add=None):
+        self.stickers = [{"file_unique_id": f"live{i}", "file_id": f"live{i}"}
+                         for i in range(live)]
+        self.adds = 0
+        self.probes = 0
+        self.probe_fails_from = None     # nth getStickerSet onwards fails
+        self.on_add = on_add
+
+    def post(self, url, data=None, files=None, timeout=None):
+        method = url.rsplit("/", 1)[-1]
+        if method == "getMe":
+            return _Resp({"ok": True, "result": {"username": "bot"}})
+        if method == "sendMessage":
+            return _Resp({"ok": True, "result": {}})
+        if method == "getStickerSet":
+            self.probes += 1
+            if self.probe_fails_from and self.probes >= self.probe_fails_from:
+                raise requests.ConnectionError("probe failed")
+            return _Resp({"ok": True, "result": {"stickers": list(self.stickers)}})
+        if method == "addStickerToSet":
+            self.adds += 1
+            if self.on_add is not None:
+                self.on_add()
+            if self.adds == 1:
+                self.stickers.append({"file_unique_id": "foreign",
+                                      "file_id": "foreign"})
+                raise requests.ReadTimeout("timeout; ours never applied")
+            self.stickers.append({"file_unique_id": f"ours{self.adds}",
+                                  "file_id": f"ours{self.adds}"})
+            return _Resp({"ok": True, "result": True})
+        raise AssertionError(f"unexpected method {method}")
+
+
+class BookkeepingFollowsLiveState(unittest.TestCase):
+    """A retried add can move the set by TWO, not one.
+
+    The applied-check correctly refuses a foreign sticker and the retry uploads
+    ours, so the set grows twice while the run books a single add. Every later
+    ``expected_before`` is derived from that number, so from then on the state
+    describes a set that no longer exists.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "src"
+        _png(self.src / "b.png", (200, 0, 0, 255))
+        _png(self.src / "c.png", (0, 200, 0, 255))
+        self.state = self.dir / "state.json"
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": ["a"], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 1, "index": 1}],
+            "in_flight": None,
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _tg(self, server):
+        tg = bp.Telegram("TESTTOKEN")
+        tg.s = server
+        # Only the stranger's sticker fails the content comparison; the real
+        # comparison downloads and decodes, which is covered elsewhere.
+        tg._sticker_matches = lambda st, src: st["file_unique_id"].startswith("ours")
+        return tg
+
+    def _run(self, server):
+        argv = ["build_pack.py", "--base", "t", "--title", "T", "--user-id", "1",
+                "--source-dir", str(self.src), "--token-env", "FAKE_TOKEN",
+                "--state", str(self.state)]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.dict("os.environ", {"FAKE_TOKEN": "x"}, clear=False), \
+             mock.patch.object(bp, "Telegram", return_value=self._tg(server)), \
+             mock.patch.object(bp.time, "sleep", lambda s: None):
+            return bp.main()
+
+    def test_a_foreign_sticker_during_a_retry_does_not_drift_the_count(self):
+        intents = []
+        srv = _ForeignWriterServer(live=1, on_add=lambda: intents.append(
+            json.loads(self.state.read_text(encoding="utf-8"))["in_flight"]))
+        self.assertEqual(self._run(srv), bp.EXIT_OK)
+
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(saved["sets"][0]["count"], len(srv.stickers),
+                         "the recorded count must describe the live set")
+        # b was retried past a foreign sticker (1 live + foreign + ours = 3),
+        # so c must be announced against 3 -- not the assumed 2.
+        self.assertEqual([i["expected_before"] for i in intents], [1, 1, 3])
+        self.assertEqual([i["key"] for i in intents], ["b", "b", "c"])
+        self.assertEqual(sorted(saved["done"]), ["a", "b", "c"])
+
+    def test_an_unknown_size_after_a_retried_add_is_not_guessed(self):
+        """The add landed, so it must not be re-sent -- and must not be booked
+        at a guessed size either: the caller keeps the intent and reconciles."""
+        srv = _ForeignWriterServer(live=1)
+        srv.probe_fails_from = 3          # the size probe after the retry
+        tg = self._tg(srv)
+        with self.assertRaises(bp.AmbiguousUploadError):
+            tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
+                           bp.DEFAULT_EMOJI, "kw", expected_before=1)
+        self.assertEqual(srv.adds, 2, "the add landed; it must not be re-sent")
+
+    def test_an_undisturbed_add_costs_no_extra_probe(self):
+        """The fix must not add a round trip per sticker."""
+        srv = _ForeignWriterServer(live=1)
+        srv.adds = 1                      # skip the foreign-writer attempt
+        tg = self._tg(srv)
+        live = tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
+                              bp.DEFAULT_EMOJI, "kw", expected_before=1)
+        self.assertIsNone(live, "a clean add stays at the assumed +1")
+        self.assertEqual(srv.probes, 1, "only the pre-add identity snapshot")
 
 
 if __name__ == "__main__":

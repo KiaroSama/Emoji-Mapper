@@ -268,8 +268,10 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
         _claim()
     except FileExistsError:
         held = {}
+        stale_record = None       # the EXACT bytes judged stale, for the CAS below
         try:
-            held = json.loads(path.read_text(encoding="utf-8"))
+            stale_record = path.read_text(encoding="utf-8")
+            held = json.loads(stale_record)
         except (OSError, ValueError):
             pass
         age = 0.0
@@ -285,8 +287,41 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
                 f"Refusing to mutate the same pack family concurrently.")
         print(f"  reclaiming lock {path.name}: pid {holder_pid} is gone "
               f"({age:.0f}s old)", flush=True)
-        path.unlink(missing_ok=True)
-        _claim()
+        # Reclaiming is the one path where two processes can both decide to act:
+        # they read the SAME stale record, and an unconditional unlink + create
+        # let the second one delete the first one's freshly claimed lock and
+        # take the family for itself -- two live holders, which is precisely
+        # what this lock exists to prevent, arrived at through its recovery path.
+        #
+        # Three guards, because each closes a different order of events:
+        #   1. delete only while the stale record we judged is still the one on
+        #      disk, so a process that read the OLD record cannot remove a NEW
+        #      holder's claim;
+        #   2. O_EXCL still decides the winner if both delete before either
+        #      creates -- the loser must back off, not claim on top;
+        #   3. read our own token back, because neither check above is atomic
+        #      with respect to the other process's whole sequence.
+        try:
+            if path.read_text(encoding="utf-8") == stale_record:
+                path.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
+        try:
+            _claim()
+        except FileExistsError:
+            raise LockBusy(
+                f"{path.name} was reclaimed by another run while this one was "
+                f"reclaiming it too. Refusing to mutate the same pack family "
+                f"concurrently.") from None
+        try:
+            mine = path.read_text(encoding="utf-8") == record
+        except OSError:
+            mine = False
+        if not mine:
+            raise LockBusy(
+                f"{path.name} was taken by another run immediately after this "
+                f"one claimed it. Refusing to mutate the same pack family "
+                f"concurrently.")
 
     def heartbeat() -> None:
         """Refresh the mtime so a healthy long run is never judged stale."""
@@ -600,6 +635,11 @@ class Telegram:
             return None
 
         def check():
+            # Remember that a live probe was needed. A failed attempt can let a
+            # FOREIGN sticker in before our retry lands, so the set grows by two
+            # while the caller counts one; ``_live_after_add`` re-reads the size
+            # whenever this ran instead of assuming an increment.
+            check.fired = True
             known, sset = self.probe_sticker_set(name)
             if not known or sset is None:
                 return None  # unknown / set vanished: reconcile, don't guess
@@ -632,7 +672,50 @@ class Telegram:
                 return False         # a foreign sticker landed; ours did not
             return None              # could not verify: reconcile, don't guess
 
+        check.fired = False
+        # Exposed so the post-add size read can require the set to actually
+        # contain something new, rather than trusting a bare len().
+        check.known_before = known_before
         return check
+
+    def _live_after_add(self, name: str, check) -> int | None:
+        """The set's live size after an add, or None when +1 is sound.
+
+        Only a RETRIED add can move the size by anything but one: the attempt
+        that failed may have let a foreign sticker in (``_added_check`` answers
+        False for exactly that, which re-sends ours), leaving the set two bigger
+        while the caller counts one. Every later ``expected_before`` is derived
+        from that number, so it has to describe the set rather than our own
+        intentions. Probing only when the check actually ran keeps the cost at
+        one extra round trip per network failure instead of one per sticker.
+        """
+        if check is None or not check.fired:
+            return None
+        known, sset = self.probe_sticker_set(name)
+        # A bare len() is not a measurement of the set we just wrote to. Two
+        # answers look like a number and are not one:
+        #   * a read that has not caught up with our own acknowledged write
+        #     reports one too few -- this client already assumes that lag
+        #     elsewhere (it sleeps before probing), and booking the short count
+        #     puts every later expected_before permanently out by one;
+        #   * a MISSING set reports ZERO, which the caller reads as an empty set
+        #     and answers by creating a second pack, sending its link, exiting 0.
+        # Both are excluded by requiring the read to actually CONTAIN the
+        # sticker we just added. Anything else is "no answer", which is what
+        # AmbiguousUploadError already means here.
+        if not known or sset is None:
+            raise AmbiguousUploadError(
+                f"addStickerToSet applied after a retry but {name} could not be "
+                f"read back afterwards (unknown live state, or the set is gone)")
+        stickers = sset.get("stickers", [])
+        now = _usable_fuids(stickers)
+        if now is not None and check.known_before is not None:
+            if not (now - check.known_before):
+                raise AmbiguousUploadError(
+                    f"addStickerToSet reported success for {name} but the set "
+                    f"read back afterwards holds no sticker that was not "
+                    f"already there; its size cannot be trusted")
+        return len(stickers)
 
     def set_fuids(self, name: str) -> set[str] | None:
         """Usable identities of a set's stickers, or None when there are none.
@@ -738,7 +821,7 @@ class Telegram:
 
     def add_sticker(self, user_id: int, name: str, png: Path,
                     emoji: str, keywords: str, *,
-                    expected_before: int | None = None) -> None:
+                    expected_before: int | None = None) -> int | None:
         """Add a static sticker. Pass ``expected_before`` (the live sticker
         count the caller expects BEFORE this add) to make network retries
         duplicate-proof; without it the historical blind retry is kept.
@@ -746,14 +829,20 @@ class Telegram:
         The set's identities are snapshotted first so the applied-check can ask
         "did exactly one NEW sticker appear?" rather than "is the count one
         higher?", which a concurrent writer can satisfy while our own request
-        failed."""
+        failed.
+
+        Returns the live sticker count when the add had to be retried, else
+        None -- see ``_live_after_add``, which explains why the caller may not
+        simply add one in that case."""
         before = self.set_fuids(name) if expected_before is not None else None
+        check = self._added_check(name, expected_before,
+                                  known_before=before, source=png)
         self._call("addStickerToSet", data={
             "user_id": user_id, "name": name,
             "sticker": json.dumps(_sticker_json(emoji, keywords)),
         }, files={"file0": (png.name, png.read_bytes(), "image/png")},
-            applied_check=self._added_check(name, expected_before,
-                                            known_before=before, source=png))
+            applied_check=check)
+        return self._live_after_add(name, check)
 
     # ----- multi-format helpers (static / animated / video) -------------- #
     def get_sticker_set(self, name: str) -> dict:
@@ -807,18 +896,21 @@ class Telegram:
 
     def add_emoji(self, user_id: int, name: str, path: Path, fmt: str,
                   emoji_list: list[str], keywords: list[str], *,
-                  expected_before: int | None = None) -> None:
+                  expected_before: int | None = None) -> int | None:
         """Add one emoji (any format) to an existing custom-emoji set.
 
         ``expected_before`` (the live sticker count expected BEFORE this add)
-        makes network retries duplicate-proof; see ``add_sticker``."""
+        makes network retries duplicate-proof, and the return value reports the
+        live size after a retry; see ``add_sticker``."""
         before = self.set_fuids(name) if expected_before is not None else None
+        check = self._added_check(name, expected_before,
+                                  known_before=before, source=path)
         self._call("addStickerToSet", data={
             "user_id": user_id, "name": name,
             "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
         }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
-            applied_check=self._added_check(name, expected_before,
-                                            known_before=before, source=path))
+            applied_check=check)
+        return self._live_after_add(name, check)
 
 
 _MIME_BY_FORMAT = {
@@ -1066,6 +1158,17 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
         if operation == "create":
             if set_state is SetState.EXISTS:
                 live_n = len(sset.get("stickers", []))
+                # A create leaves EXACTLY one sticker. A set holding more was
+                # not left by our interrupted create alone, so a matching first
+                # sticker proves nothing about the rest -- adopting it records
+                # someone else's stickers as this run's own.
+                if live_n != 1:
+                    print(f"ERROR: {target} holds {live_n} stickers, but the "
+                          f"unresolved create of {in_flight} would have left "
+                          f"exactly one.\n"
+                          f"       Refusing to adopt a set this run may not have "
+                          f"created.", file=sys.stderr)
+                    return EXIT_FAILED
                 first = (sset.get("stickers") or [None])[0]
                 proof = (tg._sticker_matches(first, in_flight_src)
                          if first is not None and in_flight_src else None)
@@ -1106,41 +1209,54 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                       f"records no expected count; refusing to guess.",
                       file=sys.stderr)
                 return EXIT_FAILED
-            if live_n == expected + 1:
-                # One more sticker than before is NOT proof it is ours: an
-                # external or manual add produces exactly the same count while
-                # our request failed. Marking the item done on that evidence
-                # binds our source to a stranger's sticker.
-                newest = sset.get("stickers", [])[-1]
-                proof = (tg._sticker_matches(newest, in_flight_src)
-                         if in_flight_src else None)
-                if proof is True:
-                    done.add(in_flight)
-                    pending = [p for p in pending if p.stem.lower() != in_flight]
-                    if recorded is not None:
-                        recorded["count"] = live_n
-                    print(f"  reconciled from live: {in_flight} was applied "
-                          f"before the interruption", flush=True)
-                elif proof is False:
-                    print(f"ERROR: {target} grew by one, but that sticker is not "
-                          f"{in_flight} -- someone else wrote to this set.\n"
-                          f"       Refusing to attribute it to this run.",
-                          file=sys.stderr)
-                    return EXIT_FAILED
-                else:
-                    print(f"ERROR: cannot verify whether the sticker added to "
-                          f"{target} is {in_flight}.\n"
-                          f"       Refusing to guess. Retry when the image can "
-                          f"be compared.", file=sys.stderr)
-                    return EXIT_PARTIAL
-            elif live_n == expected:
-                print(f"  {in_flight} did not land; it stays pending", flush=True)
-            else:
+            if live_n < expected:
                 print(f"ERROR: {target} holds {live_n} stickers but the "
-                      f"unresolved add expected {expected} or {expected + 1}.\n"
-                      f"       Someone else changed this set; refusing to guess "
-                      f"which images are live.", file=sys.stderr)
+                      f"unresolved add of {in_flight} expected at least "
+                      f"{expected}.\n       Stickers were removed; refusing to "
+                      f"guess which images are live.", file=sys.stderr)
                 return EXIT_FAILED
+            # Counting cannot answer this. The sequence this reconciler exists
+            # for -- our attempt fails, a FOREIGN sticker lands, our retry then
+            # succeeds -- leaves the set two bigger, and demanding expected or
+            # expected+1 turned that into a permanent EXIT_FAILED with our
+            # sticker live and off the books forever. Ask the only question that
+            # matters instead: is OUR image among the ones that arrived?
+            #
+            # Bounded by the drift, not by the set: adds append, so anything
+            # that arrived after our snapshot sits past `expected`. In practice
+            # that is one or two stickers, not two hundred.
+            arrived = sset.get("stickers", [])[expected:]
+            verdicts = ([tg._sticker_matches(st, in_flight_src) for st in arrived]
+                        if in_flight_src else [None] * len(arrived))
+            if any(v is True for v in verdicts):
+                # Ours is there. WHAT ELSE arrived does not change that, which
+                # is the whole point: expected+2 is the normal outcome of a
+                # foreign sticker landing between our failed attempt and our
+                # successful retry, and rejecting it stranded a live sticker
+                # off the books permanently.
+                done.add(in_flight)
+                pending = [p for p in pending if p.stem.lower() != in_flight]
+                if recorded is not None:
+                    recorded["count"] = live_n
+                print(f"  reconciled from live: {in_flight} was applied "
+                      f"before the interruption", flush=True)
+            elif not arrived:
+                print(f"  {in_flight} did not land; it stays pending", flush=True)
+            elif all(v is False for v in verdicts):
+                # Ours is provably absent, yet the set grew: a hand edit, not
+                # our upload. The counts every later position is derived from
+                # are no longer ours to reason about.
+                print(f"ERROR: {target} grew by {len(arrived)}, and none of "
+                      f"those stickers is {in_flight} -- someone else wrote to "
+                      f"this set.\n       Refusing to attribute it to this run.",
+                      file=sys.stderr)
+                return EXIT_FAILED
+            else:
+                print(f"ERROR: cannot verify whether {in_flight} is among the "
+                      f"{len(arrived)} sticker(s) added to {target} since this "
+                      f"run's snapshot.\n       Refusing to guess. Retry when "
+                      f"the images can be compared.", file=sys.stderr)
+                return EXIT_PARTIAL
         state["in_flight"] = None                # verified postcondition
 
     # 2) Every RECORDED set must still match what state claims. A set that was
@@ -1256,9 +1372,15 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                 placed = False
                 if in_set != 0:
                     try:
-                        tg.add_sticker(args.user_id, set_name, path, args.emoji, kw,
-                                       expected_before=in_set)
-                        sets[-1]["count"] += 1
+                        live = tg.add_sticker(args.user_id, set_name, path,
+                                              args.emoji, kw,
+                                              expected_before=in_set)
+                        # A retried add reports what is actually live: the failed
+                        # attempt can have let a foreign sticker in, so the set
+                        # grew by two while this counted one. Assuming +1 there
+                        # made every later expected_before wrong by one.
+                        sets[-1]["count"] = (sets[-1]["count"] + 1 if live is None
+                                             else live)
                         placed = True
                     except RuntimeError as exc:
                         # Set is full (count drift or 200-limit): roll to a new set.
@@ -1290,8 +1412,18 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                 # later run can re-send an upload that already landed.
                 if not placed and in_set == 0:
                     set_state, sset = tg.probe_set_state(set_name)
-                    if set_state is SetState.EXISTS and \
-                            len(sset.get("stickers", [])) == 1:
+                    stickers = (sset or {}).get("stickers", [])
+                    # Shape is not identity -- the same lesson the restart branch
+                    # already learned. A set of this name holding one sticker may
+                    # be a stranger's; adopting it on the count records a foreign
+                    # pack as ours, marks this item done though it was never
+                    # uploaded, publishes the link, and then keeps writing our
+                    # stickers into someone else's set. Our create puts our image
+                    # in first, so that is what has to answer.
+                    ours = (tg._sticker_matches(stickers[0], path)
+                            if set_state is SetState.EXISTS and len(stickers) == 1
+                            else None)
+                    if ours is True:
                         sets.append({"name": set_name, "title": title, "count": 1,
                                      "index": set_index})
                         created.append(set_name)
@@ -1322,7 +1454,10 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                 save_state()
                 print(f"  skip {ticker}: {exc}", flush=True)
                 continue
-            in_set += 1
+            # Follow the recorded set rather than incrementing separately: after
+            # a retried add that number is the live size, and two counters that
+            # advance independently drift apart exactly when it matters.
+            in_set = sets[-1]["count"]
             uploaded += 1
             done.add(ticker)
             state["in_flight"] = None
