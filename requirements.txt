@@ -6,11 +6,9 @@
 
 requests>=2.32          # Telegram Bot API calls (build_pack.py, check_all_packs.py)
 Pillow>=12.3.0          # image decode / 100x100 fitting
-# numpy pinned <2.5: numpy 2.5+ requires Python >=3.12, but this project targets
-# 3.11 (reportlab<4 SVG backend ships wheels for 3.11, not 3.12). Max on 3.11 is 2.4.x.
-numpy>=1.26,<2.5        # SVG alpha recovery (make_emoji_pngs.py)
-# svglib 2.x + reportlab 4.x require the external rlPyCairo/cairo backend for
-# rasterizing SVGs. Pin to the 1.x/3.x line which ships the built-in renderPM
-# backend so SVG -> PNG works out of the box (no system cairo needed).
-svglib>=1.5,<2         # SVG -> ReportLab drawing
-reportlab>=3.6,<4      # rasterize SVG drawings to pixels (bundled backend)
+numpy>=1.26             # image signature matching (coins/remap_ids.py)
+# SVG -> RGBA PNG. resvg is a self-contained Rust renderer shipped as a wheel:
+# no system cairo, no build toolchain, and it renders gradients (the previous
+# svglib/reportlab backend produced a blank image for those, and reportlab's
+# bundled renderPM C backend was removed upstream in reportlab 5.0).
+resvg-py>=0.4           # note: the import name is resvg_py
