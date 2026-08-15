@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -167,6 +168,67 @@ class TestBuildPayloads(unittest.TestCase):
         rich = b.build_payloads(ids, rich=True)
         plain = b.build_payloads(ids, rich=False)
         self.assertEqual(len(rich), len(plain))
+
+
+class TestCopyButtonLimit(unittest.TestCase):
+    """CopyTextButton.text is capped at 256 chars by the Bot API.
+
+    Packing a fixed 12 ids per button overflowed as soon as ids were long: the
+    id parser accepts up to 25 digits, and 12 of those plus newlines is 312.
+    """
+
+    def _assert_covers(self, ids):
+        kb = b._copy_keyboard(ids)["inline_keyboard"]
+        copied = []
+        for row in kb:
+            text = row[0]["copy_text"]["text"]
+            self.assertLessEqual(len(text), b.COPY_MAX,
+                                 f"button text {len(text)} > {b.COPY_MAX}")
+            copied.extend(text.strip().split("\n"))
+        self.assertEqual(copied, ids, "every id exactly once, in order")
+        return kb
+
+    def test_short_ids_fit_one_button(self):
+        kb = self._assert_covers(["5899781975"] * 3)
+        self.assertEqual(len(kb), 1)
+
+    def test_nineteen_digit_ids(self):
+        self._assert_covers([str(10**18 + i) for i in range(12)])
+
+    def test_max_length_ids_are_split(self):
+        ids = [str(9) * 25 for _ in range(12)]
+        kb = self._assert_covers(ids)
+        self.assertGreater(len(kb), 1, "must split rather than overflow")
+
+    def test_many_max_length_ids(self):
+        self._assert_covers([str(9) * 25 for _ in range(50)])
+
+    def test_single_id(self):
+        self._assert_covers(["5899781975"])
+
+
+class TestOffsetPersistence(unittest.TestCase):
+    """A restart must not replay updates that were already handled."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig = b.OFFSET_FILE
+        b.OFFSET_FILE = Path(self.tmp.name) / "state_emoji_bot.json"
+
+    def tearDown(self):
+        b.OFFSET_FILE = self._orig
+        self.tmp.cleanup()
+
+    def test_missing_file_starts_at_zero(self):
+        self.assertEqual(b._load_offset(), 0)
+
+    def test_roundtrip(self):
+        b._save_offset(4242)
+        self.assertEqual(b._load_offset(), 4242)
+
+    def test_corrupt_file_falls_back_to_zero(self):
+        b.OFFSET_FILE.write_text("{not json", encoding="utf-8")
+        self.assertEqual(b._load_offset(), 0)
 
 
 if __name__ == "__main__":
