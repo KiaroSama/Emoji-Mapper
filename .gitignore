@@ -70,6 +70,8 @@ collection_archive/
 # ---------------------------------------------------------------------------
 pack_state.json
 state_*.json
+# Pack-family mutation locks (runtime only, one per publishing run).
+/.locks/
 rebuild_state.json
 rebuild_dedup_state.json
 rebuild_dedup_plan.json

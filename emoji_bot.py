@@ -24,7 +24,7 @@ import os
 import time
 from pathlib import Path
 
-from build_pack import Telegram, load_env, write_json_atomic
+from build_pack import (Telegram, load_env, safe_int_env, write_json_atomic)
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 log = logging.getLogger("emoji_bot")
@@ -288,7 +288,7 @@ def allowed_user_ids() -> set[int]:
     """
     raw = os.environ.get("BOT_ALLOWED_USER_IDS", "").strip()
     if not raw:
-        owner = int(os.environ.get("PACK_OWNER_USER_ID", "0") or 0)
+        owner = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
         return {owner} if owner > 0 else set()
     out: set[int] = set()
     for part in raw.replace(";", ",").split(","):
@@ -353,7 +353,7 @@ def main() -> int:
     if not token:
         log.error("GENERAL_BOT_TOKEN not set (.env).")
         return 2
-    owner_id = int(os.environ.get("PACK_OWNER_USER_ID", "0"))
+    owner_id = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
     if owner_id <= 0:
         # Zero is not a usable chat id; without this the bot polls happily and
         # only fails later, per message, when it tries to reply.
