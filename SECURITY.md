@@ -14,10 +14,17 @@ never hard-coded in source:
 Rules:
 
 - Never commit `.env`. Use `.env.example` as a template.
-- Bot tokens are never printed, logged, or embedded in URLs/exceptions shown to
-  users. If you add logging, redact token values.
+- Never use a real credential as a test fixture. `tests/test_logsetup.py`
+  enforces this: it fails if any secret-length value from `.env` appears in a
+  git-tracked file.
+- Bot tokens must not reach stdout, stderr or a log file. The token is embedded
+  in every request URL, so exception text is redacted before printing
+  (`Telegram._safe`), and the uncaught-exception hook renders its own redacted
+  traceback rather than delegating to the default hook. If you add logging or a
+  new `print` on an error path, route the text through `logsetup.redact`.
 - A leaked bot token should be revoked immediately via @BotFather (`/revoke`),
-  then update `.env`.
+  then update `.env`. Removing a secret from a file does **not** remove it from
+  git history — rotate the credential as well.
 
 ## Reporting a vulnerability
 
