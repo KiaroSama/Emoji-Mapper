@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-from build_pack import Telegram, load_env
+from build_pack import Telegram, ingest_exit_code, load_env
 from emojikit import media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
 from emojikit.logsetup import redact, setup_logging
@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Done. new={total['new']} dedup={total['dedup']} failed={total['failed']}", flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
-    return 0
+    return ingest_exit_code(total["new"] + total["dedup"], total["failed"])
 
 
 if __name__ == "__main__":
