@@ -39,6 +39,10 @@ os.environ.pop("BOT_ALLOWED_USER_IDS", None)
 # built before the socket guard bites still cannot reach Telegram.
 os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9"   # discard port
 
+# Several modules call load_env() at import time, which would read .env and put
+# the real credentials straight back. Honoured by build_pack.load_env().
+os.environ["EMOJI_MAPPER_NO_DOTENV"] = "1"
+
 
 # --- 2. Refuse outbound connections ----------------------------------------- #
 class NetworkAccessDenied(RuntimeError):
