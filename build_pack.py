@@ -427,7 +427,17 @@ class Telegram:
         return self._call("getMe")
 
     def send_message(self, chat_id: int | str, text: str) -> None:
-        self._call("sendMessage", data={
+        """Send a notification.
+
+        sendMessage is not idempotent and the Bot API offers no dedup key, so a
+        network failure AFTER Telegram accepted the message cannot be told from
+        one before -- a retry may post the link twice. Callers guard against
+        repeats across runs (``state["sent"]``); within a run the exposure is
+        bounded by retrying only once instead of the default five times, which
+        keeps a genuine transient blip recoverable without turning one outage
+        into five identical posts.
+        """
+        self._call("sendMessage", retries=2, data={
             "chat_id": chat_id, "text": text, "disable_web_page_preview": False,
         })
 
