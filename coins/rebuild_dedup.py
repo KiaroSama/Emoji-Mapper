@@ -64,6 +64,12 @@ BASE = "gvcryptoemoji"
 # One lock for the whole pack family, keyed on BASE. Naming it after this
 # tool's state file made it a different lock from the fetchers' coin_pack.lock,
 # so a rebuild and a provider top-up could append to the same live sets at once.
+#
+# LOCK ORDER, project-wide: the pack-family lock is always taken BEFORE
+# canonical_map_lock(), never the other way round (rebuild_dedup.build,
+# verify_logos --fix, fetch_paprika.publish_logos all follow it). A tool that
+# only rewrites the map -- alias_map, enhance_map, remap_ids --apply, and
+# map_and_fill below -- takes the map lock alone, so no cycle exists.
 LOCK = pack_family_lock_path(BASE)
 TITLE = "@GodVerify Crypto Emoji"
 EMOJI_CHAR = "\U0001FA99"
@@ -195,7 +201,29 @@ def _count(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _state_problem(s, plan_len: int | None) -> str:
+def _order_walks_plan(order: list[str], processed: list[str]) -> str:
+    """Why ``order`` cannot be the uploads of ``processed``, or "".
+
+    ``order`` must be a SUBSEQUENCE of the plan prefix the cursor claims to
+    have walked. It is not the same list: an entry can be skipped (missing,
+    blank, permanently rejected by Telegram) and produce no sticker. But
+    nothing can be uploaded that the cursor never reached, nothing twice, and
+    nothing out of plan order -- each of those means the cursor and the upload
+    record describe different walks, and the build would either re-upload a
+    live image or skip one it believes is done.
+    """
+    remaining = iter(processed)
+    for rep in order:
+        # ``in`` on an ITERATOR consumes up to and including the match, so this
+        # loop is exactly the subsequence test, in one pass.
+        if rep not in remaining:
+            return (f"'order' records {rep!r}, which is not among the first "
+                    f"{len(processed)} plan entries the cursor claims were "
+                    f"processed, in that order")
+    return ""
+
+
+def _state_problem(s, plan: list[dict] | None) -> str:
     """Why this resume state must not drive a mutation, or "" when it may.
 
     build_pack.validate_state_shape covers the *publisher* schema (base/done/
@@ -204,6 +232,11 @@ def _state_problem(s, plan_len: int | None) -> str:
     ``plan[-1]`` the first upload AND leaves it to be uploaded again at the end,
     and a cursor past the plan reports the rebuild finished without ever having
     walked it.
+
+    ``plan`` is the frozen upload order. With it, cursor and order are checked
+    against each other rather than only for shape -- cursor=0 beside
+    order=["aaa"] is structurally perfect and still means the build is about to
+    upload ``aaa`` a second time.
     """
     if not isinstance(s, dict):
         return "state is not an object"
@@ -246,8 +279,18 @@ def _state_problem(s, plan_len: int | None) -> str:
     cursor = s.get("cursor", 0)
     if not _count(cursor):
         return f"cursor {cursor!r} is not a plan position"
-    if plan_len is not None and cursor > plan_len:
-        return f"cursor {cursor} is past the end of the {plan_len}-entry plan"
+    reps = None if plan is None else [g.get("rep") for g in plan]
+    if reps is not None:
+        if cursor > len(reps):
+            return (f"cursor {cursor} is past the end of the {len(reps)}-entry "
+                    f"plan")
+        walk = _order_walks_plan(order, reps[:cursor])
+        if walk:
+            return walk
+    if order and not s.get("sets", []):
+        # Every recorded upload went into a recorded set. Uploads with nowhere
+        # to live means the two halves of the state came from different runs.
+        return f"{len(order)} upload(s) are recorded but no set holds them"
 
     marker = s.get("in_flight")
     if marker is None or isinstance(marker, str):
@@ -264,14 +307,21 @@ def _state_problem(s, plan_len: int | None) -> str:
     expected = marker.get("expected_before")
     if expected is not None and not _count(expected):
         return f"in_flight expected_before {expected!r} is not a count"
+    if reps is not None and (not cursor or reps[cursor - 1] != marker["key"]):
+        # The cursor is advanced past an entry BEFORE its mutation is recorded,
+        # so an in-flight marker is always the entry the cursor just passed.
+        # Any other pairing reconciles one plan entry's outcome onto another.
+        return (f"in_flight {marker['key']!r} is not plan entry {cursor}, the "
+                f"one the cursor was moved past to run it")
     return ""
 
 
-def load_state(plan_len: int | None = None) -> dict:
+def load_state(plan: list[dict] | None = None) -> dict:
     """Load the resume state, refusing anything a mutation cannot be built on.
 
-    Callers that are about to upload or delete pass ``plan_len`` so the cursor
-    is bounded by the plan it indexes.
+    Callers that are about to upload or delete pass the frozen ``plan`` so the
+    cursor, the recorded upload order and the in-flight marker are checked
+    against the list they all index -- not merely against each other.
     """
     if not STATE.is_file():
         return {"sets": [], "sent": [], "deleted_old": False, "final_sent": False,
@@ -287,7 +337,7 @@ def load_state(plan_len: int | None = None) -> dict:
             f"every image already published.\n"
             f"       Inspect the file (a .tmp sibling may hold the last "
             f"write) and restore it deliberately.")
-    problem = _state_problem(state, plan_len)
+    problem = _state_problem(state, plan)
     if problem:
         raise SystemExit(
             f"ERROR: resume state {STATE.name} is not internally consistent "
@@ -476,13 +526,31 @@ def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
     known_sets = {s["name"] for s in state["sets"]}
     landed = False
     if marker.get("operation") == "create":
-        # A create is self-identifying: the set carries our sticker because the
-        # call that made the set is the call that put it there.
         set_state, sset = tg.probe_set_state(marker["set_name"])
         if set_state is SetState.UNKNOWN:
             _stop_retryable(f"live state of {marker['set_name']} is unknown; "
                             f"cannot tell whether the in-flight create landed")
         landed = set_state is SetState.EXISTS
+        if landed:
+            # EXISTENCE IS NOT IDENTITY. A set of that name can pre-exist -- a
+            # leftover from an earlier family, or someone else's -- and
+            # adopting it on the name alone attaches this rebuild's state, and
+            # every later add, to a pack we never created. Our create put our
+            # image in first, so that is what proves it.
+            png = EMOJI / f"{marker['key']}.png"
+            stickers = sset.get("stickers") or []
+            same = (tg._sticker_matches(stickers[0], png)
+                    if stickers and png.is_file() else None)
+            if same is False:
+                _stop_retryable(
+                    f"{marker['set_name']} exists but its first sticker is not "
+                    f"{png.name}; refusing to adopt a set this rebuild did not "
+                    f"create")
+            if same is not True:
+                _stop_retryable(
+                    f"{marker['set_name']} exists but its first sticker could "
+                    f"not be compared with {png.name}; refusing to adopt a set "
+                    f"on an unverified identity")
         if landed and marker["set_name"] not in known_sets:
             live = len(sset.get("stickers", []))
             index = marker.get("set_index") or len(state["sets"]) + 1
@@ -521,7 +589,7 @@ def _build(tg: Telegram, bot: str) -> None:
     plan = load_plan()
     # Validated against the plan BEFORE the delete phase: a state that cannot be
     # trusted must never get as far as destroying the existing packs.
-    state = load_state(len(plan))
+    state = load_state(plan)
     state.setdefault("order", [])  # actual successful-upload order (drift-proof map)
 
     if not USER_ID:
@@ -536,21 +604,16 @@ def _build(tg: Telegram, bot: str) -> None:
             f"       Expected prepared 100x100 PNGs in {EMOJI}.\n"
             f"       Refusing to delete the existing packs.")
 
-    if not state.get("deleted_old"):
-        print(f"deleting ALL old packs and rebuilding {len(plan)} images...",
-              flush=True)
-        if not delete_old_packs(tg, state):
-            _stop_retryable("some old packs still exist; refusing to build a "
-                            "second family beside them")
-        state["deleted_old"] = True
-        save_state(state)
-
     # Resume position comes from the RECORDED cursor, never from the live
     # sticker count. A plan entry that is skipped (missing / blank / failed)
     # consumes a plan position but produces no sticker, so `sum(live)` drifts
     # behind the plan index by one per skip -- resuming at plan[sum(live)] then
     # re-uploads entries that are already published, which is exactly how
     # duplicates and the mis-aligned ticker map were produced.
+    #
+    # This reconciliation runs BEFORE the delete phase on purpose. It reads only
+    # the NEW sets, so it does not depend on the old packs -- and a state that
+    # disagrees with live Telegram must never get as far as destroying them.
     state.setdefault("cursor", 0)
     state.setdefault("in_flight", None)
     cum = 0
@@ -580,6 +643,15 @@ def _build(tg: Telegram, bot: str) -> None:
 
     print(f"resume: {len(state['sets'])} sets, {cum} live stickers, "
           f"plan position {state['cursor']}/{len(plan)}", flush=True)
+
+    if not state.get("deleted_old"):
+        print(f"deleting ALL old packs and rebuilding {len(plan)} images...",
+              flush=True)
+        if not delete_old_packs(tg, state):
+            _stop_retryable("some old packs still exist; refusing to build a "
+                            "second family beside them")
+        state["deleted_old"] = True
+        save_state(state)
 
     if state["sets"] and state["sets"][-1]["live"] < PER_SET:
         cur = state["sets"][-1]
@@ -787,7 +859,7 @@ def resolve_by_image(tg: Telegram, live: list[tuple[str, str]],
 
 def map_and_fill(tg: Telegram) -> None:
     plan = load_plan()
-    state = load_state(len(plan))
+    state = load_state(plan)
     sets = sorted(state["sets"], key=lambda x: x["index"])
     live: list[tuple[str, str]] = []
     for s in sets:

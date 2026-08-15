@@ -124,6 +124,12 @@ class FakeTelegram:
         Path(dest).write_bytes(self.images[name][int(index)])
         return Path(dest)
 
+    # The REAL comparator, not a stand-in: identity is the thing under test, so
+    # a fake that answers it would be testing itself. It only needs
+    # download_file, which this class provides, and returns None (unverifiable)
+    # for anything it cannot read -- exactly like it does against Telegram.
+    _sticker_matches = bp.Telegram._sticker_matches
+
     # --- mutations ------------------------------------------------------ #
     def add_sticker(self, user_id, name, png, emoji, kw, *, expected_before=None):
         self.add_calls.append((name, png.stem))
@@ -241,9 +247,12 @@ class AmbiguousUploadStopsTheRun(RebuildCase):
 
     def setUp(self):
         super().setUp()
-        self.write_plan(["aaa", "bbb"])
+        # "seed" is plan[0], already uploaded: order and cursor have to describe
+        # the same walk of the plan, so a live sticker needs a plan entry that
+        # accounts for it.
+        self.write_plan(["seed", "aaa", "bbb"])
         self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
-                         order=["seed"], cursor=0)
+                         order=["seed"], cursor=1)
         self.tg = FakeTelegram(live={"s1": 1})
         self.tg.add_error = bp.AmbiguousUploadError("addStickerToSet: unknown")
 
@@ -268,7 +277,7 @@ class AmbiguousUploadStopsTheRun(RebuildCase):
 
     def test_an_ambiguous_create_records_the_set_it_may_have_made(self):
         # Empty state: the first entry has to create a set.
-        self.write_state(order=[], cursor=0)
+        self.write_state(sets=[], order=[], cursor=0)
         tg = FakeTelegram()
         tg.create_error = bp.AmbiguousUploadError("createNewStickerSet: unknown")
         code = self.run_build(tg)
@@ -291,7 +300,8 @@ class ResumeReconcilesTheMarker(RebuildCase):
         self.write_state(sets=[], order=[], cursor=1, in_flight={
             "key": "aaa", "operation": "create", "set_name": created,
             "set_index": 1, "expected_before": 0, "phase": "upload"})
-        tg = FakeTelegram(live={created: 1})   # the create did land
+        tg = FakeTelegram()                    # the create did land...
+        tg.append(created, (self.emoji / "aaa.png").read_bytes())  # ...with OUR image
         rd.build(tg, "bot")
         saved = self.saved()
         self.assertEqual(saved["order"], ["aaa"], "the upload must be recorded")
@@ -339,9 +349,11 @@ class InFlightIsResolvedByIdentity(RebuildCase):
 
     def setUp(self):
         super().setUp()
-        self.write_plan(["aaa"])
+        # plan[0]="seed" is already live; the marker is plan[1], the entry the
+        # cursor was moved past to run it.
+        self.write_plan(["seed", "aaa"])
         self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
-                         order=["seed"], cursor=1, in_flight=dict(self.MARKER))
+                         order=["seed"], cursor=2, in_flight=dict(self.MARKER))
 
     def test_a_manual_sticker_cannot_satisfy_the_marker(self):
         tg = FakeTelegram(live={"s1": 1})
@@ -350,7 +362,7 @@ class InFlightIsResolvedByIdentity(RebuildCase):
         saved = self.saved()
         self.assertNotIn("aaa", saved["order"],
                          "a stranger's sticker was accepted as our upload")
-        self.assertEqual(saved["cursor"], 0, "the entry must be retried")
+        self.assertEqual(saved["cursor"], 1, "the entry must be retried")
         self.assertIsNone(saved["in_flight"])
         self.assertEqual(tg.mutations, 0,
                          "an unexplained sticker must stop the run, not be "
@@ -381,6 +393,161 @@ class InFlightIsResolvedByIdentity(RebuildCase):
         self.assertEqual(self.saved(), before, "state must be untouched")
 
 
+class CreateIsAdoptedOnlyOnImageIdentity(RebuildCase):
+    """4: EXISTS is not proof that OUR create made the set.
+
+    The reconcile treated "a set of that name is live" as "the in-flight create
+    landed" and adopted it. A same-named set can pre-exist -- a leftover family,
+    a hand-made pack, another bot's -- and adopting it attaches this rebuild's
+    state, its cursor and every later add to a pack it never built. Only the
+    first sticker's IMAGE can tell the two apart.
+    """
+
+    CREATED = f"{rd.BASE}1_by_bot"
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(["aaa", "bbb"])
+        self.write_state(sets=[], order=[], cursor=1, in_flight={
+            "key": "aaa", "operation": "create", "set_name": self.CREATED,
+            "set_index": 1, "expected_before": 0, "phase": "upload"})
+
+    def test_a_foreign_first_image_is_never_adopted(self):
+        tg = FakeTelegram()
+        tg.append(self.CREATED, _png_bytes("someone-elses-pack"))
+        before = self.saved()
+        code = self.run_build(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL,
+                         "an unidentifiable set must stop the run")
+        self.assertEqual(tg.mutations, 0, "nothing may be built on it")
+        self.assertEqual(self.saved(), before,
+                         "the set is not ours: it must not enter the state")
+
+    def test_a_first_sticker_that_cannot_be_read_stops_the_run(self):
+        tg = FakeTelegram()
+        tg.append(self.CREATED, b"not an image at all")
+        before = self.saved()
+        code = self.run_build(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL,
+                         "unverifiable is UNKNOWN, never 'close enough'")
+        self.assertEqual(tg.mutations, 0)
+        self.assertEqual(self.saved(), before)
+
+    def test_an_empty_set_of_that_name_is_not_treated_as_ours(self):
+        """A create leaves exactly one sticker; nothing else is our create."""
+        tg = FakeTelegram()
+        tg.images[self.CREATED] = []
+        tg.live[self.CREATED] = 0
+        before = self.saved()
+        self.assertEqual(self.run_build(tg), bp.EXIT_PARTIAL)
+        self.assertEqual(tg.mutations, 0)
+        self.assertEqual(self.saved(), before)
+
+    def test_our_own_image_is_still_adopted(self):
+        tg = FakeTelegram()
+        tg.append(self.CREATED, (self.emoji / "aaa.png").read_bytes())
+        rd.build(tg, "bot")
+        saved = self.saved()
+        self.assertEqual([s["name"] for s in saved["sets"]], [self.CREATED])
+        self.assertEqual(saved["order"], ["aaa", "bbb"],
+                         "the adopted upload counts; the run continues from it")
+        self.assertEqual([c[1] for c in tg.add_calls], ["bbb"],
+                         "aaa is already live and must not be sent again")
+
+
+class CursorOrderAndPlanMustDescribeOneWalk(RebuildCase):
+    """5: cursor, order and the plan were only ever checked for shape.
+
+    cursor=0 with order=["aaa"] and one live sticker satisfied every existing
+    invariant, and the build then started at plan[0] and uploaded "aaa" a
+    SECOND time. The mirror case is a cursor at the end with an order that
+    cannot have come from that prefix: plan entries are skipped and the run
+    reports a completed rebuild.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(["aaa", "bbb", "ccc"])
+        bp.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
+
+    def _rejects(self, **state) -> str:
+        self.write_state(**{"deleted_old": False, **state})
+        tg = FakeTelegram(live={"old1": 3, "s1": 1})
+        with self.assertRaises(SystemExit) as caught:
+            rd.build(tg, "bot")
+        self.assertEqual(tg.deleted, [],
+                         "an inconsistent state must be caught BEFORE the "
+                         "destructive delete phase")
+        self.assertEqual(tg.mutations, 0)
+        return str(caught.exception.code)
+
+    def test_an_upload_the_cursor_never_reached_is_rejected(self):
+        # THE case: one live sticker, one recorded upload, cursor still at 0.
+        # Resuming here re-uploads plan[0] into a set that already holds it.
+        problem = self._rejects(
+            cursor=0, order=["aaa"],
+            sets=[{"index": 1, "name": "s1", "title": "T 1", "live": 1}])
+        self.assertIn("'order' records 'aaa'", problem)
+
+    def test_an_order_that_is_not_in_plan_order_is_rejected(self):
+        self.assertIn("'order' records 'aaa'", self._rejects(
+            cursor=3, order=["ccc", "aaa"],
+            sets=[{"index": 1, "name": "s1", "title": "T 1", "live": 2}]))
+
+    def test_an_upload_that_is_not_a_plan_entry_at_all_is_rejected(self):
+        self.assertIn("'order' records 'zzz'", self._rejects(
+            cursor=3, order=["zzz"],
+            sets=[{"index": 1, "name": "s1", "title": "T 1", "live": 1}]))
+
+    def test_uploads_with_no_set_to_live_in_are_rejected(self):
+        self.assertIn("no set holds them",
+                      self._rejects(cursor=1, order=["aaa"], sets=[]))
+
+    def test_a_marker_for_a_different_plan_entry_is_rejected(self):
+        # The cursor is moved past an entry before its mutation is recorded, so
+        # a marker for anything else reconciles one entry's outcome onto another.
+        self.assertIn("is not plan entry", self._rejects(
+            cursor=1, order=[], sets=[{"index": 1, "name": "s1", "live": 0}],
+            in_flight={"key": "ccc", "operation": "add", "set_name": "s1",
+                       "set_index": 1, "expected_before": 0}))
+
+    def test_a_marker_with_no_cursor_behind_it_is_rejected(self):
+        self.assertIn("is not plan entry", self._rejects(
+            cursor=0, order=[], sets=[{"index": 1, "name": "s1", "live": 0}],
+            in_flight={"key": "aaa", "operation": "add", "set_name": "s1",
+                       "set_index": 1, "expected_before": 0}))
+
+    def test_live_drift_stops_before_the_old_packs_are_deleted(self):
+        """The one inconsistency only LIVE state can see, checked in time.
+
+        Nothing on disk is wrong here, so the schema cannot catch it: the set
+        simply holds a sticker no upload accounts for. The reconciliation that
+        does catch it used to run after the delete phase, so the old packs were
+        already destroyed by the time the run refused to continue.
+        """
+        self.write_state(deleted_old=False, cursor=1, order=["aaa"],
+                         sets=[{"index": 1, "name": "s1", "title": "T 1",
+                                "live": 1}])
+        tg = FakeTelegram(live={"old1": 3, "s1": 2})   # one sticker too many
+        with self.assertRaises(SystemExit) as caught:
+            rd.build(tg, "bot")
+        self.assertIn("uploads are recorded", str(caught.exception.code))
+        self.assertEqual(tg.deleted, [],
+                         "the old packs were destroyed on a state that could "
+                         "not be reconciled")
+        self.assertEqual(tg.mutations, 0)
+
+    def test_a_walk_with_skipped_entries_is_still_accepted(self):
+        """Skips are legitimate: order is a SUBSEQUENCE, not a copy."""
+        self.write_state(order=["aaa", "ccc"], cursor=3,
+                         sets=[{"index": 1, "name": "s1", "title": "T 1",
+                                "live": 2}])
+        tg = FakeTelegram(live={"s1": 2})
+        rd.build(tg, "bot")                       # bbb was skipped; nothing left
+        self.assertEqual(tg.mutations, 0)
+        self.assertEqual(self.saved()["cursor"], 3)
+
+
 class RetryableFailureKeepsThePlanPosition(RebuildCase):
     """12: the cursor moves past an entry BEFORE the upload is attempted.
 
@@ -390,9 +557,9 @@ class RetryableFailureKeepsThePlanPosition(RebuildCase):
 
     def setUp(self):
         super().setUp()
-        self.write_plan(["aaa", "bbb"])
+        self.write_plan(["seed", "aaa", "bbb"])
         self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
-                         order=["seed"], cursor=0)
+                         order=["seed"], cursor=1)
         self.tg = FakeTelegram(live={"s1": 1})
 
     def test_a_transport_failure_leaves_the_cursor_on_the_item(self):
@@ -400,7 +567,7 @@ class RetryableFailureKeepsThePlanPosition(RebuildCase):
             "addStickerToSet failed after 5 attempts")
         code = self.run_build(self.tg)
         saved = self.saved()
-        self.assertEqual(saved["cursor"], 0,
+        self.assertEqual(saved["cursor"], 1,
                          "a not-applied failure must not consume the position")
         self.assertEqual(saved["order"], ["seed"])
         self.assertEqual(self.tg.mutations, 1,
@@ -413,7 +580,7 @@ class RetryableFailureKeepsThePlanPosition(RebuildCase):
             "addStickerToSet failed: Bad Request: STICKER_PNG_NOPNG")
         code = self.run_build(self.tg)
         saved = self.saved()
-        self.assertEqual(saved["cursor"], 2, "both images are permanently bad")
+        self.assertEqual(saved["cursor"], 3, "both images are permanently bad")
         self.assertEqual(saved["order"], ["seed"])
         self.assertEqual(self.tg.mutations, 2, "each entry is tried once")
         self.assertIsNone(code, "a permanent skip is not a retryable stop")
@@ -460,7 +627,7 @@ class LiveStateUnknownStopsTheRun(RebuildCase):
 
     def setUp(self):
         super().setUp()
-        self.write_plan(["aaa", "bbb"])
+        self.write_plan(["seed", "aaa", "bbb"])
         self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
                          order=["seed"], cursor=1)
         self.tg = FakeTelegram(live={"s1": 1})
@@ -776,7 +943,7 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
         # Older runs recorded just the plan key; rejecting it would strand a
         # state that the reconcile can still resolve.
         self.write_state(in_flight="aaa")
-        self.assertEqual(rd.load_state(2)["in_flight"], "aaa")
+        self.assertEqual(rd.load_state(rd.load_plan())["in_flight"], "aaa")
 
     def test_a_sound_state_still_builds(self):
         self.write_state(deleted_old=False, cursor=0)
