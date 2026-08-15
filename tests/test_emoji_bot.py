@@ -266,6 +266,81 @@ class TestAccessControl(unittest.TestCase):
         self.assertEqual(self.sent, [], "must not reply into a group")
 
 
+class TestMainWiring(unittest.TestCase):
+    """main() must hand handle_update the NUMERIC allowlist.
+
+    The previous code named both the user allowlist and the Telegram
+    update-type filter `allowed`; the second assignment silently replaced the
+    first, so every user -- including the owner -- was rejected. Testing
+    handle_update directly could never catch it, because the defect lived in
+    the wiring.
+    """
+
+    OWNER = 424242
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._orig_offset = b.OFFSET_FILE
+        b.OFFSET_FILE = Path(self.tmp.name) / "state.json"
+        self.seen = []
+
+    def tearDown(self):
+        b.OFFSET_FILE = self._orig_offset
+        self.tmp.cleanup()
+
+    def _run_main_once(self):
+        """Run main()'s polling loop for exactly one update, then break out."""
+        upd = {"update_id": 7, "message": {
+            "message_id": 1, "text": "/start",
+            "from": {"id": self.OWNER},
+            "chat": {"id": self.OWNER, "type": "private"}}}
+
+        tg = mock.Mock()
+        tg.get_me.return_value = {"username": "bot", "id": 1}
+        calls = {"n": 0}
+
+        def _call(method, **kw):
+            if method == "getUpdates":
+                calls["n"] += 1
+                if calls["n"] > 1:
+                    raise KeyboardInterrupt      # leave the infinite loop
+                return [upd]
+            return []
+
+        tg._call.side_effect = _call
+
+        def _capture(tg_, owner, update, allowed):
+            self.seen.append(allowed)
+
+        env = {"GENERAL_BOT_TOKEN": "x", "PACK_OWNER_USER_ID": str(self.OWNER),
+               "BOT_ALLOWED_USER_IDS": ""}
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(b, "Telegram", return_value=tg), \
+             mock.patch.object(b, "handle_update", _capture), \
+             mock.patch.object(b, "setup_logging", lambda *a, **k: None), \
+             mock.patch.object(b, "load_env", lambda: None), \
+             mock.patch.object(b.time, "sleep", lambda s: None):
+            try:
+                b.main()
+            except KeyboardInterrupt:
+                pass
+
+    def test_main_passes_numeric_ids_not_update_types(self):
+        self._run_main_once()
+        self.assertEqual(len(self.seen), 1, "handle_update was not reached")
+        allowed = self.seen[0]
+        self.assertEqual(allowed, {self.OWNER},
+                         "main must pass the numeric allowlist")
+        self.assertTrue(all(isinstance(x, int) for x in allowed),
+                        f"allowlist must hold ints, got {allowed!r}")
+
+    def test_the_owner_is_actually_authorized_end_to_end(self):
+        self._run_main_once()
+        allowed = self.seen[0]
+        self.assertIn(self.OWNER, allowed,
+                      "the owner must be authorized through the real wiring")
+
+
 class TestOffsetPersistence(unittest.TestCase):
     """A restart must not replay updates that were already handled."""
 
