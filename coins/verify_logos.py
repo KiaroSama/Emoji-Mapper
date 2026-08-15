@@ -32,17 +32,24 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import (EXIT_FAILED, LockBusy, Telegram, exclusive_lock,
-                        load_env, _input_sticker, _mime_for_path,
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, AmbiguousUploadError,
+                        LockBusy, SetState, Telegram, exclusive_lock,
+                        ingest_exit_code, load_env, pack_family_lock_path,
+                        safe_int_env, _input_sticker, _mime_for_path,
                         write_json_atomic)
 from emojikit import media
 from emojikit.media import _dhash, hamming
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent
-# Same lock file as the fetchers' PACK_LOCK: --fix replaces stickers in the very
-# sets they append to, so one name must cover the whole coin pack family.
-PACK_LOCK = ROOT / "coin_pack.lock"
+# The coin pack family, matching coins/fetch_paprika.py and coins/rebuild_dedup.py.
+SET_BASE = "gvcryptoemoji"
+# Keyed on the BASE NAME, exactly like the fetchers and the rebuild tool:
+# --fix replaces stickers in the very sets they append to. A lock named after
+# this script's own file (coin_pack.lock) was a DIFFERENT name from theirs, so
+# the exclusion it advertised did not exist and a --fix could run concurrently
+# with a top-up against the same live sets.
+PACK_LOCK = pack_family_lock_path(SET_BASE)
 log = logging.getLogger("verify_logos")
 UA = {"User-Agent": "Mozilla/5.0 (logo-verify; local tool)"}
 
@@ -98,14 +105,62 @@ def report(emoji_dir: Path, top: int, threshold: int) -> list[tuple[int, str, st
     return flagged
 
 
-def cid_location(tg: Telegram, sets: list[dict], cid: str) -> tuple[str, int, str] | None:
-    """Return (set_name, position, file_id) of a custom_emoji_id, or None."""
+def _cids(sset: dict) -> list[str]:
+    """The custom_emoji_id of every sticker in a set, in order."""
+    return [str(st.get("custom_emoji_id")) for st in sset.get("stickers", [])]
+
+
+def cid_location(tg: Telegram, sets: list[dict],
+                 cid: str) -> tuple[str, int, str, list[str]] | None:
+    """Return (set_name, position, file_id, cids_before) of a custom_emoji_id.
+
+    The full BEFORE snapshot comes back with it because it is the only way to
+    prove afterwards which sticker the replacement actually became.
+    """
     for s in sets:
-        sticks = tg.get_sticker_set(s["name"]).get("stickers", [])
-        for pos, st in enumerate(sticks):
-            if str(st.get("custom_emoji_id")) == str(cid):
-                return s["name"], pos, st["file_id"]
+        sset = tg.get_sticker_set(s["name"])
+        cids = _cids(sset)
+        for pos, st in enumerate(sset.get("stickers", [])):
+            if cids[pos] == str(cid):
+                return s["name"], pos, st["file_id"], cids
     return None
+
+
+def _replaced_check(tg: Telegram, sname: str, old_cid: str):
+    """applied_check for replaceStickerInSet: has the old sticker gone away?
+
+    replaceStickerInSet is not safe to blind-retry. A response lost after
+    Telegram applied the change leaves an ``old_sticker`` that no longer
+    exists, so the retry fails against a set that is in fact already correct --
+    and with a file handle as the body it would upload nothing anyway.
+    """
+    def check():
+        state, sset = tg.probe_set_state(sname)
+        if state is not SetState.EXISTS:
+            return None                  # unknown or vanished: reconcile, don't guess
+        return old_cid not in _cids(sset)
+
+    return check
+
+
+def verified_new_cid(before: list[str], after: list[str], pos: int) -> str | None:
+    """The replacement's custom_emoji_id, or None when identity is unprovable.
+
+    ``after[pos]`` is our replacement only if the set is otherwise untouched.
+    If anything else was added or removed meanwhile, position ``pos`` now holds
+    an unrelated emoji -- and every map entry that shared the old id would be
+    repointed at the wrong picture, permanently and silently.
+    """
+    if len(after) != len(before) or not 0 <= pos < len(after):
+        return None
+    if any(a != b for i, (a, b) in enumerate(zip(before, after)) if i != pos):
+        return None
+    new_cid = after[pos]
+    # A genuine replacement carries a NEW id: unchanged means nothing happened,
+    # and an id already present elsewhere means we are reading someone else's.
+    if not new_cid or new_cid == "None" or new_cid in before:
+        return None
+    return new_cid
 
 
 def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
@@ -127,7 +182,7 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
     if not loc:
         log.warning("%s: current cid %s not found live; skip", sym, old_cid)
         return False
-    sname, pos, old_fid = loc
+    sname, pos, old_fid, before = loc
 
     # Update local source files (full-res + 100x100) and upload the replacement.
     png_dir = emoji_dir.parent / "png"
@@ -139,18 +194,35 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
     media.to_static_png(tmp, src)
     tmp.unlink(missing_ok=True)
 
-    with open(src, "rb") as fh:
+    # Immutable bytes, not an open handle: _call retries the POST, and a file
+    # object is exhausted after the first attempt -- every retry silently
+    # uploaded an empty body. The applied_check makes those retries safe at all.
+    try:
         tg._call("replaceStickerInSet", data={
             "user_id": uid, "name": sname, "old_sticker": old_fid,
             "sticker": json.dumps(_input_sticker("static", ["\U0001FA99"],
                                                  [sym, str(coin.get("name", "")).lower()])),
-        }, files={"file0": (src.name, fh, _mime_for_path(src))})
+        }, files={"file0": (src.name, src.read_bytes(), _mime_for_path(src))},
+            applied_check=_replaced_check(tg, sname, old_cid))
+    except AmbiguousUploadError as exc:
+        # May or may not be live; the postcondition read below is the decider.
+        log.warning("%s: %s", sym, exc)
+    except RuntimeError as exc:
+        log.error("%s: replaceStickerInSet failed: %s", sym, exc)
+        return False
 
-    # The replacement keeps its position; read the new cid there.
-    live = tg.get_sticker_set(sname).get("stickers", [])
-    new_cid = str(live[pos].get("custom_emoji_id")) if pos < len(live) else None
-    if not new_cid:
-        log.warning("%s: could not read new cid", sym)
+    # Postcondition: prove WHICH sticker is the replacement before trusting it.
+    try:
+        after = _cids(tg.get_sticker_set(sname))
+    except RuntimeError as exc:
+        log.error("%s: cannot re-read %s to confirm the replacement: %s",
+                  sym, sname, exc)
+        return False
+    new_cid = verified_new_cid(before, after, pos)
+    if new_cid is None:
+        log.error("%s: cannot prove what replaced %s in %s (the set changed "
+                  "underneath us). Map left untouched -- check the pack, then "
+                  "re-run.", sym, old_cid, sname)
         return False
     changed = 0
     for t, c in list(mp.items()):
@@ -178,24 +250,41 @@ def main() -> int:
     emoji_dir = Path(args.emoji_dir)
     if not emoji_dir.is_dir():
         log.error("emoji dir not found: %s", emoji_dir)
-        return 2
+        return EXIT_USAGE
 
     if not args.fix:
         report(emoji_dir, args.top, args.threshold)
         log.info("Review only. To repair confirmed-wrong logos: --fix --only sol,xrp")
-        return 0
+        return EXIT_OK
 
     syms = [s.strip().lower() for s in args.only.split(",") if s.strip()]
     if not syms:
         log.error("--fix requires --only with an explicit ticker list "
                   "(automated detection is not reliable enough to mass-fix).")
-        return 2
+        return EXIT_USAGE
 
-    tg = Telegram(os.environ[args.token_env])
-    uid = int(os.environ["PACK_OWNER_USER_ID"])
-    state = json.loads(Path(args.state).read_text(encoding="utf-8"))
-    sets = sorted(state["sets"], key=lambda s: s["index"])
-    mp = json.loads(Path(args.map).read_text(encoding="utf-8"))
+    # Raw os.environ[...] / int(...) turned an unset or mistyped variable into a
+    # KeyError/ValueError traceback -- after argparse had already accepted the
+    # run -- instead of the usage error every other bad input produces here.
+    token = os.environ.get(args.token_env, "")
+    if not token:
+        log.error("%s is not set (env or .env).", args.token_env)
+        return EXIT_USAGE
+    uid = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
+    if not uid:
+        log.error("PACK_OWNER_USER_ID must be set to your numeric Telegram "
+                  "user id.")
+        return EXIT_USAGE
+
+    tg = Telegram(token)
+    try:
+        state = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        sets = sorted(state["sets"], key=lambda s: s["index"])
+        mp = json.loads(Path(args.map).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log.error("cannot read --state %s / --map %s: %s",
+                  args.state, args.map, exc)
+        return EXIT_USAGE
 
     fixed = 0
     try:
@@ -211,7 +300,13 @@ def main() -> int:
         log.error("%s", exc)
         return EXIT_FAILED
     log.info("fixed %d/%d requested logos; map saved.", fixed, len(syms))
-    return 0
+    # An explicitly requested fix that did not happen is not a success: exiting
+    # 0 told the launcher and CI that every listed logo had been repaired.
+    unfixed = len(syms) - fixed
+    if unfixed:
+        log.error("%d requested logo(s) were NOT fixed; see the warnings above.",
+                  unfixed)
+    return ingest_exit_code(fixed, unfixed)
 
 
 if __name__ == "__main__":

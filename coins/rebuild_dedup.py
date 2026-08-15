@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -44,7 +45,9 @@ from PIL import Image
 
 from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
                         LiveStateUnknown, SetState, Telegram, exclusive_lock,
-                        links_chat_id, load_env, write_json_atomic)
+                        links_chat_id, load_env, pack_family_lock_path,
+                        safe_int_env, write_json_atomic)
+from emojikit.media import _dhash, hamming
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -53,12 +56,15 @@ OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
 OLD_STATE = ROOT / "rebuild_state.json"        # the current 30 packs, to delete
 PLAN = ROOT / "rebuild_dedup_plan.json"
 STATE = ROOT / "rebuild_dedup_state.json"
-LOCK = STATE.with_name(STATE.name + ".lock")   # same convention as build_pack.py
 GROUPS_REPORT = ROOT / "shared_logo_groups.json"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 KEYWORDS_CSV = ROOT / "keywords.csv"
 
 BASE = "gvcryptoemoji"
+# One lock for the whole pack family, keyed on BASE. Naming it after this
+# tool's state file made it a different lock from the fetchers' coin_pack.lock,
+# so a rebuild and a provider top-up could append to the same live sets at once.
+LOCK = pack_family_lock_path(BASE)
 TITLE = "@GodVerify Crypto Emoji"
 EMOJI_CHAR = "\U0001FA99"
 PER_SET = 200
@@ -67,9 +73,15 @@ PER_SET = 200
 # chains (USDT on 8, USDC on 9); the positional-drift bug produced a group of
 # 129 unrelated coins.
 SHARED_GROUP_LIMIT = 20
+# A live sticker within this perceptual distance of the PNG we sent IS that
+# upload: Telegram re-encodes PNG to WEBP, so identical content still differs by
+# a bit or two. Same budget as the fetchers.
+SAME_IMAGE_MAX = 8
 load_env()  # ensure .env is loaded before resolving the owner id at import
 # Pack owner numeric Telegram id (from .env / env; never hardcode a personal id).
-USER_ID = int(os.environ.get("PACK_OWNER_USER_ID", "0"))
+# safe_int_env, not int(): a typo in .env must not raise at import, before
+# argparse can explain what is wrong.
+USER_ID = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
 
 
 def img_hash(path: Path) -> str:
@@ -209,6 +221,24 @@ def _stop_retryable(reason: str) -> None:
     raise SystemExit(EXIT_PARTIAL)
 
 
+# Deterministic rejections of THIS image: the same bytes will be refused again,
+# so the plan entry can be skipped for good. Everything else -- a transport
+# failure, a 5xx, a vanished set, a name collision -- is retryable and must NOT
+# consume the plan position.
+PERMANENT_MEDIA_ERRORS = (
+    "STICKER_PNG_NOPNG", "STICKER_PNG_DIMENSIONS", "STICKER_DIMENSIONS_INVALID",
+    "STICKER_FILE_INVALID", "STICKER_TOO_BIG", "STICKER_EMOJI_INVALID",
+    "INVALID_STICKER_EMOJIS", "IMAGE_PROCESS_FAILED", "PHOTO_INVALID_DIMENSIONS",
+    "STICKER_TGS_NOTGS", "STICKER_VIDEO_NOWEBM", "FILE MUST BE NON-EMPTY",
+)
+
+
+def _is_permanent_media_error(exc: BaseException) -> bool:
+    """True when Telegram rejected the IMAGE, not the attempt."""
+    text = str(exc).upper()
+    return any(marker in text for marker in PERMANENT_MEDIA_ERRORS)
+
+
 def _mark_in_flight(state: dict, key: str, operation: str, set_name: str,
                     set_index: int, expected_before: int) -> None:
     """Record WHICH mutation is about to run, before running it.
@@ -238,8 +268,13 @@ def msg(tg: Telegram, text: str) -> None:
 
     Goes to PACK_LINKS_CHAT_ID when configured (a channel the bot administers),
     otherwise the owner's private chat.
+
+    ``retries=2`` on purpose, matching Telegram.send_message: sendMessage is not
+    idempotent and has no dedup key, so a timeout AFTER Telegram accepted the
+    post cannot be told from one before it -- the default five attempts turn a
+    single outage into five identical link messages.
     """
-    tg._call("sendMessage", data={
+    tg._call("sendMessage", retries=2, data={
         "chat_id": links_chat_id(USER_ID), "text": text,
         "disable_web_page_preview": True,
     })
@@ -293,6 +328,47 @@ def delete_old_packs(tg: Telegram, state: dict) -> bool:
     return set(names) <= gone
 
 
+def _marked_add_landed(tg: Telegram, marker: dict) -> bool:
+    """Did the in-flight ADD land, judged by IMAGE identity?
+
+    A count cannot answer this. "The set is one longer than expected_before"
+    is equally true when someone added a sticker by hand or a concurrent tool
+    appended one -- and the resume then records OUR ticker as uploaded, so the
+    image is never sent and the map points the ticker at a stranger's sticker.
+    Stops the run whenever live state does not answer.
+    """
+    png = EMOJI / f"{marker['key']}.png"
+    if not marker.get("set_name") or not png.is_file():
+        _stop_retryable(f"cannot check the in-flight {marker['key']}: its set "
+                        f"name or source image is gone")
+    set_state, sset = tg.probe_set_state(marker["set_name"])
+    if set_state is SetState.UNKNOWN:
+        _stop_retryable(f"live state of {marker['set_name']} is unknown; cannot "
+                        f"tell whether the in-flight {marker['key']} landed")
+    if set_state is SetState.MISSING:
+        return False
+    before = marker.get("expected_before") or 0
+    want = _dhash(Image.open(png).convert("RGBA"))
+    hits = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for st in (sset.get("stickers") or [])[before:]:
+            dest = Path(tmp) / str(st.get("file_unique_id") or st.get("file_id"))
+            try:
+                tg.download_file(str(st["file_id"]), dest)
+                got = _dhash(Image.open(dest).convert("RGBA"))
+            except Exception as exc:  # noqa: BLE001
+                # Unreadable is not "not ours": guessing here re-uploads an
+                # image that is already live.
+                _stop_retryable(f"sticker {st.get('custom_emoji_id')} in "
+                                f"{marker['set_name']} could not be read ({exc})")
+            if hamming(want, got) <= SAME_IMAGE_MAX:
+                hits += 1
+    if hits > 1:
+        _stop_retryable(f"{hits} live stickers carry {png.name}; the pack "
+                        f"already contains a duplicate")
+    return hits == 1
+
+
 def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
     """Resolve the recorded in-flight mutation against live state.
 
@@ -303,12 +379,16 @@ def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
     """
     marker = _as_marker(state["in_flight"])
     known_sets = {s["name"] for s in state["sets"]}
-    if marker.get("operation") == "create" and marker.get("set_name") not in known_sets:
+    landed = False
+    if marker.get("operation") == "create":
+        # A create is self-identifying: the set carries our sticker because the
+        # call that made the set is the call that put it there.
         set_state, sset = tg.probe_set_state(marker["set_name"])
         if set_state is SetState.UNKNOWN:
             _stop_retryable(f"live state of {marker['set_name']} is unknown; "
                             f"cannot tell whether the in-flight create landed")
-        if set_state is SetState.EXISTS:
+        landed = set_state is SetState.EXISTS
+        if landed and marker["set_name"] not in known_sets:
             live = len(sset.get("stickers", []))
             index = marker.get("set_index") or len(state["sets"]) + 1
             state["sets"].append({"index": index, "name": marker["set_name"],
@@ -316,8 +396,10 @@ def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
             cum += live
             print(f"  resume: adopted {marker['set_name']}, created before the "
                   f"interruption", flush=True)
+    else:
+        landed = _marked_add_landed(tg, marker)
 
-    if cum == len(state["order"]) + 1:
+    if landed:
         state["order"].append(marker["key"])
         print(f"  resume: {marker['key']} did land before the interruption",
               flush=True)
@@ -457,10 +539,23 @@ def _build(tg: Telegram, bot: str) -> None:
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
-            print(f"  skip {g['rep']}: {exc}", flush=True)
-            state["in_flight"] = None   # definitively not applied
+            # _call raises RuntimeError only once the change is verified NOT
+            # applied, so the marker is resolved either way.
+            state["in_flight"] = None
+            if _is_permanent_media_error(exc):
+                # Deterministic rejection: the same bytes will be refused
+                # again, so the entry is skipped and the cursor stays past it.
+                print(f"  skip {g['rep']}: {exc}", flush=True)
+                save_state(state)
+                continue
+            # Retryable transport/API failure. The cursor was moved past this
+            # entry BEFORE the request, so it must go back onto it -- and the
+            # run has to stop here: the loop range was fixed before the first
+            # iteration, so continuing would upload later entries that the
+            # rolled-back cursor would then upload AGAIN on the next run.
+            state["cursor"] = plan_i
             save_state(state)
-            continue
+            _stop_retryable(f"{g['rep']}: {exc}; not applied, retried next run")
         in_set += 1
         state["order"].append(g["rep"])  # record actual upload order
         state["in_flight"] = None

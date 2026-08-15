@@ -9,10 +9,15 @@ unmapped rather than guessed. Then it re-fills the inventory.
 
 from __future__ import annotations
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import csv
 import json
 import re
 from pathlib import Path
+
+from build_pack import write_json_atomic
 
 ROOT = Path(__file__).resolve().parent
 INV = ROOT / "currency-emoji-inventory.md"
@@ -72,8 +77,11 @@ def main() -> int:
                   f"{', '.join(sorted(logos))} -> left unmapped, resolve by hand",
                   flush=True)
 
-    (ROOT / "ticker_to_id.json").write_text(
-        json.dumps(ticker_to_id, ensure_ascii=False, indent=1), encoding="utf-8")
+    # ticker_to_id.json is the canonical ticker -> custom-emoji map and the only
+    # copy of it. write_text truncates first, so a crash mid-write left the whole
+    # mapping empty or half-parsed; write_json_atomic renames a complete file
+    # into place instead.
+    write_json_atomic(ROOT / "ticker_to_id.json", ticker_to_id)
     print(f"added {added} name-alias mappings "
           f"({ambiguous} left unmapped as ambiguous)", flush=True)
 

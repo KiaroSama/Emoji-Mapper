@@ -261,7 +261,12 @@ def _run_legacy(limit: int) -> int:
     skip = ROOT / "logos" / ".svg_skip.txt"
     quarantined = _load_skip(skip, marker)
     done: set[str] = set()
-    made = svg_ok = png_ok = failed = 0
+    # Failure is per OUTPUT STEM, not per source attempt -- exactly as general
+    # mode counts it. Counting the SVG attempt immediately reported a run where
+    # logos/png/<t>.png then produced a perfectly good emoji as PARTIAL, and the
+    # launcher/CI treated that healthy run as retryable.
+    failed_stems: set[str] = set()
+    made = svg_ok = png_ok = 0
 
     # SVG first, then PNG for the same ticker: same priority as SOURCE_PRIORITY.
     for p in sorted(SVG_DIR.glob("*.svg")):
@@ -278,9 +283,9 @@ def _run_legacy(limit: int) -> int:
             if _convert_svg(p, out):
                 done.add(t); made += 1; svg_ok += 1
             else:
-                failed += 1
+                failed_stems.add(t)
         except Exception:  # noqa: BLE001
-            failed += 1
+            failed_stems.add(t)
         finally:
             marker.unlink(missing_ok=True)
         if made and made % 250 == 0:
@@ -296,18 +301,20 @@ def _run_legacy(limit: int) -> int:
             continue
         out = OUT_DIR / f"{t}.png"
         if _output_ok(out, p):
-            done.add(t); continue
+            done.add(t); failed_stems.discard(t); continue
         try:
             if _convert_raster(p, out):
                 done.add(t); made += 1; png_ok += 1
+                failed_stems.discard(t)   # the fallback source carried this stem
             else:
-                failed += 1  # blank/empty source -> skip instead of blank emoji
+                failed_stems.add(t)  # blank/empty source -> skip, no blank emoji
         except Exception:  # noqa: BLE001
-            failed += 1
+            failed_stems.add(t)
         if made and made % 250 == 0:
             print(f"  ...{made} emojis (svg={svg_ok}, png={png_ok})", flush=True)
 
     _report_quarantine(quarantined, skip)
+    failed = len(failed_stems)
     total = len(list(OUT_DIR.glob("*.png")))
     print(f"DONE: made {made} this run (svg={svg_ok}, png={png_ok}, failed={failed}); "
           f"total emoji PNGs: {total}.", flush=True)
