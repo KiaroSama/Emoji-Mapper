@@ -551,6 +551,147 @@ class AliasMapAmbiguity(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# every writer of coins/ticker_to_id.json: one lock, and the read INSIDE it
+# --------------------------------------------------------------------------- #
+class StubBot:
+    """Just enough Telegram for remap_ids.main()'s startup log line."""
+
+    def get_me(self) -> dict:
+        return {"username": "bot"}
+
+
+class CanonicalMapWritersCannotLoseAnUpdate(unittest.TestCase):
+    """6: locking a whole-file rewrite only helps if the READ is inside it.
+
+    Atomic replacement stops a truncated file. It does nothing about a lost
+    update: two tools each read the map, each apply their own edit, and the
+    second write silently discards the first. Each test here lands another
+    writer's update at the exact moment the lock is taken -- the moment a run
+    that read beforehand can no longer see -- and requires both edits to
+    survive.
+    """
+
+    CONCURRENT = {"zzz": "written-by-the-other-tool"}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.map = self.tmp / "ticker_to_id.json"
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _racing_lock(self, mod):
+        """The other tool's write lands while this one waits for the lock."""
+        real = mod.canonical_map_lock
+
+        @contextlib.contextmanager
+        def racing():
+            with real() as beat:
+                current = json.loads(self.map.read_text("utf-8"))
+                current.update(self.CONCURRENT)
+                bp.write_json_atomic(self.map, current)
+                yield beat
+
+        return mock.patch.object(mod, "canonical_map_lock", racing)
+
+    def _mapping(self) -> dict:
+        return json.loads(self.map.read_text("utf-8"))
+
+    def test_alias_map_keeps_the_other_writers_ids(self):
+        mod = _load_standalone(ROOT / "coins" / "alias_map.py", "alias_map_lock")
+        self.map.write_text(json.dumps({"ddd": "333"}), encoding="utf-8")
+        (self.tmp / "keywords.csv").write_text(
+            "ticker,name,format,file,keywords\n"
+            "ddd,Bar Labs,svg,logos/svg/ddd.svg,ddd\n", encoding="utf-8")
+        (self.tmp / "inv.md").write_text(INVENTORY, encoding="utf-8")
+        with mock.patch.multiple(mod, ROOT=self.tmp, INV=self.tmp / "inv.md",
+                                 OUT_INV=self.tmp / "out.md"), \
+                self._racing_lock(mod), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.main(), 0)
+        self.assertEqual(self._mapping(),
+                         {"ddd": "333", "eee": "333", **self.CONCURRENT})
+
+    def test_enhance_map_keeps_the_other_writers_ids(self):
+        mod = _load_standalone(ROOT / "coins" / "enhance_map.py",
+                               "enhance_map_lock")
+        self.map.write_text(json.dumps({"btc": "111"}), encoding="utf-8")
+        (self.tmp / "inv.md").write_text("   ticker: btcbsc\n   premium-id:\n",
+                                         encoding="utf-8")
+        with mock.patch.multiple(mod, ROOT=self.tmp, INV=self.tmp / "inv.md",
+                                 OUT_INV=self.tmp / "out.md"), \
+                self._racing_lock(mod), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.main(), 0)
+        self.assertEqual(self._mapping(),
+                         {"btc": "111", "btcbsc": "111", **self.CONCURRENT})
+
+    def test_remap_apply_backs_up_and_replaces_under_the_lock(self):
+        """--apply replaces the map deliberately; it must still be serialised.
+
+        The backup is the proof: it can only contain the other writer's entry
+        if this run reached the copy through ``canonical_map_lock`` rather than
+        rewriting the file on its own.
+        """
+        mod = _load_standalone(ROOT / "coins" / "remap_ids.py", "remap_ids_lock")
+        emoji = self.tmp / "emoji"
+        emoji.mkdir()
+        (emoji / "btc.png").write_bytes(_noise_png_bytes("btc"))
+        self.map.write_text(json.dumps({"btc": "STALE"}), encoding="utf-8")
+        (self.tmp / "state.json").write_text(
+            json.dumps({"sets": [{"index": 1, "name": "s1"}]}), encoding="utf-8")
+
+        def cached(tg, token, sets, cache, cache_path):
+            """Skip the download phase: one live signature, already analysed."""
+            sig = mod.signature(Image.open(emoji / "btc.png"))
+            cache["sigs"]["live-btc"] = mod.base64.b64encode(
+                sig.astype(mod.np.uint8).tobytes()).decode()
+            return []
+
+        argv = ["remap_ids", "--emoji-dir", str(emoji),
+                "--state", str(self.tmp / "state.json"),
+                "--cache", str(self.tmp / "cache.json"), "--out", str(self.map),
+                "--max-distance", "100", "--apply"]
+        with mock.patch.multiple(mod, download_live=cached,
+                                 Telegram=lambda token: StubBot(),
+                                 load_env=lambda: None,
+                                 setup_logging=lambda *a, **k: None), \
+                self._racing_lock(mod), \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "t"},
+                                clear=False), \
+                mock.patch.object(sys, "argv", argv):
+            self.assertEqual(mod.main(), EXIT_OK)
+        self.assertEqual(self._mapping(), {"btc": "live-btc"})
+        self.assertEqual(
+            json.loads(self.map.with_suffix(".prebroken.json").read_text("utf-8")),
+            {"btc": "STALE", **self.CONCURRENT},
+            "the backup must be of the file as it stood under the lock")
+
+    def test_a_held_lock_stops_the_map_tools_without_writing(self):
+        """Waiting is only safe if LockBusy is an exit, not a traceback.
+
+        Each tool returns EXIT_FAILED and leaves the file untouched -- a
+        half-written map here is the canonical map for every other tool.
+        """
+        self.map.write_text(json.dumps({"btc": "111"}), encoding="utf-8")
+        (self.tmp / "inv.md").write_text("   ticker: btcbsc\n   premium-id:\n",
+                                         encoding="utf-8")
+        (self.tmp / "keywords.csv").write_text("ticker,name\nbtc,Bitcoin\n",
+                                               encoding="utf-8")
+        before = self.map.read_bytes()
+        for script, alias in (("alias_map.py", "alias_map_busy"),
+                              ("enhance_map.py", "enhance_map_busy")):
+            with self.subTest(script=script):
+                mod = _load_standalone(ROOT / "coins" / script, alias)
+                with mock.patch.multiple(mod, ROOT=self.tmp,
+                                         INV=self.tmp / "inv.md",
+                                         OUT_INV=self.tmp / "out.md"), \
+                        bp.canonical_map_lock(), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(mod.main(), EXIT_FAILED)
+                self.assertEqual(self.map.read_bytes(), before,
+                                 f"{script} rewrote the map without the lock")
+
+
+# --------------------------------------------------------------------------- #
 # coins/verify_logos: --fix must be retry-safe, identity-checked and honest
 #                     about failure
 # --------------------------------------------------------------------------- #
@@ -681,9 +822,10 @@ class VerifyLogosFix(unittest.TestCase):
         tg.s = session
         return tg, session
 
-    def _fix(self, before, after, **kw):
+    def _fix(self, before, after, state_path=None, **kw):
         tg, session = self._session(before, after, **kw)
-        ok = self.mod.fix_one(tg, 42, self.sets, self.map_path, self.emoji, "btc")
+        ok = self.mod.fix_one(tg, 42, self.sets, self.map_path, self.emoji,
+                              "btc", state_path)
         return ok, session
 
     def test_timeout_after_apply_is_verified_not_resent(self):
@@ -798,6 +940,53 @@ class VerifyLogosFix(unittest.TestCase):
         session.lose_confirm = session.replaced = True   # every read fails
         self.assertFalse(self.mod.reconcile_intent(tg, self.map_path))
         self.assertIsNotNone(self.intent())
+
+    def test_an_intent_cannot_be_reconciled_into_a_different_map(self):
+        """7: the intent file has one fixed path; --map is chosen per run.
+
+        A crash under ``--map A`` and a restart under ``--map B`` repointed the
+        pending replacement inside B -- a file that never held the old id --
+        while A kept naming a sticker that no longer exists.
+        """
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        other = self.tmp / "other_map.json"
+        other.write_text(json.dumps({"btc": OLD_CID}), encoding="utf-8")
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+
+        self.assertFalse(self.mod.reconcile_intent(tg, other))
+        self.assertEqual(json.loads(other.read_text("utf-8")), {"btc": OLD_CID},
+                         "a map this replacement never touched was rewritten")
+        self.assertIsNotNone(self.intent(),
+                             "the intent still belongs to the original map")
+        # ...and it is still recoverable into the map it actually names.
+        self.assertTrue(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertEqual(self.mapping()["btc"], NEW_CID)
+
+    def test_an_intent_is_bound_to_its_state_file_too(self):
+        state_a, state_b = self.tmp / "state_a.json", self.tmp / "state_b.json"
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                  state_path=state_a, lose_confirm=True)
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+        before = self.mapping()
+
+        self.assertFalse(self.mod.reconcile_intent(tg, self.map_path, state_b))
+        self.assertEqual(self.mapping(), before)
+        self.assertTrue(self.mod.reconcile_intent(tg, self.map_path, state_a))
+        self.assertEqual(self.mapping()["btc"], NEW_CID)
+
+    def test_an_intent_with_no_recorded_target_is_refused(self):
+        """An older intent cannot prove which map it belongs to: fail closed."""
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        path = self.mod._intent_path()
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        legacy.pop("map_target"), legacy.pop("state_target")
+        bp.write_json_atomic(path, legacy)
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+        before = self.mapping()
+
+        self.assertFalse(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertEqual(self.mapping(), before)
+        self.assertIsNotNone(self.intent(), "an unresolved intent must survive")
 
     def test_fix_locks_on_the_pack_family_not_on_this_script(self):
         # --fix REPLACES stickers in the same cryptoemoji* sets the coin

@@ -17,6 +17,7 @@ No network, no real sleeps: Telegram is faked and every path is deterministic.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import io
 import json
@@ -224,7 +225,7 @@ class VerifiedPublish(unittest.TestCase):
         tg.fail_add = RuntimeError("addStickerToSet failed: STICKER_PNG_NOPNG")
         mapping: dict[str, str] = {}
         self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
-        self.assertEqual(mapping, {})
+        self.assertNotIn("aaa", mapping)
 
     def test_an_ambiguous_add_is_resolved_from_live_state_not_re_sent(self):
         tg = FakeTelegram(existing=2)
@@ -264,6 +265,56 @@ class VerifiedPublish(unittest.TestCase):
              bp.exclusive_lock(rd.LOCK):
             self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
         self.assertEqual(tg.adds, [])
+
+
+class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
+    """6: the providers load ticker_to_id.json BEFORE waiting for the lock.
+
+    Two coin tools therefore serialised their Telegram mutations and still lost
+    each other's map update: whichever went second wrote the whole file back
+    from a snapshot taken before the first one had finished. The publisher has
+    to re-read the map once it holds the locks -- and hold the map lock for the
+    batch, because its per-sticker writes are one read-modify-write.
+    """
+
+    CONCURRENT = {"zzz": "written-by-the-other-tool"}
+
+    def _racing_lock(self):
+        """The other tool's map update lands as this run takes the lock."""
+        real = fp.canonical_map_lock
+
+        @contextlib.contextmanager
+        def racing():
+            with real() as beat:
+                current = json.loads(self.ids.read_text("utf-8"))
+                current.update(self.CONCURRENT)
+                bp.write_json_atomic(self.ids, current)
+                yield beat
+
+        return mock.patch.object(fp, "canonical_map_lock", racing)
+
+    def test_neither_writers_ids_are_lost(self):
+        tg = FakeTelegram(existing=2)
+        stale = json.loads(self.ids.read_text("utf-8"))   # loaded before the lock
+        with self._racing_lock():
+            self.assertEqual(fp.publish_logos(tg, ["aaa"], stale), (1, 0))
+        saved = json.loads(self.ids.read_text("utf-8"))
+        self.assertEqual(saved["btc"], "c-btc", "the pre-existing id is gone")
+        self.assertEqual(saved["zzz"], self.CONCURRENT["zzz"],
+                         "the other tool's id was overwritten from a stale read")
+        self.assertEqual(saved["aaa"], tg.sets[SET][-1]["custom_emoji_id"])
+        self.assertEqual(stale["zzz"], self.CONCURRENT["zzz"],
+                         "the caller refills the inventory from this dict, so "
+                         "it must be refreshed in place too")
+
+    def test_a_map_writer_blocks_the_publisher(self):
+        """Proof the publisher takes the map lock at all, in the right order."""
+        tg = FakeTelegram(existing=2)
+        with bp.canonical_map_lock():
+            self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
+        self.assertEqual(tg.adds, [], "no sticker may be added without it")
+        self.assertFalse(self.lock.exists(),
+                         "the pack lock must be released, not stranded")
 
 
 class UnverifiedUploadIsRecovered(unittest.TestCase):
