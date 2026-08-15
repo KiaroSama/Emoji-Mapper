@@ -12,7 +12,12 @@ stopped knowing what was live:
 * two runs could mutate one pack family at the same time (H-05),
 * a retryable upload failure consuming the plan position forever (12),
 * an in-flight upload judged "landed" by a count any stranger's sticker
-  satisfies (13).
+  satisfies (13),
+* the canonical map rebuilt from a snapshot read before the locks (A),
+* a legacy in-flight marker accepted at validation and then unresolvable
+  forever at recovery (B),
+* a create recovery adopting a set of the wrong SHAPE, after it had already
+  written the adoption to disk (C).
 
 No network and no real sleeps: Telegram is a fake object.
 """
@@ -442,6 +447,31 @@ class CreateIsAdoptedOnlyOnImageIdentity(RebuildCase):
         self.assertEqual(self.run_build(tg), bp.EXIT_PARTIAL)
         self.assertEqual(tg.mutations, 0)
         self.assertEqual(self.saved(), before)
+
+    def test_our_image_beside_a_foreign_one_is_not_our_create(self):
+        """C: the SHAPE has to be checked before anything is written.
+
+        A create leaves EXACTLY one sticker, so [OURS, FOREIGN] is somebody
+        else's set -- and it satisfies the first-sticker check. The count
+        disagreement only surfaced afterwards, in the cum/order comparison,
+        with the adoption, the cursor and the order record already saved.
+        """
+        tg = FakeTelegram()
+        tg.append(self.CREATED, (self.emoji / "aaa.png").read_bytes())   # ours
+        tg.append(self.CREATED, _png_bytes("someone-elses-second"))      # not
+        before = self.saved()
+        code = self.run_build(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL,
+                         "a two-sticker set is not the one our create made")
+        self.assertEqual(tg.mutations, 0)
+        saved = self.saved()
+        self.assertEqual(saved["sets"], [],
+                         "a set of the wrong shape must not be adopted")
+        self.assertEqual(saved["cursor"], before["cursor"])
+        self.assertEqual(saved["order"], [])
+        self.assertEqual(saved["in_flight"], before["in_flight"],
+                         "the intent must survive to be resolved next run")
+        self.assertEqual(saved, before, "the refusal half-applied itself")
 
     def test_our_own_image_is_still_adopted(self):
         tg = FakeTelegram()
@@ -873,6 +903,50 @@ class MapIsResolvedByImageIdentity(RebuildCase):
             with self.assertRaises(bp.LockBusy):
                 rd.map_and_fill(self.tg)
         self.assertFalse(self.map.exists())
+        self.assertFalse(rd.LOCK.exists(),
+                         "the pack lock outlived the run that took it")
+
+    def test_a_provider_cannot_change_the_map_during_the_snapshot(self):
+        """A: the live read and the whole-map write are ONE locked span.
+
+        The map is rewritten in full from what is read here. A provider doing
+        its own read-modify-write in between -- it appends a sticker and adds
+        its map entry under the same lock -- has that entry erased by this
+        write, and nothing afterwards can tell that it existed. Only holding
+        the lock from the first live read to the write prevents it.
+        """
+        attempts: list[BaseException | None] = []
+        real_call = self.tg._call
+
+        def a_provider_runs_mid_read(method, *, data=None, **kw):
+            if method == "getStickerSet" and not attempts:
+                try:
+                    with bp.canonical_map_lock():
+                        bp.write_json_atomic(self.map, {"prov": "provider-cid"})
+                    attempts.append(None)
+                except bp.LockBusy as exc:
+                    attempts.append(exc)
+            return real_call(method, data=data, **kw)
+
+        self.tg._call = a_provider_runs_mid_read
+        rd.map_and_fill(self.tg)
+        self.assertIsInstance(
+            attempts[0], bp.LockBusy,
+            "the map was writable while its own replacement was being read; "
+            "an entry added there is erased by the write that follows")
+
+    def test_the_pack_family_lock_is_held_across_the_mapping(self):
+        """The live sets are read here, so a concurrent build must wait.
+
+        Pack-family lock FIRST, canonical map lock SECOND -- the documented
+        order, and the reason this can be taken while a build cannot.
+        """
+        with bp.exclusive_lock(rd.LOCK):
+            with self.assertRaises(bp.LockBusy):
+                rd.map_and_fill(self.tg)
+        self.assertFalse(self.map.exists(),
+                         "the map was rebuilt from live sets a concurrent "
+                         "build was still appending to")
 
 
 class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
@@ -939,11 +1013,56 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
         self.assertIn("'order'", self._rejects(order="aaa"))
         self.assertIn("'deleted_old'", self._rejects(deleted_old="no"))
 
-    def test_the_legacy_bare_key_marker_is_still_accepted(self):
-        # Older runs recorded just the plan key; rejecting it would strand a
-        # state that the reconcile can still resolve.
-        self.write_state(in_flight="aaa")
-        self.assertEqual(rd.load_state(rd.load_plan())["in_flight"], "aaa")
+    def test_the_legacy_bare_key_marker_is_rejected_here_not_at_recovery(self):
+        """B: it used to pass validation and then never be resolvable.
+
+        A bare key names no set, so _reconcile_in_flight had nothing to probe
+        and stopped with EXIT_PARTIAL -- every run, at the same point, with no
+        way to clear it. It cannot be resolved by guessing either: the version
+        that wrote it (5d4669b) recorded the key before choosing between add
+        and create, so the set may never have reached state["sets"].
+        """
+        problem = self._rejects(in_flight="aaa")
+        self.assertIn("legacy bare key", problem)
+        self.assertIn("cursor", problem, "the operator needs the exact repair")
+        self.assertIn("'order'", problem,
+                      "the IS-live branch also has to name 'order', or the "
+                      "repair walks into the cum/order gate and stops again")
+
+    def test_following_the_legacy_repair_actually_clears_the_stop(self):
+        """A prescribed repair that does not work is a second permanent stop.
+
+        The message is only worth what executing it achieves, so execute it. The
+        cursor is advanced past an entry BEFORE its mutation is recorded and
+        'order' gains the key only on success -- so in the IS-live branch,
+        clearing the marker alone leaves one more live sticker than recorded
+        uploads, and build()'s own consistency gate refuses. Asserting on the
+        wording of the message could never have caught that.
+        """
+        self.write_plan(["seed", "aaa", "bbb"])
+        self.write_state(deleted_old=True, cursor=2, order=["seed"],
+                         in_flight="aaa",
+                         sets=[{"index": 1, "name": "s1", "title": "T 1"}])
+        tg = FakeTelegram(live={"s1": 2})       # seed AND aaa are both live
+        with self.assertRaises(SystemExit):
+            rd.build(tg, "bot")                 # refused, as it must be
+
+        # Apply exactly what the message prescribes for the IS-live branch.
+        state = json.loads(self.state.read_text("utf-8"))
+        state["in_flight"] = None
+        state["order"].append("aaa")
+        bp.write_json_atomic(self.state, state)
+
+        rd.build(tg, "bot")                     # must now run to completion
+        after = json.loads(self.state.read_text("utf-8"))
+        self.assertIsNone(after["in_flight"])
+        self.assertIn("aaa", after["order"])
+        sent = [str(c) for c in tg.add_calls + tg.create_calls]
+        self.assertFalse([c for c in sent if "aaa" in c],
+                         "the repair must not re-upload an image already live")
+
+    def test_a_marker_that_is_neither_object_nor_null_is_rejected(self):
+        self.assertIn("'in_flight'", self._rejects(in_flight=["aaa"]))
 
     def test_a_sound_state_still_builds(self):
         self.write_state(deleted_old=False, cursor=0)

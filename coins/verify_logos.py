@@ -213,6 +213,25 @@ def is_our_image(tg: Telegram, sticker: dict, want: int) -> bool:
             return False
 
 
+def _repoint_locked(map_path: Path, old_cid: str, new_cid: str) -> int:
+    """The read-modify-write itself. The CALLER must hold the map lock.
+
+    Split out because ``exclusive_lock`` is not reentrant: fix_one holds
+    canonical_map_lock() across its whole read-choose-replace-repoint span, so
+    calling the wrapper below from inside it would raise LockBusy against a
+    lock this very run already owns.
+    """
+    mp = json.loads(map_path.read_text(encoding="utf-8"))
+    changed = 0
+    for t, c in list(mp.items()):
+        if str(c) == old_cid:
+            mp[t] = new_cid
+            changed += 1
+    if changed:
+        write_json_atomic(map_path, mp)
+    return changed
+
+
 def repoint(map_path: Path, old_cid: str, new_cid: str) -> int:
     """Move every ticker on ``old_cid`` to ``new_cid``, as ONE locked
     read-modify-write of the canonical map.
@@ -221,17 +240,13 @@ def repoint(map_path: Path, old_cid: str, new_cid: str) -> int:
     runs after a crash finds nothing left on the old id and changes nothing,
     and a concurrent writer of the map cannot lose this edit (or have its own
     lost).
+
+    For callers that do NOT already hold the lock -- reconcile_intent chooses
+    its id from the intent file and the live pack, never from the map, so a
+    single locked write is all it needs.
     """
     with canonical_map_lock():
-        mp = json.loads(map_path.read_text(encoding="utf-8"))
-        changed = 0
-        for t, c in list(mp.items()):
-            if str(c) == old_cid:
-                mp[t] = new_cid
-                changed += 1
-        if changed:
-            write_json_atomic(map_path, mp)
-    return changed
+        return _repoint_locked(map_path, old_cid, new_cid)
 
 
 def reconcile_intent(tg: Telegram, map_path: Path, state_path=None) -> bool:
@@ -323,85 +338,103 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], map_path: Path,
         log.warning("%s: official image fetch failed; skip", sym)
         return False
 
-    try:
-        old_cid = str(json.loads(map_path.read_text(encoding="utf-8")).get(sym, ""))
-    except (OSError, ValueError) as exc:
-        log.error("%s: cannot read %s: %s", sym, map_path.name, exc)
-        return False
-    loc = cid_location(tg, sets, old_cid)
-    if not loc:
-        log.warning("%s: current cid %s not found live; skip", sym, old_cid)
-        return False
-    sname, pos, old_fid, before = loc
+    # ONE acquisition around choosing the id and repointing it. The map read
+    # used to be unlocked: a map-only writer (alias_map, enhance_map,
+    # remap_ids --apply) could repoint the ticker in the window, so this run
+    # replaced -- destroyed -- the live sticker for the id it had read while
+    # the map already named another one, and the repoint below then found no
+    # entry on the old id at all. The whole span has to be inside the lock
+    # because it is the span in which the id must not change.
+    #
+    # Yes, that holds the map lock across a Telegram round trip. Acceptable
+    # HERE: --fix is an operator-driven repair of an explicit short ticker
+    # list, not a batch job, and PACK_LOCK is already held for its whole
+    # duration anyway -- so the only tools this can delay are the other
+    # hand-run map editors, which fail fast with LockBusy and are re-run.
+    # PACK_LOCK first, canonical_map_lock() second: the project-wide order.
+    with canonical_map_lock():
+        try:
+            old_cid = str(json.loads(map_path.read_text(encoding="utf-8")).get(sym, ""))
+        except (OSError, ValueError) as exc:
+            log.error("%s: cannot read %s: %s", sym, map_path.name, exc)
+            return False
+        loc = cid_location(tg, sets, old_cid)
+        if not loc:
+            log.warning("%s: current cid %s not found live; skip", sym, old_cid)
+            return False
+        sname, pos, old_fid, before = loc
 
-    # Update local source files (full-res + 100x100) and upload the replacement.
-    png_dir = emoji_dir.parent / "png"
-    png_dir.mkdir(exist_ok=True)
-    (png_dir / f"{sym}.png").write_bytes(data)
-    tmp = ROOT / "_vtmp.png"
-    tmp.write_bytes(data)
-    src = emoji_dir / f"{sym}.png"
-    media.to_static_png(tmp, src)
-    tmp.unlink(missing_ok=True)
+        # Update local source files (full-res + 100x100) and upload the replacement.
+        png_dir = emoji_dir.parent / "png"
+        png_dir.mkdir(exist_ok=True)
+        (png_dir / f"{sym}.png").write_bytes(data)
+        tmp = ROOT / "_vtmp.png"
+        tmp.write_bytes(data)
+        src = emoji_dir / f"{sym}.png"
+        media.to_static_png(tmp, src)
+        tmp.unlink(missing_ok=True)
 
-    # Record WHAT is about to change, and everything needed to prove afterwards
-    # what it became, BEFORE the mutation. Written first because the dangerous
-    # window opens the moment the request leaves. A replacement targets a
-    # POSITION inside one set rather than a set number, so set_index carries
-    # that position; reconcile_intent reads it back the same way.
-    intent = make_intent(key=sym, operation="replace", set_name=sname,
-                         set_index=pos, expected_before=len(before))
-    intent.update({"old_cid": old_cid, "before": before,
-                   "source": str(src), "source_dhash": dh(Image.open(src)),
-                   # Which map/state this replacement belongs to. The intent
-                   # file's own path is fixed; its target is not.
-                   **_run_targets(map_path, state_path)})
-    write_json_atomic(_intent_path(), intent)
+        # Record WHAT is about to change, and everything needed to prove
+        # afterwards what it became, BEFORE the mutation. Written first because
+        # the dangerous window opens the moment the request leaves. A
+        # replacement targets a POSITION inside one set rather than a set
+        # number, so set_index carries that position; reconcile_intent reads it
+        # back the same way.
+        intent = make_intent(key=sym, operation="replace", set_name=sname,
+                             set_index=pos, expected_before=len(before))
+        intent.update({"old_cid": old_cid, "before": before,
+                       "source": str(src), "source_dhash": dh(Image.open(src)),
+                       # Which map/state this replacement belongs to. The intent
+                       # file's own path is fixed; its target is not.
+                       **_run_targets(map_path, state_path)})
+        write_json_atomic(_intent_path(), intent)
 
-    # Immutable bytes, not an open handle: _call retries the POST, and a file
-    # object is exhausted after the first attempt -- every retry silently
-    # uploaded an empty body. The applied_check makes those retries safe at all.
-    try:
-        tg._call("replaceStickerInSet", data={
-            "user_id": uid, "name": sname, "old_sticker": old_fid,
-            "sticker": json.dumps(_input_sticker("static", ["\U0001FA99"],
-                                                 [sym, str(coin.get("name", "")).lower()])),
-        }, files={"file0": (src.name, src.read_bytes(), _mime_for_path(src))},
-            applied_check=_replaced_check(tg, sname, old_cid))
-    except AmbiguousUploadError as exc:
-        # May or may not be live; the postcondition read below is the decider,
-        # and the intent survives if that read never comes back.
-        log.warning("%s: %s", sym, exc)
-    except RuntimeError as exc:
-        # _call raises RuntimeError only once the change is verified NOT applied.
-        _intent_path().unlink(missing_ok=True)
-        log.error("%s: replaceStickerInSet failed: %s", sym, exc)
-        return False
+        # Immutable bytes, not an open handle: _call retries the POST, and a
+        # file object is exhausted after the first attempt -- every retry
+        # silently uploaded an empty body. The applied_check makes those retries
+        # safe at all.
+        try:
+            tg._call("replaceStickerInSet", data={
+                "user_id": uid, "name": sname, "old_sticker": old_fid,
+                "sticker": json.dumps(_input_sticker("static", ["\U0001FA99"],
+                                                     [sym, str(coin.get("name", "")).lower()])),
+            }, files={"file0": (src.name, src.read_bytes(), _mime_for_path(src))},
+                applied_check=_replaced_check(tg, sname, old_cid))
+        except AmbiguousUploadError as exc:
+            # May or may not be live; the postcondition read below is the
+            # decider, and the intent survives if that read never comes back.
+            log.warning("%s: %s", sym, exc)
+        except RuntimeError as exc:
+            # _call raises RuntimeError only once the change is verified NOT
+            # applied.
+            _intent_path().unlink(missing_ok=True)
+            log.error("%s: replaceStickerInSet failed: %s", sym, exc)
+            return False
 
-    # Postcondition: prove WHICH sticker is the replacement before trusting it.
-    try:
-        sset = tg.get_sticker_set(sname)
-    except RuntimeError as exc:
-        log.error("%s: cannot re-read %s to confirm the replacement: %s. The "
-                  "intent is kept; the next run resolves it.", sym, sname, exc)
-        return False
-    after = _cids(sset)
-    if old_cid in after:
-        _intent_path().unlink(missing_ok=True)
-        log.error("%s: %s is still live in %s; the replacement did not apply.",
-                  sym, old_cid, sname)
-        return False
-    new_cid = verified_new_cid(before, after, pos)
-    if new_cid is None or not is_our_image(tg, sset["stickers"][pos],
-                                           intent["source_dhash"]):
-        log.error("%s: cannot prove what replaced %s in %s (the set changed "
-                  "underneath us, or position %d does not hold our image). Map "
-                  "left untouched -- check the pack, then re-run.",
-                  sym, old_cid, sname, pos)
-        return False
-    # Repoint first, clear second: a crash in between leaves an intent whose
-    # reconcile finds nothing left to move and simply clears it.
-    changed = repoint(map_path, old_cid, new_cid)
+        # Postcondition: prove WHICH sticker is the replacement before trusting it.
+        try:
+            sset = tg.get_sticker_set(sname)
+        except RuntimeError as exc:
+            log.error("%s: cannot re-read %s to confirm the replacement: %s. The "
+                      "intent is kept; the next run resolves it.", sym, sname, exc)
+            return False
+        after = _cids(sset)
+        if old_cid in after:
+            _intent_path().unlink(missing_ok=True)
+            log.error("%s: %s is still live in %s; the replacement did not apply.",
+                      sym, old_cid, sname)
+            return False
+        new_cid = verified_new_cid(before, after, pos)
+        if new_cid is None or not is_our_image(tg, sset["stickers"][pos],
+                                               intent["source_dhash"]):
+            log.error("%s: cannot prove what replaced %s in %s (the set changed "
+                      "underneath us, or position %d does not hold our image). Map "
+                      "left untouched -- check the pack, then re-run.",
+                      sym, old_cid, sname, pos)
+            return False
+        # Repoint first, clear second: a crash in between leaves an intent whose
+        # reconcile finds nothing left to move and simply clears it.
+        changed = _repoint_locked(map_path, old_cid, new_cid)
     _intent_path().unlink(missing_ok=True)
     log.info("fixed %s: %s -> %s (%d map entries)", sym, old_cid, new_cid, changed)
     return True

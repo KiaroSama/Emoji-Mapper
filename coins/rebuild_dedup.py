@@ -67,9 +67,9 @@ BASE = "gvcryptoemoji"
 #
 # LOCK ORDER, project-wide: the pack-family lock is always taken BEFORE
 # canonical_map_lock(), never the other way round (rebuild_dedup.build,
-# verify_logos --fix, fetch_paprika.publish_logos all follow it). A tool that
-# only rewrites the map -- alias_map, enhance_map, remap_ids --apply, and
-# map_and_fill below -- takes the map lock alone, so no cycle exists.
+# rebuild_dedup.map_and_fill, verify_logos --fix, fetch_paprika.publish_logos
+# all follow it). A tool that only rewrites the map -- alias_map, enhance_map,
+# remap_ids --apply -- takes the map lock alone, so no cycle exists.
 LOCK = pack_family_lock_path(BASE)
 TITLE = "@GodVerify Crypto Emoji"
 EMOJI_CHAR = "\U0001FA99"
@@ -293,10 +293,32 @@ def _state_problem(s, plan: list[dict] | None) -> str:
         return f"{len(order)} upload(s) are recorded but no set holds them"
 
     marker = s.get("in_flight")
-    if marker is None or isinstance(marker, str):
-        return ""                       # null, or the legacy bare-key marker
+    if marker is None:
+        return ""
+    if isinstance(marker, str):
+        # The legacy bare-key marker, from before the intent carried a set
+        # name. Accepting it here only moved the failure to
+        # _reconcile_in_flight, which then has no set to probe and stops with
+        # EXIT_PARTIAL -- every run stopping at the same point, and nothing
+        # able to clear it. Resolving the set instead is not available: 5d4669b
+        # wrote this marker BEFORE choosing between add and create, so it can
+        # name a create whose set never reached state["sets"], and probing the
+        # last recorded set would judge that create "did not land" and upload
+        # the image a second time.
+        # The repair has to name BOTH halves of the bookkeeping. The cursor is
+        # advanced past an entry before its mutation is recorded, and 'order'
+        # only gains the key on success -- so clearing the marker alone leaves
+        # one more live sticker than recorded uploads, and the consistency gate
+        # in build() then stops the run again, offering only remap_ids or a full
+        # destructive rebuild. Half a repair is a second permanent stop.
+        return (f"in_flight is the legacy bare key {marker!r}, which names no "
+                f"set to probe. Check by hand whether {marker}.png is live in "
+                f"the newest pack, then repair the state: if it IS live, set "
+                f"'in_flight' to null AND append {marker!r} to 'order'; if it "
+                f"is NOT live, set 'in_flight' to null AND step 'cursor' back "
+                f"by one so it is retried")
     if not isinstance(marker, dict):
-        return "'in_flight' must be an intent object, a key or null"
+        return "'in_flight' must be an intent object or null"
     for field in ("key", "operation", "set_name"):
         if not isinstance(marker.get(field), str) or not marker[field]:
             return f"in_flight is missing {field!r}"
@@ -398,14 +420,6 @@ def _mark_in_flight(state: dict, key: str, operation: str, set_name: str,
         "phase": "upload",
     }
     save_state(state)
-
-
-def _as_marker(marker) -> dict:
-    """Accept the bare-'rep' in-flight marker written by older runs."""
-    if isinstance(marker, str):
-        return {"key": marker, "operation": "add", "set_name": "",
-                "set_index": 0, "expected_before": None, "phase": "upload"}
-    return marker
 
 
 def msg(tg: Telegram, text: str) -> None:
@@ -522,7 +536,7 @@ def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
     the set was never recorded in state["sets"], so its stickers are counted
     nowhere and the entry would be blamed as "did not land" and re-uploaded.
     """
-    marker = _as_marker(state["in_flight"])
+    marker = state["in_flight"]
     known_sets = {s["name"] for s in state["sets"]}
     landed = False
     if marker.get("operation") == "create":
@@ -539,8 +553,31 @@ def _reconcile_in_flight(tg: Telegram, state: dict, cum: int) -> int:
             # image in first, so that is what proves it.
             png = EMOJI / f"{marker['key']}.png"
             stickers = sset.get("stickers") or []
-            same = (tg._sticker_matches(stickers[0], png)
-                    if stickers and png.is_file() else None)
+            # SHAPE FIRST, before anything is mutated. A create leaves EXACTLY
+            # one sticker, so [OURS, FOREIGN] is not our set -- and it passes
+            # the first-sticker check below. The count disagreement only
+            # surfaced afterwards, in the cum/order comparison, by which time
+            # state["sets"], the cursor and the order record had been written
+            # and saved: a refusal that had already half-applied itself.
+            if len(stickers) != 1:
+                # Reachable in ordinary operation, not just in theory: the coin
+                # providers publish into this same family, so a rebuild that
+                # died mid-create followed by a provider top-up leaves
+                # [OURS, PROVIDER]. Without an executable repair this refusal is
+                # itself a permanent stop -- the shape the legacy-marker refusal
+                # above was written to avoid.
+                _stop_retryable(
+                    f"{marker['set_name']} exists but holds {len(stickers)} "
+                    f"sticker(s); the create that made it leaves exactly one, "
+                    f"so this is not the set this rebuild created. Inspect that "
+                    f"pack: if its first sticker IS {marker['key']}.png, another "
+                    f"tool added to a set this rebuild had just made -- record "
+                    f"it by hand in 'sets' (index {marker.get('set_index')}, "
+                    f"name {marker['set_name']}), set 'in_flight' to null and "
+                    f"append {marker['key']!r} to 'order'. If it is NOT ours, "
+                    f"the name collides with another pack: rename this family's "
+                    f"base, or delete that set, then re-run")
+            same = tg._sticker_matches(stickers[0], png) if png.is_file() else None
             if same is False:
                 _stop_retryable(
                     f"{marker['set_name']} exists but its first sticker is not "
@@ -858,6 +895,20 @@ def resolve_by_image(tg: Telegram, live: list[tuple[str, str]],
 
 
 def map_and_fill(tg: Telegram) -> None:
+    """Rebuild the canonical map from live state, holding BOTH locks.
+
+    In the documented project order: pack-family lock FIRST, canonical map lock
+    SECOND. The live sets, the resume state and the map are one snapshot, and
+    the WHOLE map is written back from it -- so a provider that appends a
+    sticker and its map entry after the snapshot but before the write has that
+    entry erased by this write. Reading everything inside the locks is what
+    makes the snapshot describe the state actually being replaced.
+    """
+    with exclusive_lock(LOCK), canonical_map_lock():
+        _map_and_fill(tg)
+
+
+def _map_and_fill(tg: Telegram) -> None:
     plan = load_plan()
     state = load_state(plan)
     sets = sorted(state["sets"], key=lambda x: x["index"])
@@ -926,10 +977,11 @@ def map_and_fill(tg: Telegram) -> None:
               f"that file to silence this.", flush=True)
 
     # Every other writer of the canonical map (alias_map, enhance_map,
-    # remap_ids --apply, verify_logos, the providers) takes this same lock, so a
+    # remap_ids --apply, verify_logos, the providers) takes the same lock, so a
     # concurrent read-modify-write there cannot silently discard this rebuild.
-    with canonical_map_lock():
-        write_json_atomic(TICKER_IDS, ticker_to_id)
+    # map_and_fill() already holds it across the whole snapshot; exclusive_lock
+    # is not reentrant, so claiming it again here would fail the run outright.
+    write_json_atomic(TICKER_IDS, ticker_to_id)
     print(f"mapped {len(ticker_to_id)} tickers across {len(sets)} sets "
           f"({len(live)} live stickers)", flush=True)
     fill_inventory(ticker_to_id)
