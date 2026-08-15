@@ -179,7 +179,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _fake_tg(self, live_count: int):
+    def _fake_tg(self, live_count: int, *, matches=True):
         tg = mock.Mock()
         tg.get_me.return_value = {"username": "bot"}
         sset = {"stickers": [{"file_unique_id": f"f{i}"} for i in range(live_count)]}
@@ -188,6 +188,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         tg.add_sticker.return_value = None
         tg.create_set.return_value = None
         tg.send_message.return_value = None
+        tg._sticker_matches.return_value = matches
         return tg
 
     def _run(self, tg):
@@ -219,6 +220,24 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         saved = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertIn("b", saved["done"])
         self.assertIsNone(saved["in_flight"])
+
+    def test_a_foreign_tail_sticker_does_not_resolve_our_in_flight_add(self):
+        """+1 on restart is not proof either.
+
+        The set grew by one while our add was unresolved -- but by someone
+        else's sticker. Marking our item done here binds our source to theirs.
+        """
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": [], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
+            "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
+                          "set_index": 1, "expected_before": 0},
+        })
+        tg = self._fake_tg(live_count=1, matches=False)
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertNotIn("b", saved["done"],
+                         "a stranger's sticker must not mark our item done")
 
     def test_unexplained_drift_refuses_to_guess(self):
         # Two extra live stickers and no in-flight record: the old code silently
@@ -582,11 +601,14 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
              mock.patch.object(bp.time, "sleep", lambda s: None):
             return bp.main()
 
-    def _tg(self, states):
+    def _tg(self, states, *, matches=True):
         tg = mock.Mock()
         tg.get_me.return_value = {"username": "bot"}
         tg.probe_set_state.side_effect = lambda name: states[name]
         tg.send_message.return_value = None
+        # Reconciliation now requires CONTENT proof, so the fake must say
+        # whether the live sticker is the image the intent was carrying.
+        tg._sticker_matches.return_value = matches
         return tg
 
     def test_landed_create_of_set_two_is_adopted(self):
@@ -614,6 +636,31 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
         saved = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertIn("b", saved["done"], "b should be retried and then land")
         self.assertTrue(tg.create_set.called, "a MISSING create must be retried")
+
+    def test_a_same_named_set_holding_a_FOREIGN_image_is_never_adopted(self):
+        """Existence is not proof we created it.
+
+        A set with the expected name may be someone else's, or left over. If
+        its first sticker is not the image the intent was carrying, adopting it
+        attaches this run's state to a pack it did not build.
+        """
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "foreign"}]}),
+        }, matches=False)
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertNotIn("t2_by_bot", [s["name"] for s in saved["sets"]],
+                         "a foreign set must not be adopted")
+
+    def test_an_unverifiable_create_target_stops_retryably(self):
+        self._state()
+        tg = self._tg({
+            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "x"}]}),
+        }, matches=None)
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
 
     def test_unknown_create_stops_retryably(self):
         self._state()
@@ -794,60 +841,85 @@ class AddedCheckUsesIdentity(unittest.TestCase):
 
     TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-    def _tg(self, after_fuids):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = Path(self.tmp.name) / "ours.png"
+        _png(self.src, (200, 30, 30, 255))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _tg(self, after_fuids, *, matches=True):
         tg = bp.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (
             True, {"stickers": [{"file_unique_id": f} for f in after_fuids]})
+        tg._sticker_matches = lambda st, src: matches
         return tg
 
     def test_our_own_new_sticker_is_recognised(self):
-        tg = self._tg(["a", "b", "MINE"])
-        check = tg._added_check("s", 2, known_before={"a", "b"})
+        tg = self._tg(["a", "b", "MINE"], matches=True)
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
         self.assertIs(check(), True)
 
     def test_nothing_new_means_not_applied(self):
         tg = self._tg(["a", "b"])
-        check = tg._added_check("s", 2, known_before={"a", "b"})
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
         self.assertIs(check(), False)
 
-    def test_someone_elses_sticker_is_not_proof(self):
-        """The audit's case: +1 from a foreign writer while our add failed."""
+    def test_one_new_but_FOREIGN_sticker_is_not_our_upload(self):
+        """The case the previous version of this test got wrong.
+
+        It listed both THEIRS and MINE, which is two new identities and takes
+        the easy branch. The dangerous shape is ONE new identity that is not
+        ours: our add failed while someone else's landed. Identity alone reads
+        that as success, so the content must be compared.
+        """
+        tg = self._tg(["a", "b", "THEIRS"], matches=False)
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
+        self.assertIs(check(), False, "a stranger's sticker is not our upload")
+
+    def test_one_new_sticker_we_cannot_verify_is_unknown(self):
+        tg = self._tg(["a", "b", "?"], matches=None)
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
+        self.assertIsNone(check())
+
+    def test_two_new_identities_are_unattributable(self):
         tg = self._tg(["a", "b", "THEIRS", "MINE"])
-        check = tg._added_check("s", 2, known_before={"a", "b"})
-        self.assertIsNone(check(), "two new identities must be UNKNOWN, not applied")
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
+        self.assertIsNone(check())
 
     def test_a_replacement_is_not_read_as_our_add(self):
         # Same count as expected+1 overall, but an old identity vanished too.
         tg = self._tg(["a", "THEIRS", "MINE"])
-        check = tg._added_check("s", 2, known_before={"a", "b"})
+        check = tg._added_check("s", 2, known_before={"a", "b"}, source=self.src)
         self.assertIsNone(check())
 
-    def test_without_a_snapshot_it_falls_back_to_the_count(self):
+    def test_without_a_snapshot_nothing_is_claimed(self):
+        """No count fallback: expected+1 is not evidence of whose sticker it is."""
         tg = self._tg(["a", "b", "x"])
-        self.assertIs(tg._added_check("s", 2)(), True)
+        self.assertIsNone(tg._added_check("s", 2)())
 
-    def test_stickers_without_identity_fall_back_to_the_count(self):
-        """Regression: unusable identities must NOT read as "not applied".
+    def test_stickers_without_identity_are_unknown_not_applied(self):
+        """Unusable identities must be UNKNOWN in BOTH directions.
 
-        A set whose stickers carry no file_unique_id collapsed to a single
-        placeholder, so the post-add snapshot equalled the pre-add one, the
-        check answered False, and the client re-sent an upload that had already
-        landed -- reintroducing the duplicate it exists to prevent.
+        Answering False re-sends an upload that may have landed (a duplicate);
+        answering True from the count attributes a stranger's sticker to us.
+        Only UNKNOWN is safe, which makes the caller reconcile.
         """
         tg = bp.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (
             True, {"stickers": [{"i": 0}, {"i": 1}]})     # no identities at all
-        check = tg._added_check("s", 1, known_before={"None"})
-        self.assertIs(check(), True, "must fall back to the count, not say False")
+        check = tg._added_check("s", 1, known_before={"None"}, source=self.src)
+        self.assertIsNone(check())
 
     def test_duplicate_identities_are_not_trusted(self):
+        self.assertIsNone(bp._usable_fuids(
+            [{"file_unique_id": "same"}, {"file_unique_id": "same"}]))
         tg = bp.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, {"stickers": [
             {"file_unique_id": "same"}, {"file_unique_id": "same"}]})
-        self.assertIsNone(bp._usable_fuids(
-            [{"file_unique_id": "same"}, {"file_unique_id": "same"}]))
-        # 2 stickers where 1 was expected -> count path says applied.
-        self.assertIs(tg._added_check("s", 1, known_before={"x"})(), True)
+        self.assertIsNone(
+            tg._added_check("s", 1, known_before={"x"}, source=self.src)())
 
     def test_usable_fuids_accepts_a_well_formed_set(self):
         self.assertEqual(

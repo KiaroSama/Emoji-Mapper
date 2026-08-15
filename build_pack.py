@@ -580,7 +580,8 @@ class Telegram:
         raise LiveStateUnknown(f"live state of {name} is unknown")
 
     def _added_check(self, name: str, expected_before: int | None, *,
-                     known_before: set[str] | None = None):
+                     known_before: set[str] | None = None,
+                     source: Path | None = None):
         """applied_check for addStickerToSet: did OUR sticker land?
 
         A count is not identity. "the set grew by one" is equally true when a
@@ -604,24 +605,32 @@ class Telegram:
                 return None  # unknown / set vanished: reconcile, don't guess
             stickers = sset.get("stickers", [])
             now = _usable_fuids(stickers)
-            if known_before is not None and now is not None:
-                new = now - known_before
-                if len(new) == 1:
-                    return True
-                if not new:
-                    return False
-                return None      # several new stickers: someone else wrote too
-            # No usable identities (a sticker without a file_unique_id, or two
-            # sharing one). Falling through to the count is essential: treating
-            # an unusable snapshot as "nothing new appeared" would report a
-            # landed upload as not applied and re-send it -- the exact duplicate
-            # this check exists to prevent.
-            n = len(stickers)
-            if n == expected_before + 1:
+            if known_before is None or now is None:
+                # Without usable identities nothing here can be proved. A count
+                # of expected+1 is NOT evidence -- it is equally produced by
+                # someone else's sticker landing while ours failed -- and
+                # answering False would re-send an upload that may have landed.
+                return None
+            new = now - known_before
+            if not new:
+                return False         # definitely nothing was added
+            if len(new) > 1:
+                return None          # someone else wrote too: unattributable
+            if source is None:
+                return None          # cannot prove the newcomer is ours
+            # Exactly one new sticker. That is still not proof it is OURS: our
+            # request may have failed while an external or manual add landed.
+            # Compare its content with the image we sent.
+            added = next((s for s in stickers
+                          if str(s.get("file_unique_id")) in new), None)
+            if added is None:
+                return None
+            same = self._sticker_matches(added, source)
+            if same is True:
                 return True
-            if n == expected_before:
-                return False
-            return None  # count drifted: reconcile, don't guess
+            if same is False:
+                return False         # a foreign sticker landed; ours did not
+            return None              # could not verify: reconcile, don't guess
 
         return check
 
@@ -744,7 +753,7 @@ class Telegram:
             "sticker": json.dumps(_sticker_json(emoji, keywords)),
         }, files={"file0": (png.name, png.read_bytes(), "image/png")},
             applied_check=self._added_check(name, expected_before,
-                                            known_before=before))
+                                            known_before=before, source=png))
 
     # ----- multi-format helpers (static / animated / video) -------------- #
     def get_sticker_set(self, name: str) -> dict:
@@ -809,7 +818,7 @@ class Telegram:
             "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
         }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
             applied_check=self._added_check(name, expected_before,
-                                            known_before=before))
+                                            known_before=before, source=path))
 
 
 _MIME_BY_FORMAT = {
@@ -1046,10 +1055,27 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                   file=sys.stderr)
             return EXIT_PARTIAL
 
+        # The image the interrupted request was carrying. Reconciliation
+        # compares CONTENT against it: "the set exists" and "the count is one
+        # higher" are both equally true when someone else's sticker landed and
+        # ours did not.
+        in_flight_src = next(
+            (p for p in sources if p.stem.lower() == in_flight), None)
+
         recorded = next((s for s in sets if s["name"] == target), None)
         if operation == "create":
             if set_state is SetState.EXISTS:
                 live_n = len(sset.get("stickers", []))
+                first = (sset.get("stickers") or [None])[0]
+                proof = (tg._sticker_matches(first, in_flight_src)
+                         if first is not None and in_flight_src else None)
+                if proof is not True:
+                    print(f"ERROR: {target} exists but its first sticker "
+                          f"{'does not match' if proof is False else 'could not be compared with'} "
+                          f"{in_flight}.\n"
+                          f"       Refusing to adopt a set this run may not have "
+                          f"created.", file=sys.stderr)
+                    return EXIT_FAILED if proof is False else EXIT_PARTIAL
                 if recorded is None:
                     sets.append({"name": target,
                                  "title": intent.get("title", ""),
@@ -1081,12 +1107,32 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                       file=sys.stderr)
                 return EXIT_FAILED
             if live_n == expected + 1:
-                done.add(in_flight)
-                pending = [p for p in pending if p.stem.lower() != in_flight]
-                if recorded is not None:
-                    recorded["count"] = live_n
-                print(f"  reconciled from live: {in_flight} was applied before "
-                      f"the interruption", flush=True)
+                # One more sticker than before is NOT proof it is ours: an
+                # external or manual add produces exactly the same count while
+                # our request failed. Marking the item done on that evidence
+                # binds our source to a stranger's sticker.
+                newest = sset.get("stickers", [])[-1]
+                proof = (tg._sticker_matches(newest, in_flight_src)
+                         if in_flight_src else None)
+                if proof is True:
+                    done.add(in_flight)
+                    pending = [p for p in pending if p.stem.lower() != in_flight]
+                    if recorded is not None:
+                        recorded["count"] = live_n
+                    print(f"  reconciled from live: {in_flight} was applied "
+                          f"before the interruption", flush=True)
+                elif proof is False:
+                    print(f"ERROR: {target} grew by one, but that sticker is not "
+                          f"{in_flight} -- someone else wrote to this set.\n"
+                          f"       Refusing to attribute it to this run.",
+                          file=sys.stderr)
+                    return EXIT_FAILED
+                else:
+                    print(f"ERROR: cannot verify whether the sticker added to "
+                          f"{target} is {in_flight}.\n"
+                          f"       Refusing to guess. Retry when the image can "
+                          f"be compared.", file=sys.stderr)
+                    return EXIT_PARTIAL
             elif live_n == expected:
                 print(f"  {in_flight} did not land; it stays pending", flush=True)
             else:
