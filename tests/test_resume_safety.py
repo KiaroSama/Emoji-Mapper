@@ -14,8 +14,10 @@ No network and no real sleeps: every Telegram call is faked.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -180,8 +182,9 @@ class ResumeAfterSkippedImage(unittest.TestCase):
     def _fake_tg(self, live_count: int):
         tg = mock.Mock()
         tg.get_me.return_value = {"username": "bot"}
-        tg.probe_sticker_set.return_value = (
-            True, {"stickers": [{"file_unique_id": f"f{i}"} for i in range(live_count)]})
+        sset = {"stickers": [{"file_unique_id": f"f{i}"} for i in range(live_count)]}
+        tg.probe_sticker_set.return_value = (True, sset)
+        tg.probe_set_state.return_value = (bp.SetState.EXISTS, sset)
         tg.add_sticker.return_value = None
         tg.create_set.return_value = None
         tg.send_message.return_value = None
@@ -205,7 +208,8 @@ class ResumeAfterSkippedImage(unittest.TestCase):
             "in_flight": "b",
         })
         tg = self._fake_tg(live_count=1)
-        self.assertEqual(self._run(tg), 0)
+        # a.png is an empty file, so the run is legitimately PARTIAL.
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
 
         uploaded = [c.args[2].stem for c in tg.add_sticker.call_args_list]
         uploaded += [c.args[3].stem for c in tg.create_set.call_args_list]
@@ -225,14 +229,15 @@ class ResumeAfterSkippedImage(unittest.TestCase):
             "in_flight": None,
         })
         tg = self._fake_tg(live_count=2)
-        self.assertEqual(self._run(tg), 4, "must refuse rather than mis-attribute")
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED,
+                         "must refuse rather than mis-attribute")
         tg.add_sticker.assert_not_called()
         tg.create_set.assert_not_called()
 
     def test_corrupt_state_does_not_restart_from_zero(self):
         self.state.write_text('{"base": "t", "done": [trunca', encoding="utf-8")
         tg = self._fake_tg(live_count=0)
-        self.assertEqual(self._run(tg), 4)
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED)
         tg.add_sticker.assert_not_called()
         tg.create_set.assert_not_called()
 
@@ -245,9 +250,13 @@ class ResumeAfterSkippedImage(unittest.TestCase):
 
         tg.create_set.side_effect = record
         tg.add_sticker.side_effect = record
-        self.assertEqual(self._run(tg), 0)
-        # a.png is unusable and skipped; b and c upload, each announced first.
-        self.assertEqual(seen, ["b", "c"])
+        # a.png is unusable and skipped, so the run is PARTIAL, not clean.
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
+        # b and c upload, each announcing a STRUCTURED intent before the call.
+        self.assertEqual([i["key"] for i in seen], ["b", "c"])
+        self.assertEqual([i["operation"] for i in seen], ["create", "add"])
+        self.assertTrue(all(i["set_name"] for i in seen),
+                        "every intent must name the set it targets")
 
 
 class ExitCodes(unittest.TestCase):
@@ -341,6 +350,196 @@ class LinksDestination(unittest.TestCase):
         for module in (bp, build_collection, rd):
             self.assertIs(module.links_chat_id, bp.links_chat_id,
                           f"{module.__name__} must use the shared resolver")
+
+
+class SafeConfigParsing(unittest.TestCase):
+    """A typo in .env must not kill the process before argparse can speak."""
+
+    def _env(self, value):
+        return mock.patch.dict("os.environ", {"X_TEST_NUM": value}, clear=False)
+
+    def test_valid_value(self):
+        with self._env("42"):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 7), 42)
+
+    def test_garbage_falls_back_instead_of_raising(self):
+        with self._env("not-a-number"):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 7), 7)
+
+    def test_absent_and_blank_use_the_default(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 7), 7)
+        with self._env("   "):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 7), 7)
+
+    def test_values_are_clamped(self):
+        with self._env("999"):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 1, maximum=64), 64)
+        with self._env("-5"):
+            self.assertEqual(bp.safe_int_env("X_TEST_NUM", 1, minimum=0), 0)
+
+
+class PublisherLock(unittest.TestCase):
+    """Two publishers must not mutate one pack family at the same time."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lock = Path(self.tmp.name) / "state.json.lock"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_second_holder_is_refused(self):
+        with bp.exclusive_lock(self.lock):
+            with self.assertRaises(bp.LockBusy):
+                with bp.exclusive_lock(self.lock):
+                    self.fail("a second publisher acquired the lock")
+
+    def test_lock_is_released_on_exit(self):
+        with bp.exclusive_lock(self.lock):
+            self.assertTrue(self.lock.exists())
+        self.assertFalse(self.lock.exists())
+
+    def test_lock_is_released_even_on_error(self):
+        with self.assertRaises(ZeroDivisionError):
+            with bp.exclusive_lock(self.lock):
+                1 / 0
+        self.assertFalse(self.lock.exists())
+
+    def test_stale_lock_is_reclaimed(self):
+        self.lock.write_text("pid=999 (crashed)", encoding="utf-8")
+        old = time.time() - 10_000
+        os.utime(self.lock, (old, old))
+        with bp.exclusive_lock(self.lock, stale_after=3600):
+            pass          # must not raise
+
+
+class TriStateLiveReads(unittest.TestCase):
+    """"Unknown" must never be reported as "the set is empty"."""
+
+    def _tg(self, probe_result):
+        tg = bp.Telegram("1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        tg.probe_sticker_set = lambda name: probe_result
+        return tg
+
+    def test_exists(self):
+        tg = self._tg((True, {"stickers": [{}, {}]}))
+        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.EXISTS)
+        self.assertEqual(tg.live_count_strict("s"), 2)
+
+    def test_missing_is_a_real_zero(self):
+        tg = self._tg((True, None))
+        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.MISSING)
+        self.assertEqual(tg.live_count_strict("s"), 0)
+
+    def test_unknown_raises_instead_of_returning_zero(self):
+        tg = self._tg((False, None))
+        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.UNKNOWN)
+        with self.assertRaises(bp.LiveStateUnknown):
+            tg.live_count_strict("s")
+
+
+class UnresolvedMutationStopsTheRun(unittest.TestCase):
+    """After an ambiguous upload, NO further mutation may be attempted.
+
+    Continuing would overwrite the in-flight intent with the next item's, which
+    destroys the only record of which mutation is unresolved.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "src"
+        for name, color in (("a.png", (200, 0, 0, 255)),
+                            ("b.png", (0, 200, 0, 255)),
+                            ("c.png", (0, 0, 200, 255))):
+            _png(self.src / name, color)
+        self.state = self.dir / "state.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, tg):
+        argv = ["build_pack.py", "--base", "t", "--title", "T", "--user-id", "1",
+                "--source-dir", str(self.src), "--token-env", "FAKE_TOKEN",
+                "--state", str(self.state)]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.dict("os.environ", {"FAKE_TOKEN": "x"}, clear=False), \
+             mock.patch.object(bp, "Telegram", return_value=tg), \
+             mock.patch.object(bp.time, "sleep", lambda s: None):
+            return bp.main()
+
+    def _tg(self):
+        tg = mock.Mock()
+        tg.get_me.return_value = {"username": "bot"}
+        tg.probe_set_state.return_value = (bp.SetState.MISSING, None)
+        tg.send_message.return_value = None
+        return tg
+
+    def test_ambiguous_add_stops_before_the_next_item(self):
+        tg = self._tg()
+        # First item creates the set; the second add comes back ambiguous.
+        tg.create_set.return_value = None
+        tg.add_sticker.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.probe_set_state.return_value = (bp.SetState.EXISTS,
+                                           {"stickers": [{"file_unique_id": "f0"}]})
+
+        code = self._run(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL, "an unresolved add must not exit 0")
+        self.assertEqual(tg.add_sticker.call_count, 1,
+                         "no second mutation may be attempted")
+
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        intent = saved["in_flight"]
+        self.assertIsNotNone(intent, "the unresolved intent must be preserved")
+        self.assertEqual(intent["operation"], "add")
+        self.assertEqual(intent["key"], "b")
+
+    def test_ambiguous_create_records_the_target_set(self):
+        tg = self._tg()
+        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.probe_set_state.return_value = (bp.SetState.MISSING, None)
+
+        code = self._run(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL)
+        intent = json.loads(self.state.read_text(encoding="utf-8"))["in_flight"]
+        self.assertEqual(intent["operation"], "create")
+        self.assertTrue(intent["set_name"],
+                        "an ambiguous create must record the set name it targeted")
+
+    def test_unknown_live_state_on_resume_keeps_the_intent(self):
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": [], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
+            "in_flight": {"key": "a", "operation": "add", "set_name": "t1_by_bot",
+                          "set_index": 1, "expected_before": 0},
+        })
+        tg = self._tg()
+        tg.probe_set_state.return_value = (bp.SetState.UNKNOWN, None)
+
+        code = self._run(tg)
+        self.assertEqual(code, bp.EXIT_PARTIAL)
+        tg.add_sticker.assert_not_called()
+        tg.create_set.assert_not_called()
+        intent = json.loads(self.state.read_text(encoding="utf-8"))["in_flight"]
+        self.assertIsNotNone(intent, "an unknown probe must not clear the intent")
+
+    def test_state_for_a_different_base_is_refused(self):
+        bp.write_json_atomic(self.state, {
+            "base": "OTHER", "per_set": 200, "done": [], "sent": [], "sets": [],
+        })
+        tg = self._tg()
+        self.assertEqual(self._run(tg), bp.EXIT_FAILED)
+        tg.create_set.assert_not_called()
+
+    def test_unusable_images_make_the_run_partial(self):
+        (self.src / "bad.png").write_bytes(b"")
+        tg = self._tg()
+        tg.create_set.return_value = None
+        tg.add_sticker.return_value = None
+        tg.probe_set_state.return_value = (bp.SetState.EXISTS, {"stickers": []})
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL,
+                         "a skipped image must not report full success")
 
 
 class SharedLogoGuard(unittest.TestCase):

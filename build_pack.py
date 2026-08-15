@@ -64,6 +64,28 @@ def ingest_exit_code(succeeded: int, failed: int) -> int:
     return EXIT_PARTIAL if succeeded else EXIT_FAILED
 
 
+def _intent_key(intent) -> str | None:
+    """The item key of an in-flight intent, accepting the legacy bare string."""
+    if isinstance(intent, dict):
+        return intent.get("key")
+    return intent or None
+
+
+def make_intent(*, key: str, operation: str, set_name: str, set_index: int,
+                expected_before: int | None, title: str = "",
+                fmt: str = "static") -> dict:
+    """Structured record of a mutation that is about to be attempted.
+
+    A bare item key is not enough to reconcile an ambiguous CREATE: the set it
+    would have created is not yet in the state's set list, so a restart has no
+    name to probe. Recording the operation and its target makes every
+    unresolved mutation reconcilable.
+    """
+    return {"key": key, "operation": operation, "set_name": set_name,
+            "set_index": set_index, "expected_before": expected_before,
+            "title": title, "format": fmt, "started_utc": _utc_now()}
+
+
 def safe_int_env(name: str, default: int = 0, *, minimum: int | None = None,
                  maximum: int | None = None) -> int:
     """Parse a numeric env var without letting a typo kill the process.
@@ -282,7 +304,15 @@ class Telegram:
         for attempt in range(1, retries + 1):
             try:
                 r = self.s.post(url, data=data, files=files, timeout=60)
-                payload = r.json()
+                try:
+                    payload = r.json()
+                except ValueError as exc:
+                    # A proxy or gateway can answer with an HTML error page.
+                    # That is a transport failure, not a Bot API reply, so it
+                    # must go through the same retry/applied_check path as any
+                    # other network error instead of escaping raw.
+                    raise requests.exceptions.InvalidJSONError(
+                        f"non-JSON response (HTTP {r.status_code})") from exc
                 if payload.get("ok"):
                     return payload["result"]
                 desc = str(payload.get("description", ""))
@@ -561,7 +591,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True, help="Set name base (letters/digits/_).")
     ap.add_argument("--title", required=True, help="Human-readable set title.")
-    ap.add_argument("--user-id", type=int, default=int(os.environ.get("PACK_OWNER_USER_ID", "0")))
+    ap.add_argument("--user-id", type=int,
+                    default=safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0))
     ap.add_argument("--emoji", default=DEFAULT_EMOJI, help="Associated standard emoji.")
     ap.add_argument("--per-set", type=int, default=PER_SET)
     ap.add_argument("--limit", type=int, default=0, help="Max images to add (0=all).")
@@ -628,6 +659,23 @@ def main() -> int:
               f"named {args.base}1_by_<bot> ...  state={state_file.name}", flush=True)
         return 0
 
+    # Two publishers on one state file both see the same item pending and both
+    # upload it. Hold the lock for the whole mutation phase.
+    lock_path = state_file.with_name(state_file.name + ".lock")
+    try:
+        lock = exclusive_lock(lock_path)
+        lock.__enter__()
+    except LockBusy as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+
+    try:
+        return _run_build(args, token, state_file, sources, keywords)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _run_build(args, token, state_file, sources, keywords) -> int:
     tg = Telegram(token)
     me = tg.get_me()
     bot_username = me["username"]
@@ -647,8 +695,23 @@ def main() -> int:
                   f"       Inspect or delete the file deliberately, then re-run.",
                   file=sys.stderr)
             return 4
-        if loaded.get("base") == args.base:
-            state = loaded
+        # An existing state file that belongs to a DIFFERENT pack, or was
+        # written with different settings, must not be silently ignored: doing
+        # so restarts a published pack from zero and re-uploads everything.
+        mismatches = []
+        if loaded.get("base") != args.base:
+            mismatches.append(f"base {loaded.get('base')!r} != {args.base!r}")
+        if loaded.get("per_set") not in (None, args.per_set):
+            mismatches.append(f"per_set {loaded.get('per_set')} != {args.per_set}")
+        if mismatches:
+            print(f"ERROR: resume state {state_file} does not match this run "
+                  f"({'; '.join(mismatches)}).\n"
+                  f"       Refusing to continue: starting from an empty state "
+                  f"would re-upload an already published pack.\n"
+                  f"       Use --state for a different file, or delete that one "
+                  f"deliberately.", file=sys.stderr)
+            return EXIT_FAILED
+        state = loaded
     done = set(state["done"])
     sets = state["sets"]
 
@@ -662,18 +725,32 @@ def main() -> int:
     # image was skipped for being missing/unusable, because a skip consumes a
     # position in `pending` without producing a sticker; that mis-attribution
     # both re-uploads a duplicate and marks the wrong image as done.
+    in_flight = _intent_key(state.get("in_flight"))
     if sets:
-        known, sset = tg.probe_sticker_set(sets[-1]["name"])
-        if known and sset is not None:
+        set_state, sset = tg.probe_set_state(sets[-1]["name"])
+        if set_state is SetState.UNKNOWN:
+            # The one thing we must not do is clear an unresolved intent because
+            # the probe failed: that is how a mutation that DID land gets sent a
+            # second time.
+            print(f"ERROR: cannot determine the live state of "
+                  f"{sets[-1]['name']}.\n"
+                  f"       Refusing to continue while an upload may be "
+                  f"unresolved. Retry when Telegram is reachable.",
+                  file=sys.stderr)
+            return EXIT_PARTIAL
+        if set_state is SetState.EXISTS:
             live_n = len(sset.get("stickers", []))
             drift = live_n - sets[-1]["count"]
-            in_flight = state.get("in_flight")
             if drift == 1 and in_flight:
                 done.add(in_flight)
                 pending = [p for p in pending if p.stem.lower() != in_flight]
                 sets[-1]["count"] = live_n
                 print(f"  reconciled from live: {in_flight} was applied before "
                       f"the crash", flush=True)
+                state["in_flight"] = None       # verified postcondition
+            elif drift == 0 and in_flight:
+                print(f"  {in_flight} did not land; it stays pending", flush=True)
+                state["in_flight"] = None       # verified postcondition
             elif drift > 0:
                 # More live stickers than we can account for: another run, a
                 # manual edit, or a lost in-flight record. Guessing here is what
@@ -684,8 +761,36 @@ def main() -> int:
                       f"       Refusing to guess which images are already live. "
                       f"Reconcile the set manually, or delete it and re-run.",
                       file=sys.stderr)
-                return 4
-    state["in_flight"] = None
+                return EXIT_FAILED
+    elif in_flight:
+        # An ambiguous CREATE: the set was never recorded in state["sets"], so
+        # only the intent knows which set name to look for.
+        intent = state.get("in_flight") or {}
+        pending_set = intent.get("set_name") if isinstance(intent, dict) else None
+        if not pending_set:
+            print(f"ERROR: an upload of {in_flight} is unresolved but the intent "
+                  f"does not name a target set, so it cannot be reconciled.\n"
+                  f"       Delete {state_file.name} deliberately after checking "
+                  f"Telegram.", file=sys.stderr)
+            return EXIT_FAILED
+        set_state, sset = tg.probe_set_state(pending_set)
+        if set_state is SetState.UNKNOWN:
+            print(f"ERROR: cannot determine whether {pending_set} was created.\n"
+                  f"       Refusing to continue while the create is unresolved.",
+                  file=sys.stderr)
+            return EXIT_PARTIAL
+        if set_state is SetState.EXISTS:
+            count = len(sset.get("stickers", []))
+            sets.append({"name": pending_set, "title": intent.get("title", ""),
+                         "count": count, "index": intent.get("set_index", 1)})
+            done.add(in_flight)
+            pending = [p for p in pending if p.stem.lower() != in_flight]
+            print(f"  adopted {pending_set} created before the interruption "
+                  f"({count} sticker(s))", flush=True)
+        else:
+            print(f"  create of {pending_set} did not land; {in_flight} stays "
+                  f"pending", flush=True)
+        state["in_flight"] = None               # verified postcondition
 
     print(f"Bot: @{bot_username}  owner_user_id={args.user_id}  "
           f"images={len(sources)}  already_done={len(done)}  pending={len(pending)}", flush=True)
@@ -737,6 +842,8 @@ def main() -> int:
         in_set = 0
 
     created = []
+    failed: list[str] = []      # items this run could not upload
+    uploaded = 0
     try:
         for i, path in enumerate(pending):
             ticker = path.stem.lower()
@@ -745,13 +852,24 @@ def main() -> int:
             # Skip unusable files so one bad logo never stops the whole run.
             if not path.is_file() or path.stat().st_size == 0:
                 print(f"  skip {ticker}: missing/empty file", flush=True)
+                failed.append(ticker)
                 continue
 
             # Write the intent BEFORE the request. If the process dies between
             # Telegram applying the upload and us recording it, the next run
             # knows exactly which image that was instead of inferring it from
             # positions (see the resume block above).
-            state["in_flight"] = ticker
+            if in_set != 0:
+                state["in_flight"] = make_intent(
+                    key=ticker, operation="add", set_name=set_name,
+                    set_index=set_index, expected_before=in_set)
+            else:
+                next_index = set_index + 1
+                state["in_flight"] = make_intent(
+                    key=ticker, operation="create",
+                    set_name=f"{args.base}{next_index}_by_{bot_username}",
+                    set_index=next_index, expected_before=0,
+                    title=f"{args.title} {next_index}")
             save_state()
 
             try:
@@ -777,34 +895,47 @@ def main() -> int:
                     created.append(set_name)
                     print(f"[set {set_index}] created {set_name}", flush=True)
             except AmbiguousUploadError as exc:
-                # The call may or may not be live. NEVER re-send (that is how
-                # the same emoji ends up in a pack twice); adopt a create that
-                # verifiably landed, otherwise leave it to the next-run
-                # live-count reconcile above.
+                # The call may or may not be live. Try to settle it right here;
+                # if it cannot be settled, STOP. Continuing to the next item
+                # would overwrite this intent with the next one and destroy the
+                # only record of which mutation is unresolved -- after which a
+                # later run can re-send an upload that already landed.
                 if not placed and in_set == 0:
-                    known, sset = tg.probe_sticker_set(set_name)
-                    if known and sset is not None and len(sset.get("stickers", [])) == 1:
+                    set_state, sset = tg.probe_set_state(set_name)
+                    if set_state is SetState.EXISTS and \
+                            len(sset.get("stickers", [])) == 1:
                         sets.append({"name": set_name, "title": title, "count": 1,
                                      "index": set_index})
                         created.append(set_name)
+                        state["in_flight"] = None   # verified postcondition
                         print(f"[set {set_index}] adopted {set_name} after "
                               f"ambiguous create", flush=True)
                     else:
-                        set_index -= 1
-                        print(f"  {ticker}: {exc}; left for next-run reconcile", flush=True)
-                        save_state()
-                        continue
+                        save_state()                # keep the intent
+                        print(f"ERROR: {ticker}: {exc}\n"
+                              f"       The create is unresolved; refusing to "
+                              f"start another upload. Re-run to reconcile.",
+                              file=sys.stderr)
+                        return EXIT_PARTIAL
                 else:
-                    print(f"  {ticker}: {exc}; left for next-run reconcile", flush=True)
-                    save_state()
-                    continue
+                    save_state()                    # keep the intent
+                    print(f"ERROR: {ticker}: {exc}\n"
+                          f"       The upload is unresolved; refusing to start "
+                          f"another one. Re-run to reconcile.", file=sys.stderr)
+                    return EXIT_PARTIAL
             except RuntimeError as exc:
-                # Non-retryable error for THIS sticker (e.g. bad image): skip it.
+                # Non-retryable error for THIS sticker (e.g. bad image): the
+                # request definitively did not apply, so the intent is settled
+                # and the run may continue with the next item.
                 if not placed and in_set == 0:
                     set_index -= 1  # undo the index reserved for the failed create
+                state["in_flight"] = None
+                failed.append(ticker)
+                save_state()
                 print(f"  skip {ticker}: {exc}", flush=True)
                 continue
             in_set += 1
+            uploaded += 1
             done.add(ticker)
             state["in_flight"] = None
             # Persist immediately: batching this every 10 items is what leaves a
@@ -823,10 +954,16 @@ def main() -> int:
 
     print("", flush=True)
     print(f"DONE. {len(done)} total emojis across {len(sets)} set(s). "
-          f"New sets this run: {len(created)}.", flush=True)
+          f"New sets this run: {len(created)}. "
+          f"Uploaded: {uploaded}. Failed/skipped: {len(failed)}.", flush=True)
     for s in sets:
         print(f"  https://t.me/addemoji/{s['name']}  ({s['count']})", flush=True)
-    return 0
+    if failed:
+        # A run that could not upload some images is not a success; automation
+        # and the launcher menu previously saw exit 0 for a half-built pack.
+        print(f"  failed/skipped: {', '.join(sorted(failed)[:20])}"
+              f"{' ...' if len(failed) > 20 else ''}", file=sys.stderr)
+    return ingest_exit_code(uploaded, len(failed))
 
 
 if __name__ == "__main__":
