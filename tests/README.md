@@ -3,11 +3,28 @@
 Run from the repository root:
 
 ```powershell
-.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"
 ```
+
+**`-t .` is required.** Without it the tests directory becomes the top-level,
+modules load as `test_x` instead of `tests.test_x`, and `tests/__init__.py`
+never runs — which silently disables the guard described below.
+`SuiteIsHermetic.test_the_guard_is_installed_at_all` fails loudly if the suite
+is started without it.
 
 Tests use Python's stdlib `unittest` (no extra dependencies). Video tests are
 skipped automatically when `ffmpeg`/`ffprobe` are not on `PATH`.
+
+## The suite never touches the real network
+
+`tests/__init__.py` runs before any test module and scrubs every
+token/API-key-shaped environment variable, points `TELEGRAM_API_BASE` at the
+discard port, stops `build_pack.load_env()` from reading `.env`, and refuses
+outbound sockets to anything but loopback (`NetworkAccessDenied`).
+
+This exists because a test meant only to check a CLI usage error once reached
+live Telegram and replaced a sticker in a published pack. Inject a fake session
+rather than adding an opt-out.
 
 ## Layout
 

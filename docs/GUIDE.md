@@ -335,7 +335,7 @@ split across multiple messages (each under 4096 chars).
 ## 10. Testing, CI, and Git
 
 ```powershell
-.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"   # unit tests
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"   # unit tests
 .\run.ps1 -Check                                                        # env doctor
 ```
 
@@ -1224,7 +1224,7 @@ $PY coins\verify_logos.py --emoji-dir "F:\...\emoji" --fix --only sol,xrp
 $PY coins\write_manifests.py --out-dir "F:\...\@YourBrand Crypto Emoji"
 
 # --- tests / CI-locally ---
-$PY -m unittest discover -s tests -p "test_*.py"
+$PY -m unittest discover -s tests -t . -p "test_*.py"
 $PY -m compileall -q .
 $PY -c "import build_pack, make_emoji_pngs, fetch_pack, fetch_emoji_ids, add_media, build_collection, emoji_bot, panel"
 
