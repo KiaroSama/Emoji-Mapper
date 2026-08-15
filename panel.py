@@ -28,7 +28,7 @@ from urllib.parse import unquote
 
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import Catalog
-from emojikit.logsetup import setup_logging
+from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.media import hamming
 
 ROOT = Path(__file__).resolve().parent
@@ -750,4 +750,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(record_exit_code(main()))

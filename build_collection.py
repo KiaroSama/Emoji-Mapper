@@ -34,10 +34,11 @@ import re
 import time
 from pathlib import Path
 
-from build_pack import AmbiguousUploadError, Telegram, load_env
+from build_pack import (AmbiguousUploadError, Telegram, links_chat_id,
+                        load_env)
 from emojikit import media
 from emojikit.catalog import Catalog
-from emojikit.logsetup import redact, setup_logging
+from emojikit.logsetup import record_exit_code, redact, setup_logging
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
@@ -260,13 +261,15 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
            name: str, title: str) -> None:
     if name in state["sent"]:
         return
+    dest = links_chat_id(user_id)
     try:
-        tg.send_message(user_id, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
+        tg.send_message(dest, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
         state["sent"].append(name)
         save_json(_state_path(data_dir, base), state)
-        log.info("sent link for %s", name)
+        log.info("sent link for %s to %s", name, dest)
     except Exception as exc:  # noqa: BLE001
-        log.warning("notify failed for %s: %s", name, exc)
+        log.warning("notify failed for %s (destination %s): %s",
+                    name, dest, redact(str(exc)))
 
 
 def _media_ok(path: Path, fmt: str) -> bool:
@@ -596,4 +599,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(record_exit_code(main()))

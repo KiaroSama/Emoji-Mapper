@@ -42,8 +42,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import (AmbiguousUploadError, Telegram, load_env,
-                        write_json_atomic)
+from build_pack import (AmbiguousUploadError, Telegram, links_chat_id,
+                        load_env, write_json_atomic)
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"
@@ -170,9 +170,14 @@ def live_count(tg: Telegram, name: str) -> int:
 
 
 def msg(tg: Telegram, text: str) -> None:
-    """Send a message to the owner with link previews disabled."""
+    """Announce pack links, with link previews disabled.
+
+    Goes to PACK_LINKS_CHAT_ID when configured (a channel the bot administers),
+    otherwise the owner's private chat.
+    """
     tg._call("sendMessage", data={
-        "chat_id": USER_ID, "text": text, "disable_web_page_preview": True,
+        "chat_id": links_chat_id(USER_ID), "text": text,
+        "disable_web_page_preview": True,
     })
 
 

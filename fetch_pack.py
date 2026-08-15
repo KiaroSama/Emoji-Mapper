@@ -28,7 +28,7 @@ from pathlib import Path
 from build_pack import Telegram, ingest_exit_code, load_env
 from emojikit import media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
-from emojikit.logsetup import redact, setup_logging
+from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("fetch_pack")
@@ -166,4 +166,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(record_exit_code(main()))

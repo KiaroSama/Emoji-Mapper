@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -205,6 +207,63 @@ class TestCopyButtonLimit(unittest.TestCase):
 
     def test_single_id(self):
         self._assert_covers(["111111111"])
+
+
+class TestAccessControl(unittest.TestCase):
+    """The bot is private: only listed user ids may use it."""
+
+    def setUp(self):
+        self.sent = []
+        self.tg = mock.Mock()
+        self.tg._call.side_effect = lambda m, **kw: self.sent.append((m, kw))
+
+    def _msg(self, uid, text="hi", chat_type="private"):
+        return {"message": {"message_id": 1, "text": text,
+                            "from": {"id": uid},
+                            "chat": {"id": uid, "type": chat_type}}}
+
+    def _env(self, **kw):
+        return mock.patch.dict(os.environ, kw, clear=False)
+
+    def test_allowlist_defaults_to_the_owner(self):
+        with self._env(PACK_OWNER_USER_ID="42", BOT_ALLOWED_USER_IDS=""):
+            self.assertEqual(b.allowed_user_ids(), {42})
+
+    def test_allowlist_parses_separators_and_ignores_junk(self):
+        with self._env(BOT_ALLOWED_USER_IDS="1, 2 ;3, oops,"):
+            self.assertEqual(b.allowed_user_ids(), {1, 2, 3})
+
+    def test_empty_configuration_authorizes_nobody(self):
+        """A misconfiguration must fail closed, not open the bot to everyone."""
+        with self._env(PACK_OWNER_USER_ID="0", BOT_ALLOWED_USER_IDS=""):
+            self.assertEqual(b.allowed_user_ids(), set())
+
+    def test_authorized_user_is_served(self):
+        b.handle_update(self.tg, 42, self._msg(42, "/start"), {42})
+        methods = [m for m, _ in self.sent]
+        self.assertIn("sendMessage", methods)
+        body = self.sent[0][1]["data"]["text"]
+        self.assertNotIn("not on its access list", body)
+
+    def test_unauthorized_private_user_gets_only_a_denial(self):
+        b.handle_update(self.tg, 42, self._msg(999, "/start"), {42})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("not on its access list", self.sent[0][1]["data"]["text"])
+
+    def test_unauthorized_user_cannot_extract_ids(self):
+        upd = self._msg(999)
+        upd["message"]["entities"] = [
+            {"type": "custom_emoji", "custom_emoji_id": "111111111"}]
+        b.handle_update(self.tg, 42, upd, {42})
+        sent_text = " ".join(kw["data"]["text"] for _, kw in self.sent)
+        self.assertNotIn("111111111", sent_text)
+
+    def test_unauthorized_group_message_is_silently_ignored(self):
+        upd = self._msg(999, chat_type="supergroup")
+        upd["message"]["entities"] = [
+            {"type": "custom_emoji", "custom_emoji_id": "111111111"}]
+        b.handle_update(self.tg, 42, upd, {42})
+        self.assertEqual(self.sent, [], "must not reply into a group")
 
 
 class TestOffsetPersistence(unittest.TestCase):
