@@ -44,8 +44,13 @@ jobs:
       - name: Import smoke test (all entry points, discovered)
         run: python -m unittest tests.test_entry_points -v
 
+      # -t . is REQUIRED, not cosmetic: without it the tests directory becomes
+      # the top-level, modules load as `test_x` instead of `tests.test_x`, and
+      # tests/__init__.py -- which scrubs credentials and blocks the network --
+      # never runs. tests.test_entry_points.SuiteIsHermetic fails loudly if the
+      # suite is ever started without it.
       - name: Unit tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+        run: python -m unittest discover -s tests -t . -p "test_*.py"
 
       - name: build_pack dry-run (no network)
         run: |

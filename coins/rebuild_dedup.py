@@ -44,9 +44,9 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
-                        LiveStateUnknown, SetState, Telegram, exclusive_lock,
-                        links_chat_id, load_env, pack_family_lock_path,
-                        safe_int_env, write_json_atomic)
+                        LiveStateUnknown, SetState, Telegram, canonical_map_lock,
+                        exclusive_lock, links_chat_id, load_env,
+                        pack_family_lock_path, safe_int_env, write_json_atomic)
 from emojikit.media import _dhash, hamming
 
 ROOT = Path(__file__).resolve().parent
@@ -188,21 +188,116 @@ def load_plan() -> list[dict]:
     return plan
 
 
-def load_state() -> dict:
-    if STATE.is_file():
-        try:
-            return json.loads(STATE.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            # Never fall back to the empty default: that resets deleted_old and
-            # the cursor, so the whole plan is uploaded again as duplicates.
-            raise SystemExit(
-                f"ERROR: resume state {STATE.name} is unreadable ({exc}).\n"
-                f"       Refusing to restart from zero -- that would re-upload "
-                f"every image already published.\n"
-                f"       Inspect the file (a .tmp sibling may hold the last "
-                f"write) and restore it deliberately.")
-    return {"sets": [], "sent": [], "deleted_old": False, "final_sent": False,
-            "order": [], "cursor": 0, "in_flight": None}
+def _count(value) -> bool:
+    """A plain non-negative integer. ``bool`` is an ``int`` in Python, and
+    ``True`` sailing through as the number 1 is how a corrupt field becomes a
+    plausible-looking count."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _state_problem(s, plan_len: int | None) -> str:
+    """Why this resume state must not drive a mutation, or "" when it may.
+
+    build_pack.validate_state_shape covers the *publisher* schema (base/done/
+    count); the rebuild keeps a different one (order/cursor/live), so its
+    invariants are checked here. Valid JSON is not valid state: cursor=-1 makes
+    ``plan[-1]`` the first upload AND leaves it to be uploaded again at the end,
+    and a cursor past the plan reports the rebuild finished without ever having
+    walked it.
+    """
+    if not isinstance(s, dict):
+        return "state is not an object"
+    for field in ("sets", "sent", "order", "deleted_old_packs"):
+        if not isinstance(s.get(field, []), list):
+            return f"{field!r} must be a list"
+    for field in ("deleted_old", "final_sent"):
+        if not isinstance(s.get(field, False), bool):
+            return f"{field!r} must be true or false"
+    for field in ("sent", "order", "deleted_old_packs"):
+        if not all(isinstance(x, str) and x for x in s.get(field, [])):
+            return f"{field!r} must hold non-empty names"
+
+    order = s.get("order", [])
+    repeated = sorted({rep for rep in order if order.count(rep) > 1})
+    if repeated:
+        # One plan entry recorded twice means the image really is in the pack
+        # twice; mapping would silently keep only the later id.
+        return f"'order' records {repeated[:5]} more than once"
+
+    seen_names: set[str] = set()
+    last_index = 0
+    for i, entry in enumerate(s.get("sets", [])):
+        if not isinstance(entry, dict):
+            return f"sets[{i}] is not an object"
+        name, index = entry.get("name"), entry.get("index")
+        if not isinstance(name, str) or not name:
+            return f"sets[{i}] has no name"
+        if name in seen_names:
+            return f"sets[{i}] repeats the set name {name!r}"
+        if not _count(index) or index < 1:
+            return f"sets[{i}] has a bad index {index!r}"
+        if index <= last_index:
+            return f"sets[{i}] index {index} does not ascend"
+        if not _count(entry.get("live", 0)) or entry.get("live", 0) > PER_SET:
+            return f"sets[{i}] live count {entry.get('live')!r} outside 0..{PER_SET}"
+        seen_names.add(name)
+        last_index = index
+
+    cursor = s.get("cursor", 0)
+    if not _count(cursor):
+        return f"cursor {cursor!r} is not a plan position"
+    if plan_len is not None and cursor > plan_len:
+        return f"cursor {cursor} is past the end of the {plan_len}-entry plan"
+
+    marker = s.get("in_flight")
+    if marker is None or isinstance(marker, str):
+        return ""                       # null, or the legacy bare-key marker
+    if not isinstance(marker, dict):
+        return "'in_flight' must be an intent object, a key or null"
+    for field in ("key", "operation", "set_name"):
+        if not isinstance(marker.get(field), str) or not marker[field]:
+            return f"in_flight is missing {field!r}"
+    if marker["operation"] not in ("add", "create"):
+        return f"in_flight operation {marker['operation']!r} is unknown"
+    if not _count(marker.get("set_index")):
+        return f"in_flight set_index {marker.get('set_index')!r} is not a set number"
+    expected = marker.get("expected_before")
+    if expected is not None and not _count(expected):
+        return f"in_flight expected_before {expected!r} is not a count"
+    return ""
+
+
+def load_state(plan_len: int | None = None) -> dict:
+    """Load the resume state, refusing anything a mutation cannot be built on.
+
+    Callers that are about to upload or delete pass ``plan_len`` so the cursor
+    is bounded by the plan it indexes.
+    """
+    if not STATE.is_file():
+        return {"sets": [], "sent": [], "deleted_old": False, "final_sent": False,
+                "order": [], "cursor": 0, "in_flight": None}
+    try:
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # Never fall back to the empty default: that resets deleted_old and
+        # the cursor, so the whole plan is uploaded again as duplicates.
+        raise SystemExit(
+            f"ERROR: resume state {STATE.name} is unreadable ({exc}).\n"
+            f"       Refusing to restart from zero -- that would re-upload "
+            f"every image already published.\n"
+            f"       Inspect the file (a .tmp sibling may hold the last "
+            f"write) and restore it deliberately.")
+    problem = _state_problem(state, plan_len)
+    if problem:
+        raise SystemExit(
+            f"ERROR: resume state {STATE.name} is not internally consistent "
+            f"({problem}).\n"
+            f"       Refusing to delete or upload anything from it: every "
+            f"resume decision -- which set is active, which plan entry is next "
+            f"-- is built on these numbers.\n"
+            f"       Inspect the file (a .tmp sibling may hold the last "
+            f"write) and repair it deliberately.")
+    return state
 
 
 def save_state(s: dict) -> None:
@@ -424,7 +519,9 @@ def build(tg: Telegram, bot: str) -> None:
 
 def _build(tg: Telegram, bot: str) -> None:
     plan = load_plan()
-    state = load_state()
+    # Validated against the plan BEFORE the delete phase: a state that cannot be
+    # trusted must never get as far as destroying the existing packs.
+    state = load_state(len(plan))
     state.setdefault("order", [])  # actual successful-upload order (drift-proof map)
 
     if not USER_ID:
@@ -627,56 +724,115 @@ def unapproved_shared_groups(mapping: dict[str, str]) -> dict[str, list[str]]:
             if len(tickers) > 1 and not set(tickers) <= approved}
 
 
+class MapIdentityUnproven(RuntimeError):
+    """A live sticker could not be tied to a plan entry by image content."""
+
+
+def resolve_by_image(tg: Telegram, live: list[tuple[str, str]],
+                     order: list[str]) -> dict[str, str]:
+    """``rep -> custom_emoji_id``, proven per sticker by IMAGE identity.
+
+    Position is NOT identity, and neither is an equal count. The recorded upload
+    order says what we sent; it says nothing about what is in the pack now. A
+    same-length reorder or an after-the-fact replacement leaves ``live[i]``
+    holding a different coin's art, and zipping ``order`` against it is exactly
+    how the Solama memecoin llama ended up published as `sol`.
+
+    Every live sticker must match exactly one recorded upload and every recorded
+    upload exactly one live sticker; anything else raises, because there is no
+    safe guess between "the pack changed" and "the map is fine".
+    """
+    want: dict[str, int] = {}
+    for rep in order:
+        png = EMOJI / f"{rep}.png"
+        if not png.is_file():
+            raise MapIdentityUnproven(
+                f"the source image for {rep!r} is gone, so no live sticker can "
+                f"be proven to be it")
+        want[rep] = _dhash(Image.open(png).convert("RGBA"))
+
+    rep_to_cid: dict[str, str] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "live.png"
+        for cid, file_id in live:
+            try:
+                tg.download_file(str(file_id), dest)
+                got = _dhash(Image.open(dest).convert("RGBA"))
+            except Exception as exc:  # noqa: BLE001
+                # Unreadable is not "not ours": guessing here is what writes a
+                # wrong id into the canonical map.
+                raise MapIdentityUnproven(
+                    f"live sticker {cid} could not be read ({exc})") from exc
+            # ponytail: O(live x plan) hamming scan, a few million cheap int ops
+            # for this pack family; bucket by hash prefix if it ever gets big.
+            hits = [rep for rep, w in want.items()
+                    if hamming(w, got) <= SAME_IMAGE_MAX]
+            if len(hits) != 1:
+                raise MapIdentityUnproven(
+                    f"live sticker {cid} matches {len(hits)} uploaded image(s) "
+                    f"{sorted(hits)[:4]}; it cannot be attributed to a coin")
+            if hits[0] in rep_to_cid:
+                raise MapIdentityUnproven(
+                    f"{hits[0]!r} is live twice ({rep_to_cid[hits[0]]} and "
+                    f"{cid}); the pack contains a duplicate")
+            rep_to_cid[hits[0]] = cid
+
+    missing = [rep for rep in order if rep not in rep_to_cid]
+    if missing:
+        raise MapIdentityUnproven(
+            f"{len(missing)} recorded upload(s) have no live sticker "
+            f"(e.g. {missing[:5]})")
+    return rep_to_cid
+
+
 def map_and_fill(tg: Telegram) -> None:
     plan = load_plan()
-    state = load_state()
+    state = load_state(len(plan))
     sets = sorted(state["sets"], key=lambda x: x["index"])
-    cids: list[str] = []
+    live: list[tuple[str, str]] = []
     for s in sets:
-        cids += [str(st.get("custom_emoji_id", ""))
-                 for st in tg._call("getStickerSet", data={"name": s["name"]}).get("stickers", [])]
+        for st in tg._call("getStickerSet",
+                           data={"name": s["name"]}).get("stickers", []):
+            live.append((str(st.get("custom_emoji_id", "")),
+                         str(st.get("file_id", ""))))
 
-    ticker_to_id: dict[str, str] = {}
     order = state.get("order") or []
-    # The ONLY sound mapping is the recorded upload order. The former positional
-    # fallback ("assume live order == plan order") printed a warning and then
-    # overwrote the canonical map anyway; with skipped entries the assignments
-    # drift by one per skip, which is what put 129 unrelated tickers on a single
-    # emoji id. There is no safe guess here -- refuse instead.
-    if len(order) != len(cids) or not order:
-        candidate = ROOT / "ticker_to_id.candidate.json"
+    candidate = ROOT / "ticker_to_id.candidate.json"
+    if not order:
         write_json_atomic(candidate, {
-            "error": "upload-order record does not match live stickers",
-            "recorded_uploads": len(order), "live_stickers": len(cids),
-            "plan_entries": len(plan),
-        })
+            "error": "no uploads are recorded", "live_stickers": len(live),
+            "plan_entries": len(plan)})
         raise SystemExit(
-            f"ERROR: {len(order)} recorded uploads but {len(cids)} live "
-            f"stickers.\n"
+            f"ERROR: no uploads are recorded but {len(live)} stickers are "
+            f"live.\n"
             f"       Refusing to write {TICKER_IDS.name} from positional "
             f"guesswork -- that is what corrupts the map.\n"
             f"       Rebuild identities from image content with "
             f"coins/remap_ids.py. Details: {candidate.name}")
 
+    try:
+        rep_to_cid = resolve_by_image(tg, live, order)
+    except MapIdentityUnproven as exc:
+        write_json_atomic(candidate, {
+            "error": str(exc), "recorded_uploads": len(order),
+            "live_stickers": len(live), "plan_entries": len(plan)})
+        raise SystemExit(
+            f"ERROR: {exc}.\n"
+            f"       Refusing to write {TICKER_IDS.name}: equal counts are not "
+            f"identity, and mapping by position is what put an unrelated logo "
+            f"on a real ticker.\n"
+            f"       Rebuild identities from image content with "
+            f"coins/remap_ids.py. Details: {candidate.name}") from exc
+
     by_rep = {g["rep"]: g for g in plan}
-    for i, cid in enumerate(cids):
-        g = by_rep.get(order[i])
+    ticker_to_id: dict[str, str] = {}
+    for rep, cid in rep_to_cid.items():
+        g = by_rep.get(rep)
         if not g:
             continue
         for t in g["tickers"]:
             ticker_to_id[t] = cid
-    print(f"mapped via recorded upload order ({len(cids)} stickers)", flush=True)
-
-    # The same plan entry appearing twice means the image really was uploaded
-    # twice -- a duplicate in the pack, and the map would silently keep only the
-    # later id.
-    repeated = sorted({rep for rep in order if order.count(rep) > 1})
-    if repeated:
-        raise SystemExit(
-            f"ERROR: {len(repeated)} image(s) were uploaded more than once "
-            f"(e.g. {repeated[:5]}).\n"
-            f"       Refusing to write {TICKER_IDS.name} over a pack that "
-            f"contains duplicates. Remove the extra stickers first.")
+    print(f"mapped by verified image identity ({len(live)} stickers)", flush=True)
 
     reapply_aliases(ticker_to_id)
 
@@ -684,7 +840,6 @@ def map_and_fill(tg: Telegram) -> None:
     oversized = {cid: ts for cid, ts in bad.items() if len(ts) > SHARED_GROUP_LIMIT}
     if oversized:
         biggest = max(oversized.values(), key=len)
-        candidate = ROOT / "ticker_to_id.candidate.json"
         write_json_atomic(candidate, ticker_to_id)
         raise SystemExit(
             f"ERROR: one emoji id would be shared by {len(biggest)} unreviewed "
@@ -698,9 +853,13 @@ def map_and_fill(tg: Telegram) -> None:
               f"Cross-chain variants of one asset are expected here; add them to "
               f"that file to silence this.", flush=True)
 
-    write_json_atomic(TICKER_IDS, ticker_to_id)
+    # Every other writer of the canonical map (alias_map, enhance_map,
+    # remap_ids --apply, verify_logos, the providers) takes this same lock, so a
+    # concurrent read-modify-write there cannot silently discard this rebuild.
+    with canonical_map_lock():
+        write_json_atomic(TICKER_IDS, ticker_to_id)
     print(f"mapped {len(ticker_to_id)} tickers across {len(sets)} sets "
-          f"({len(cids)} live stickers)", flush=True)
+          f"({len(live)} live stickers)", flush=True)
     fill_inventory(ticker_to_id)
 
 

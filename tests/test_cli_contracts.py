@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -343,6 +344,25 @@ def _png_bytes(color=(20, 120, 200, 255)) -> bytes:
     return buf.getvalue()
 
 
+def _noise_png_bytes(key: str, size: int = 64) -> bytes:
+    """Deterministic per-key noise; two different keys never look alike.
+
+    Flat colours are useless for image identity: a dHash compares neighbouring
+    pixels, so every solid image hashes to zero and "is this sticker the one we
+    uploaded?" would answer yes for any picture at all.
+    """
+    rnd = random.Random(key)
+    img = Image.new("RGBA", (size, size))
+    px = img.load()
+    for x in range(size):
+        for y in range(size):
+            v = rnd.randrange(256)
+            px[x, y] = (v, v, v, 255)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 class FetchLogosCacheValidation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -546,33 +566,68 @@ class FakeResponse:
         return self._payload
 
 
+class FakeDownload:
+    """What ``Telegram.download_file`` expects back from ``session.get``."""
+
+    def __init__(self, content: bytes):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
 class ReplaceSession:
-    """requests.Session stand-in serving ONE sticker set.
+    """requests.Session stand-in serving ONE sticker set, with file downloads.
 
     ``lose_reply`` models the dangerous case: Telegram APPLIES the replacement
     and the response is lost on the way back. A blind retry then re-sends a
     non-idempotent call against an ``old_sticker`` that no longer exists.
+
+    ``lose_confirm`` models the worse one: the call succeeds and the
+    POSTCONDITION read never comes back, so the run cannot learn the new id --
+    while the canonical map still names the old one, which no longer exists.
     """
 
-    def __init__(self, before: list[str], after: list[str], *, lose_reply: bool):
+    def __init__(self, before: list[str], after: list[str], *,
+                 lose_reply: bool = False, lose_confirm: bool = False,
+                 source: Path | None = None, images: dict | None = None):
         self.stickers = [{"custom_emoji_id": c, "file_id": f"fid-{c}"}
                          for c in before]
         self.after = [{"custom_emoji_id": c, "file_id": f"fid-{c}"} for c in after]
         self.lose_reply = lose_reply
+        self.lose_confirm = lose_confirm
+        # Every sticker serves the CURRENT bytes of the prepared source unless
+        # `images` overrides it for a file_id.
+        self.source = source
+        self.images = dict(images or {})
+        self.replaced = False
         self.calls: list[tuple[str, dict, dict]] = []
 
     def post(self, url, data=None, files=None, timeout=None):
         method = url.rsplit("/", 1)[-1]
         self.calls.append((method, dict(data or {}), dict(files or {})))
         if method == "getStickerSet":
+            if self.lose_confirm and self.replaced:
+                raise requests.ConnectionError("connection reset by peer")
             return FakeResponse({"ok": True, "result": {
                 "name": data["name"], "stickers": self.stickers}})
         if method == "replaceStickerInSet":
+            self.replaced = True
             self.stickers = list(self.after)          # Telegram applied it...
             if self.lose_reply:                       # ...and the reply vanished
                 raise requests.ConnectionError("connection reset by peer")
             return FakeResponse({"ok": True, "result": True})
+        if method == "getFile":
+            return FakeResponse({"ok": True, "result": {
+                "file_path": f"live/{data['file_id']}"}})
         raise AssertionError(f"unexpected Bot API method: {method}")
+
+    def get(self, url, timeout=None):
+        file_id = url.rsplit("/", 1)[-1]
+        body = self.images.get(file_id)
+        if body is None and self.source is not None:
+            body = self.source.read_bytes()
+        return FakeDownload(body or b"")
 
     def method(self, name: str) -> list[tuple[str, dict, dict]]:
         return [c for c in self.calls if c[0] == name]
@@ -589,15 +644,20 @@ class VerifyLogosFix(unittest.TestCase):
         self.emoji = self.tmp / "emoji"
         self.emoji.mkdir()
         Image.new("RGBA", (48, 48), (10, 200, 40, 255)).save(self.emoji / "btc.png")
+        self.src = self.emoji / "btc.png"
         # Two tickers share one custom emoji: BOTH must be repointed, and only
         # at an identity we can prove.
-        self.mp = {"btc": OLD_CID, "wbtc": OLD_CID, "eth": "cid-eth"}
+        self.map_path = self.tmp / "ticker_to_id.json"
+        self.map_path.write_text(json.dumps(
+            {"btc": OLD_CID, "wbtc": OLD_CID, "eth": "cid-eth"}), encoding="utf-8")
         self.sets = [{"name": "gvcryptoemoji1_by_bot", "index": 1}]
         self.patches = [
             mock.patch.object(self.mod, "ROOT", self.tmp),
             mock.patch.object(self.mod, "fetch_markets", lambda top: [
                 {"symbol": "btc", "name": "Bitcoin", "image": "http://x/btc.png"}]),
-            mock.patch.object(self.mod, "fetch_image", lambda url: _png_bytes()),
+            # Noise, not a flat colour: identity has to be provable at all.
+            mock.patch.object(self.mod, "fetch_image",
+                              lambda url: _noise_png_bytes("official-btc")),
             mock.patch.object(bp.time, "sleep", lambda *_a: None),
         ]
         for pt in self.patches:
@@ -608,11 +668,22 @@ class VerifyLogosFix(unittest.TestCase):
             pt.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _fix(self, before, after, *, lose_reply):
-        session = ReplaceSession(before, after, lose_reply=lose_reply)
+    def mapping(self) -> dict:
+        return json.loads(self.map_path.read_text(encoding="utf-8"))
+
+    def intent(self) -> dict | None:
+        path = self.mod._intent_path()
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def _session(self, before, after, **kw):
+        session = ReplaceSession(before, after, source=self.src, **kw)
         tg = bp.Telegram("unit-test-token")
         tg.s = session
-        ok = self.mod.fix_one(tg, 42, self.sets, self.mp, self.emoji, "btc")
+        return tg, session
+
+    def _fix(self, before, after, **kw):
+        tg, session = self._session(before, after, **kw)
+        ok = self.mod.fix_one(tg, 42, self.sets, self.map_path, self.emoji, "btc")
         return ok, session
 
     def test_timeout_after_apply_is_verified_not_resent(self):
@@ -622,7 +693,7 @@ class VerifyLogosFix(unittest.TestCase):
         # Exactly one attempt: the applied_check saw the change live, so the
         # non-idempotent call was never repeated.
         self.assertEqual(len(session.method("replaceStickerInSet")), 1)
-        self.assertEqual(self.mp["btc"], NEW_CID)
+        self.assertEqual(self.mapping()["btc"], NEW_CID)
 
     def test_the_uploaded_body_is_bytes_a_retry_can_resend(self):
         _, session = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
@@ -635,11 +706,11 @@ class VerifyLogosFix(unittest.TestCase):
         self.assertTrue(body.startswith(b"\x89PNG"))
 
     def test_every_entry_sharing_the_old_cid_is_repointed(self):
-        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
-                          lose_reply=False)
+        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"])
         self.assertTrue(ok)
-        self.assertEqual(self.mp, {"btc": NEW_CID, "wbtc": NEW_CID,
-                                   "eth": "cid-eth"})
+        self.assertEqual(self.mapping(), {"btc": NEW_CID, "wbtc": NEW_CID,
+                                          "eth": "cid-eth"})
+        self.assertIsNone(self.intent(), "a settled replacement leaves no intent")
 
     def test_a_shifted_set_is_not_trusted_as_the_replacement(self):
         """Someone deleted an earlier sticker while we replaced ours.
@@ -647,17 +718,86 @@ class VerifyLogosFix(unittest.TestCase):
         Position 1 now holds "c", an unrelated emoji. Reading live[pos] blindly
         repointed btc AND wbtc at it, silently and permanently.
         """
-        before = dict(self.mp)
-        ok, _ = self._fix(["a", OLD_CID, "c"], [NEW_CID, "c"], lose_reply=False)
+        before = self.mapping()
+        ok, _ = self._fix(["a", OLD_CID, "c"], [NEW_CID, "c"])
         self.assertFalse(ok)
-        self.assertEqual(self.mp, before)
+        self.assertEqual(self.mapping(), before)
 
     def test_an_unchanged_set_is_not_trusted_either(self):
-        before = dict(self.mp)
-        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", OLD_CID, "c"],
-                          lose_reply=False)
+        before = self.mapping()
+        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", OLD_CID, "c"])
         self.assertFalse(ok)
-        self.assertEqual(self.mp, before)
+        self.assertEqual(self.mapping(), before)
+        self.assertIsNone(self.intent(),
+                          "nothing was applied, so nothing is pending")
+
+    def test_a_replacement_whose_image_is_not_ours_is_refused(self):
+        """The cid list is exactly what a clean replacement looks like.
+
+        Structure is not identity: position 1 carries somebody else's art, and
+        trusting the list shape repoints btc AND wbtc onto it forever.
+        """
+        before = self.mapping()
+        ok, _ = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                          images={f"fid-{NEW_CID}": _noise_png_bytes("stranger")})
+        self.assertFalse(ok)
+        self.assertEqual(self.mapping(), before)
+
+    def test_a_lost_confirmation_read_leaves_a_recoverable_intent(self):
+        """Telegram applied the replacement; the postcondition read never came.
+
+        Without a persisted intent the map keeps OLD_CID -- an id that is gone
+        -- and no later run can find it, so the ticker is stranded for good.
+        """
+        before = self.mapping()
+        ok, session = self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"],
+                                lose_confirm=True)
+        self.assertFalse(ok)
+        self.assertEqual(self.mapping(), before, "nothing may be guessed here")
+        intent = self.intent()
+        self.assertIsNotNone(intent, "the pending replacement must be recorded")
+        self.assertEqual(intent["operation"], "replace")
+        self.assertEqual(intent["key"], "btc")
+        self.assertEqual(intent["old_cid"], OLD_CID)
+        self.assertEqual(intent["set_name"], session.calls[0][1]["name"])
+        self.assertEqual(intent["set_index"], 1)
+        self.assertEqual(intent["before"], ["a", OLD_CID, "c"])
+
+    def test_the_next_run_recovers_the_replacement_from_the_intent(self):
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        # Restart: the pack is in its post-replacement state and readable again.
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+        self.assertTrue(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertEqual(self.mapping(), {"btc": NEW_CID, "wbtc": NEW_CID,
+                                          "eth": "cid-eth"})
+        self.assertIsNone(self.intent(), "a recovered intent must be cleared")
+
+    def test_recovery_refuses_when_the_live_image_is_not_ours(self):
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        before = self.mapping()
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"],
+                              images={f"fid-{NEW_CID}": _noise_png_bytes("stranger")})
+        self.assertFalse(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertEqual(self.mapping(), before)
+        self.assertIsNotNone(self.intent(),
+                             "an unresolved intent must survive for review")
+
+    def test_recovery_is_idempotent_after_the_map_was_already_repointed(self):
+        """Crashed after the map write, before the intent was cleared."""
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        self.mod.repoint(self.map_path, OLD_CID, NEW_CID)
+        tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+        self.assertTrue(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertEqual(self.mapping(), {"btc": NEW_CID, "wbtc": NEW_CID,
+                                          "eth": "cid-eth"})
+        self.assertIsNone(self.intent())
+
+    def test_an_unreadable_set_leaves_the_intent_for_the_run_after(self):
+        self._fix(["a", OLD_CID, "c"], ["a", NEW_CID, "c"], lose_confirm=True)
+        tg, session = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
+        session.lose_confirm = session.replaced = True   # every read fails
+        self.assertFalse(self.mod.reconcile_intent(tg, self.map_path))
+        self.assertIsNotNone(self.intent())
 
     def test_fix_locks_on_the_pack_family_not_on_this_script(self):
         # --fix REPLACES stickers in the same gvcryptoemoji* sets the coin
@@ -696,6 +836,8 @@ class VerifyLogosMainContracts(unittest.TestCase):
         self.patches = [
             mock.patch.object(self.mod, "setup_logging", lambda *a, **k: None),
             mock.patch.object(self.mod, "load_env", lambda *a, **k: None),
+            # ROOT anchors the in-flight intent file: keep it out of the repo.
+            mock.patch.object(self.mod, "ROOT", self.tmp),
             mock.patch.object(self.mod, "PACK_LOCK", self.tmp / "pack.lock"),
             # The requested ticker is simply not in the market data: fix_one
             # returns False without touching Telegram.
@@ -750,6 +892,29 @@ class VerifyLogosMainContracts(unittest.TestCase):
         code = self._main({"TELEGRAM_BOT_TOKEN": "t", "PACK_OWNER_USER_ID": "7"},
                           "--fix", "--only", "sol")
         self.assertEqual(code, EXIT_USAGE)
+
+    def test_an_unresolved_intent_blocks_every_replacement(self):
+        """The next fix would overwrite the only record of the pending one."""
+        attempted: list[tuple] = []
+        with mock.patch.object(self.mod, "reconcile_intent", lambda *a: False), \
+                mock.patch.object(self.mod, "fix_one",
+                                  lambda *a: attempted.append(a) or True):
+            code = self._main({"TELEGRAM_BOT_TOKEN": "t",
+                               "PACK_OWNER_USER_ID": "7"},
+                              "--fix", "--only", "sol")
+        self.assertEqual(code, EXIT_FAILED)
+        self.assertEqual(attempted, [], "no pack may be mutated first")
+
+    def test_a_clear_intent_lets_the_run_proceed(self):
+        seen: list[tuple] = []
+        with mock.patch.object(self.mod, "reconcile_intent", lambda *a: True), \
+                mock.patch.object(self.mod, "fix_one",
+                                  lambda *a: seen.append(a) or True):
+            code = self._main({"TELEGRAM_BOT_TOKEN": "t",
+                               "PACK_OWNER_USER_ID": "7"},
+                              "--fix", "--only", "sol")
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(len(seen), 1)
 
 
 if __name__ == "__main__":

@@ -182,12 +182,16 @@ class RebuildCase(unittest.TestCase):
         # build_plan() rewrites the plan AND the shared-logo report, and those
         # are tracked project files.
         patches = [
+            mock.patch.object(rd, "ROOT", self.dir),   # candidate map file
             mock.patch.object(rd, "EMOJI", self.emoji),
             mock.patch.object(rd, "STATE", self.state),
             mock.patch.object(rd, "PLAN", self.plan),
             mock.patch.object(rd, "OLD_STATE", self.old_state),
             mock.patch.object(rd, "GROUPS_REPORT", self.groups),
             mock.patch.object(rd, "INV", self.inv),
+            mock.patch.object(rd, "OUT_INV", self.dir / "inventory.filled.md"),
+            mock.patch.object(rd, "TICKER_IDS", self.dir / "ticker_to_id.json"),
+            mock.patch.object(rd, "BACKUP_IDS", self.dir / "ticker_to_id.bak.json"),
             mock.patch.object(rd, "KEYWORDS_CSV", self.dir / "keywords.csv"),
             mock.patch.object(rd, "LOCK", self.dir / "state.json.lock"),
             mock.patch.object(rd, "USER_ID", 42),
@@ -617,6 +621,170 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
             rd.build(tg, "bot")
         self.assertFalse(rd.LOCK.exists(),
                          "a stopped run must not block the retry")
+
+
+class MapIsResolvedByImageIdentity(RebuildCase):
+    """3: the recorded upload order says what we SENT, not what is live now.
+
+    map_and_fill used to zip order[] against the current live cids after
+    checking only that the two were the same length. A same-length reorder or
+    replacement after the upload therefore rewrote ticker_to_id.json with wrong
+    assignments -- this is exactly how the Solama memecoin llama got published
+    as `sol`.
+    """
+
+    REPS = ["aaa", "bbb", "ccc"]
+
+    def setUp(self):
+        super().setUp()
+        self.map = self.dir / "ticker_to_id.json"
+        self.candidate = self.dir / "ticker_to_id.candidate.json"
+        self.write_plan(self.REPS)
+        self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
+                         order=list(self.REPS), cursor=len(self.REPS))
+        self.tg = FakeTelegram()
+        for rep in self.REPS:
+            self.tg.append("s1", (self.emoji / f"{rep}.png").read_bytes())
+
+    def mapping(self) -> dict:
+        return json.loads(self.map.read_text(encoding="utf-8"))
+
+    def test_the_untouched_pack_maps_by_content(self):
+        rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping(),
+                         {"aaa": "s1-0", "bbb": "s1-1", "ccc": "s1-2"})
+
+    def test_a_same_length_reorder_is_never_mapped_by_position(self):
+        # The pack was reordered after the upload: same length, same count, and
+        # position 0 now holds ccc's art.
+        imgs = self.tg.images["s1"]
+        imgs[0], imgs[2] = imgs[2], imgs[0]
+        rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping()["aaa"], "s1-2",
+                         "aaa must follow its IMAGE, not its upload position")
+        self.assertEqual(self.mapping()["ccc"], "s1-0")
+        self.assertNotEqual(self.mapping()["aaa"], "s1-0",
+                            "position 0 holds ccc's logo; that is the Solama bug")
+
+    def test_a_same_length_replacement_does_not_rewrite_the_map(self):
+        """A stranger's image at the same position, same count, same length."""
+        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        self.tg.images["s1"][1] = _png_bytes("someone-elses-logo")
+        with self.assertRaises(SystemExit) as caught:
+            rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping(), {"aaa": "keep-me"},
+                         "unprovable identity must leave the canonical map alone")
+        self.assertIn("s1-1", str(caught.exception.code))
+        self.assertTrue(self.candidate.is_file(),
+                        "a refusal must leave something reviewable behind")
+
+    def test_a_live_sticker_that_cannot_be_read_refuses_to_map(self):
+        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        self.tg.images["s1"][1] = b"not an image at all"
+        with self.assertRaises(SystemExit):
+            rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
+
+    def test_a_missing_source_image_refuses_to_map(self):
+        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        (self.emoji / "bbb.png").unlink()
+        with self.assertRaises(SystemExit):
+            rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
+
+    def test_an_extra_live_sticker_refuses_to_map(self):
+        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        self.tg.append("s1", _png_bytes("appended-by-a-concurrent-tool"))
+        with self.assertRaises(SystemExit):
+            rd.map_and_fill(self.tg)
+        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
+
+    def test_the_canonical_map_is_written_under_the_shared_lock(self):
+        # Every writer of ticker_to_id.json takes this lock; holding it here
+        # must block the rebuild's own write rather than let it interleave.
+        with bp.canonical_map_lock():
+            with self.assertRaises(bp.LockBusy):
+                rd.map_and_fill(self.tg)
+        self.assertFalse(self.map.exists())
+
+
+class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
+    """7: load_state() parsed JSON and checked no invariant at all.
+
+    cursor=-1 makes plan[-1] the first upload AND leaves it to be uploaded
+    again at the end; a cursor past the plan reports the rebuild finished
+    without ever walking it. Both had to be caught before the delete phase.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_plan(["aaa", "bbb"])
+        bp.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
+
+    def _rejects(self, **state) -> str:
+        self.write_state(**{"deleted_old": False, **state})
+        tg = FakeTelegram(live={"old1": 3})
+        with self.assertRaises(SystemExit) as caught:
+            rd.build(tg, "bot")
+        self.assertEqual(tg.deleted, [],
+                         "an untrusted state must not destroy the old packs")
+        self.assertEqual(tg.mutations, 0)
+        self.assertEqual(tg.messages, [], "and must not announce anything")
+        return str(caught.exception.code)
+
+    def test_a_negative_cursor_is_rejected_before_any_deletion(self):
+        self.assertIn("cursor -1", self._rejects(cursor=-1))
+
+    def test_an_oversized_cursor_is_rejected_instead_of_reporting_done(self):
+        self.assertIn("past the end", self._rejects(cursor=3))
+
+    def test_a_non_integer_cursor_is_rejected(self):
+        self.assertIn("cursor", self._rejects(cursor="1"))
+
+    def test_a_boolean_cursor_is_not_read_as_a_number(self):
+        self.assertIn("cursor", self._rejects(cursor=True))
+
+    def test_an_order_that_repeats_an_entry_is_rejected(self):
+        self.assertIn("more than once", self._rejects(order=["aaa", "aaa"]))
+
+    def test_a_repeated_set_name_is_rejected(self):
+        self.assertIn("repeats the set name", self._rejects(sets=[
+            {"index": 1, "name": "s1"}, {"index": 2, "name": "s1"}]))
+
+    def test_set_indexes_must_ascend(self):
+        self.assertIn("does not ascend", self._rejects(sets=[
+            {"index": 2, "name": "s2"}, {"index": 1, "name": "s1"}]))
+
+    def test_a_live_count_over_the_pack_limit_is_rejected(self):
+        self.assertIn("outside 0..", self._rejects(sets=[
+            {"index": 1, "name": "s1", "live": rd.PER_SET + 1}]))
+
+    def test_an_in_flight_marker_missing_its_target_is_rejected(self):
+        self.assertIn("set_name", self._rejects(in_flight={
+            "key": "aaa", "operation": "add"}))
+
+    def test_an_unknown_in_flight_operation_is_rejected(self):
+        self.assertIn("unknown", self._rejects(in_flight={
+            "key": "aaa", "operation": "delete", "set_name": "s1",
+            "set_index": 1}))
+
+    def test_wrong_types_are_rejected(self):
+        self.assertIn("'order'", self._rejects(order="aaa"))
+        self.assertIn("'deleted_old'", self._rejects(deleted_old="no"))
+
+    def test_the_legacy_bare_key_marker_is_still_accepted(self):
+        # Older runs recorded just the plan key; rejecting it would strand a
+        # state that the reconcile can still resolve.
+        self.write_state(in_flight="aaa")
+        self.assertEqual(rd.load_state(2)["in_flight"], "aaa")
+
+    def test_a_sound_state_still_builds(self):
+        self.write_state(deleted_old=False, cursor=0)
+        tg = FakeTelegram(live={"old1": 3})
+        rd.build(tg, "bot")
+        self.assertEqual(tg.deleted, ["old1"])
+        self.assertEqual([c[1] for c in tg.create_calls], ["aaa"])
+        self.assertEqual(self.saved()["cursor"], 2)
 
 
 if __name__ == "__main__":

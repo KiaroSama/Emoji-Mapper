@@ -26,6 +26,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -33,10 +34,10 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, AmbiguousUploadError,
-                        LockBusy, SetState, Telegram, exclusive_lock,
-                        ingest_exit_code, load_env, pack_family_lock_path,
-                        safe_int_env, _input_sticker, _mime_for_path,
-                        write_json_atomic)
+                        LockBusy, SetState, Telegram, canonical_map_lock,
+                        exclusive_lock, ingest_exit_code, load_env, make_intent,
+                        pack_family_lock_path, safe_int_env, _input_sticker,
+                        _mime_for_path, write_json_atomic)
 from emojikit import media
 from emojikit.media import _dhash, hamming
 from emojikit.logsetup import setup_logging
@@ -52,10 +53,23 @@ SET_BASE = "gvcryptoemoji"
 PACK_LOCK = pack_family_lock_path(SET_BASE)
 log = logging.getLogger("verify_logos")
 UA = {"User-Agent": "Mozilla/5.0 (logo-verify; local tool)"}
+# A live sticker within this perceptual distance of the PNG we sent IS that
+# upload: Telegram re-encodes PNG to WEBP, so identical content still differs by
+# a bit or two. Same budget as the rebuild tool and the fetchers.
+SAME_IMAGE_MAX = 8
 
 
 def dh(img: Image.Image) -> int:
     return _dhash(img.convert("RGBA"))
+
+
+def _intent_path() -> Path:
+    """Where a replacement records itself BEFORE it is attempted.
+
+    Resolved from ROOT per call, not at import, so a test or an alternate
+    checkout redirects it with the rest of this module's paths.
+    """
+    return ROOT / "verify_logos_intent.json"
 
 
 def fetch_markets(top: int) -> list[dict]:
@@ -163,8 +177,98 @@ def verified_new_cid(before: list[str], after: list[str], pos: int) -> str | Non
     return new_cid
 
 
-def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
-            sym: str) -> bool:
+def is_our_image(tg: Telegram, sticker: dict, want: int) -> bool:
+    """Does this live sticker actually carry the image we prepared?
+
+    The cid list can look exactly right while position ``pos`` holds someone
+    else's art -- structure is not identity. Trusting it repoints every ticker
+    that shared the old id at that stranger, permanently and silently.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "live.png"
+        try:
+            tg.download_file(str(sticker.get("file_id")), dest)
+            return hamming(dh(Image.open(dest)), int(want)) <= SAME_IMAGE_MAX
+        except Exception as exc:  # noqa: BLE001
+            log.error("cannot read the replacement sticker to prove it: %s", exc)
+            return False
+
+
+def repoint(map_path: Path, old_cid: str, new_cid: str) -> int:
+    """Move every ticker on ``old_cid`` to ``new_cid``, as ONE locked
+    read-modify-write of the canonical map.
+
+    Re-reading under the lock is what makes this idempotent: a reconcile that
+    runs after a crash finds nothing left on the old id and changes nothing,
+    and a concurrent writer of the map cannot lose this edit (or have its own
+    lost).
+    """
+    with canonical_map_lock():
+        mp = json.loads(map_path.read_text(encoding="utf-8"))
+        changed = 0
+        for t, c in list(mp.items()):
+            if str(c) == old_cid:
+                mp[t] = new_cid
+                changed += 1
+        if changed:
+            write_json_atomic(map_path, mp)
+    return changed
+
+
+def reconcile_intent(tg: Telegram, map_path: Path) -> bool:
+    """Resolve a replacement recorded before the last mutation. True when clear.
+
+    Telegram can apply the replacement and still leave us without the
+    confirmation read (a dropped connection, a killed process). The canonical
+    map then still names the OLD cid -- which no longer exists -- so no later
+    run can locate it and the ticker is stranded on a dead sticker forever.
+    The intent written before the mutation is what makes that recoverable.
+    """
+    path = _intent_path()
+    if not path.is_file():
+        return True
+    try:
+        intent = json.loads(path.read_text(encoding="utf-8"))
+        sname = str(intent["set_name"])
+        pos = int(intent["set_index"])
+        old_cid = str(intent["old_cid"])
+        before = [str(c) for c in intent["before"]]
+        want = int(intent["source_dhash"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        log.error("replacement intent %s is unreadable (%s); resolve it by hand "
+                  "before mutating the packs again.", path.name, exc)
+        return False
+
+    try:
+        sset = tg.get_sticker_set(sname)
+    except RuntimeError as exc:
+        log.error("cannot read %s to resolve the pending replacement of %s: %s",
+                  sname, old_cid, exc)
+        return False
+    after = _cids(sset)
+    if old_cid in after:
+        # The mutation never applied: nothing is pending and nothing is stale.
+        log.info("pending replacement of %s never applied; nothing to recover.",
+                 old_cid)
+        path.unlink(missing_ok=True)
+        return True
+
+    new_cid = verified_new_cid(before, after, pos)
+    if new_cid is None or not is_our_image(tg, sset["stickers"][pos], want):
+        log.error("pending replacement of %s in %s cannot be proven, and %s "
+                  "still names an id that is gone. Review the pack, repair the "
+                  "map, then delete %s.", old_cid, sname, map_path.name,
+                  path.name)
+        return False
+    changed = repoint(map_path, old_cid, new_cid)
+    path.unlink(missing_ok=True)
+    log.info("recovered pending replacement %s -> %s (%d map entries)",
+             old_cid, new_cid, changed)
+    return True
+
+
+def fix_one(tg: Telegram, uid: int, sets: list[dict], map_path: Path,
+            emoji_dir: Path, sym: str) -> bool:
     """Replace one ticker's sticker with the official CoinGecko logo."""
     # Resolve official image for this exact symbol via market lookup.
     coins = fetch_markets(250)
@@ -177,7 +281,11 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
         log.warning("%s: official image fetch failed; skip", sym)
         return False
 
-    old_cid = str(mp.get(sym, ""))
+    try:
+        old_cid = str(json.loads(map_path.read_text(encoding="utf-8")).get(sym, ""))
+    except (OSError, ValueError) as exc:
+        log.error("%s: cannot read %s: %s", sym, map_path.name, exc)
+        return False
     loc = cid_location(tg, sets, old_cid)
     if not loc:
         log.warning("%s: current cid %s not found live; skip", sym, old_cid)
@@ -194,6 +302,17 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
     media.to_static_png(tmp, src)
     tmp.unlink(missing_ok=True)
 
+    # Record WHAT is about to change, and everything needed to prove afterwards
+    # what it became, BEFORE the mutation. Written first because the dangerous
+    # window opens the moment the request leaves. A replacement targets a
+    # POSITION inside one set rather than a set number, so set_index carries
+    # that position; reconcile_intent reads it back the same way.
+    intent = make_intent(key=sym, operation="replace", set_name=sname,
+                         set_index=pos, expected_before=len(before))
+    intent.update({"old_cid": old_cid, "before": before,
+                   "source": str(src), "source_dhash": dh(Image.open(src))})
+    write_json_atomic(_intent_path(), intent)
+
     # Immutable bytes, not an open handle: _call retries the POST, and a file
     # object is exhausted after the first attempt -- every retry silently
     # uploaded an empty body. The applied_check makes those retries safe at all.
@@ -205,30 +324,40 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], mp: dict, emoji_dir: Path,
         }, files={"file0": (src.name, src.read_bytes(), _mime_for_path(src))},
             applied_check=_replaced_check(tg, sname, old_cid))
     except AmbiguousUploadError as exc:
-        # May or may not be live; the postcondition read below is the decider.
+        # May or may not be live; the postcondition read below is the decider,
+        # and the intent survives if that read never comes back.
         log.warning("%s: %s", sym, exc)
     except RuntimeError as exc:
+        # _call raises RuntimeError only once the change is verified NOT applied.
+        _intent_path().unlink(missing_ok=True)
         log.error("%s: replaceStickerInSet failed: %s", sym, exc)
         return False
 
     # Postcondition: prove WHICH sticker is the replacement before trusting it.
     try:
-        after = _cids(tg.get_sticker_set(sname))
+        sset = tg.get_sticker_set(sname)
     except RuntimeError as exc:
-        log.error("%s: cannot re-read %s to confirm the replacement: %s",
-                  sym, sname, exc)
+        log.error("%s: cannot re-read %s to confirm the replacement: %s. The "
+                  "intent is kept; the next run resolves it.", sym, sname, exc)
+        return False
+    after = _cids(sset)
+    if old_cid in after:
+        _intent_path().unlink(missing_ok=True)
+        log.error("%s: %s is still live in %s; the replacement did not apply.",
+                  sym, old_cid, sname)
         return False
     new_cid = verified_new_cid(before, after, pos)
-    if new_cid is None:
+    if new_cid is None or not is_our_image(tg, sset["stickers"][pos],
+                                           intent["source_dhash"]):
         log.error("%s: cannot prove what replaced %s in %s (the set changed "
-                  "underneath us). Map left untouched -- check the pack, then "
-                  "re-run.", sym, old_cid, sname)
+                  "underneath us, or position %d does not hold our image). Map "
+                  "left untouched -- check the pack, then re-run.",
+                  sym, old_cid, sname, pos)
         return False
-    changed = 0
-    for t, c in list(mp.items()):
-        if str(c) == old_cid:
-            mp[t] = new_cid
-            changed += 1
+    # Repoint first, clear second: a crash in between leaves an intent whose
+    # reconcile finds nothing left to move and simply clears it.
+    changed = repoint(map_path, old_cid, new_cid)
+    _intent_path().unlink(missing_ok=True)
     log.info("fixed %s: %s -> %s (%d map entries)", sym, old_cid, new_cid, changed)
     return True
 
@@ -277,10 +406,11 @@ def main() -> int:
         return EXIT_USAGE
 
     tg = Telegram(token)
+    map_path = Path(args.map)
     try:
         state = json.loads(Path(args.state).read_text(encoding="utf-8"))
         sets = sorted(state["sets"], key=lambda s: s["index"])
-        mp = json.loads(Path(args.map).read_text(encoding="utf-8"))
+        json.loads(map_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         log.error("cannot read --state %s / --map %s: %s",
                   args.state, args.map, exc)
@@ -291,10 +421,15 @@ def main() -> int:
         # Replacing a sticker mutates the same pack family the fetchers append
         # to; two runs at once corrupt both the pack and the map.
         with exclusive_lock(PACK_LOCK):
+            # An unresolved replacement must be settled before anything else is
+            # mutated: the next fix would overwrite the only record of it.
+            if not reconcile_intent(tg, map_path):
+                log.error("refusing to replace anything while a previous "
+                          "replacement is unresolved.")
+                return EXIT_FAILED
             for sym in syms:
-                if fix_one(tg, uid, sets, mp, emoji_dir, sym):
+                if fix_one(tg, uid, sets, map_path, emoji_dir, sym):
                     fixed += 1
-                    write_json_atomic(Path(args.map), mp)
                 time.sleep(0.3)
     except LockBusy as exc:
         log.error("%s", exc)
