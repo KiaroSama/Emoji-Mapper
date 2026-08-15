@@ -47,8 +47,9 @@ import numpy as np
 import requests
 from PIL import Image
 
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Telegram,
-                        api_base, load_env, write_json_atomic)
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LockBusy,
+                        Telegram, api_base, canonical_map_lock, load_env,
+                        write_json_atomic)
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -321,11 +322,26 @@ def main() -> int:
         log.error("wrote %d reviewable candidates -> %s", len(new_map), cand)
         return EXIT_PARTIAL
 
-    bak = outp.with_suffix(".prebroken.json")
-    if outp.is_file() and not bak.exists():
-        shutil.copyfile(outp, bak)
-        log.info("backed up old map -> %s", bak.name)
-    write_json_atomic(outp, new_map)
+    # ONE lock across read (for the backup and the final diff) and write. Every
+    # other writer of the canonical map takes it too, so this replacement cannot
+    # interleave with -- or be silently overwritten by -- a concurrent
+    # read-modify-write, and the backup is of what was actually replaced.
+    try:
+        with canonical_map_lock():
+            # Re-read under the lock: `old` above was sampled before waiting for
+            # it, so it may already describe a file that no longer exists.
+            current = json.loads(outp.read_text(encoding="utf-8")) if outp.is_file() else {}
+            log.info("replacing the map: %d tickers, %d differ from the file on "
+                     "disk now", len(new_map),
+                     sum(1 for t, c in new_map.items() if current.get(t) != c))
+            bak = outp.with_suffix(".prebroken.json")
+            if outp.is_file() and not bak.exists():
+                shutil.copyfile(outp, bak)
+                log.info("backed up old map -> %s", bak.name)
+            write_json_atomic(outp, new_map)
+    except LockBusy as exc:
+        log.error("%s", exc)
+        return EXIT_FAILED
     log.info("WROTE corrected map -> %s", outp)
     return EXIT_OK
 
