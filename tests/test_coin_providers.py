@@ -452,6 +452,42 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
                          "the already-live upload was sent a second time")
         self.assertEqual(len(tg.adds), 1)
 
+    def test_a_skipped_ticker_does_not_replace_the_published_logo(self):
+        """The oracle must keep describing the sticker the map names.
+
+        coins/logos/emoji/<ticker>.png is how rebuild_dedup and remap_ids decide
+        which live sticker belongs to which ticker. A losing provider that
+        downloaded its own art for the same coin, then skipped the upload,
+        used to leave that art behind while the map named the WINNER's sticker.
+        Nothing is duplicated -- but resolve_by_image then reports
+        MapIdentityUnproven and map_and_fill hard-stops until a human repairs it.
+        """
+        published = (self.emoji / "aaa.png").read_bytes()
+        fresh = _png_bytes(_gradient(reverse=True))
+
+        # (a) SKIPPED: another tool published this coin while we waited, so the
+        #     map already names ITS sticker. Our download must stay in staging.
+        fp.to_emoji_png(fresh, fp.incoming_dir() / "aaa.png")
+        current = json.loads(self.ids.read_text("utf-8"))
+        bp.write_json_atomic(self.ids, {**current, "aaa": "c-the-other-tools"})
+        self.assertEqual(fp.publish_logos(FakeTelegram(existing=2), ["aaa"], {}),
+                         (0, 0))
+        self.assertEqual((self.emoji / "aaa.png").read_bytes(), published,
+                         "a skipped upload replaced the identity oracle for a "
+                         "sticker it did not publish")
+
+        # (b) PUBLISHED: the same art, now actually uploaded and mapped, MUST
+        #     become the oracle -- otherwise the map names a sticker the other
+        #     tools cannot recognize, which is the same breakage from the other
+        #     direction.
+        bp.write_json_atomic(self.ids, current)
+        tg = FakeTelegram(existing=2)
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (1, 0))
+        self.assertNotEqual((self.emoji / "aaa.png").read_bytes(), published,
+                            "the published art never became the oracle")
+        self.assertFalse((fp.incoming_dir() / "aaa.png").exists(),
+                         "staging must not keep a copy after promotion")
+
     def test_an_upload_that_never_landed_is_retried_once(self):
         """The mirror case: a recorded intent must not block a real retry."""
         tg = FakeTelegram(existing=2)
