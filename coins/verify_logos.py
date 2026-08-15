@@ -30,15 +30,19 @@ import time
 import urllib.request
 from pathlib import Path
 
-import requests
 from PIL import Image
 
-from build_pack import API_BASE, Telegram, load_env, _input_sticker, _mime_for_path
+from build_pack import (EXIT_FAILED, LockBusy, Telegram, exclusive_lock,
+                        load_env, _input_sticker, _mime_for_path,
+                        write_json_atomic)
 from emojikit import media
 from emojikit.media import _dhash, hamming
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent
+# Same lock file as the fetchers' PACK_LOCK: --fix replaces stickers in the very
+# sets they append to, so one name must cover the whole coin pack family.
+PACK_LOCK = ROOT / "coin_pack.lock"
 log = logging.getLogger("verify_logos")
 UA = {"User-Agent": "Mozilla/5.0 (logo-verify; local tool)"}
 
@@ -194,12 +198,18 @@ def main() -> int:
     mp = json.loads(Path(args.map).read_text(encoding="utf-8"))
 
     fixed = 0
-    for sym in syms:
-        if fix_one(tg, uid, sets, mp, emoji_dir, sym):
-            fixed += 1
-            Path(args.map).write_text(json.dumps(mp, ensure_ascii=False, indent=1),
-                                      encoding="utf-8")
-        time.sleep(0.3)
+    try:
+        # Replacing a sticker mutates the same pack family the fetchers append
+        # to; two runs at once corrupt both the pack and the map.
+        with exclusive_lock(PACK_LOCK):
+            for sym in syms:
+                if fix_one(tg, uid, sets, mp, emoji_dir, sym):
+                    fixed += 1
+                    write_json_atomic(Path(args.map), mp)
+                time.sleep(0.3)
+    except LockBusy as exc:
+        log.error("%s", exc)
+        return EXIT_FAILED
     log.info("fixed %d/%d requested logos; map saved.", fixed, len(syms))
     return 0
 

@@ -2,7 +2,9 @@
 
 For each still-blank inventory ticker, normalize its coin name (drop chain info
 in parentheses and generic words) and look up a logo with the same normalized
-name. Safe: it only matches when the coin NAMES agree, then re-fills.
+name. Safe: it only matches when the coin NAMES agree AND exactly one logo
+answers to that normalized name; anything ambiguous is reported and left
+unmapped rather than guessed. Then it re-fills the inventory.
 """
 
 from __future__ import annotations
@@ -32,35 +34,48 @@ def main() -> int:
     ticker_to_id: dict[str, str] = json.loads((ROOT / "ticker_to_id.json").read_text("utf-8"))
     have = set(ticker_to_id)
 
-    # Build normalized-name -> logo ticker (only logos we actually have an id for).
-    name_to_logo: dict[str, str] = {}
+    # Build normalized-name -> {logo tickers} (only logos we have an id for).
+    # A set, not the first hit: normalization deliberately drops words like
+    # "token"/"network", so distinct coins collapse onto the same key and
+    # keeping whichever the CSV listed first silently invented a wrong alias.
+    name_to_logos: dict[str, set[str]] = {}
     kp = ROOT / "keywords.csv"
     with open(kp, encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             t = row["ticker"].lower()
             if t in have:
                 key = norm(row.get("name") or "")
-                if key and key not in name_to_logo:
-                    name_to_logo[key] = t
+                if key:
+                    name_to_logos.setdefault(key, set()).add(t)
 
     text = INV.read_text(encoding="utf-8")
     blocks = re.findall(r"##\s*(\S+)\s*[\u2014-]+\s*(.+?)\n\s*ticker:\s*(\S+)", text)
 
-    added = 0
+    added = ambiguous = 0
     for _hdr, name, tk in blocks:
         tk = tk.lower()
         if tk in have:
             continue
         key = norm(name)
-        logo = name_to_logo.get(key)
-        if logo and logo in ticker_to_id:
+        logos = name_to_logos.get(key) or set()
+        # Only auto-apply when the match is unambiguous. Several logos pointing
+        # at the SAME emoji id is still one answer; different ids is a guess.
+        ids = {ticker_to_id[c] for c in logos}
+        if len(ids) == 1:
+            logo = sorted(logos)[0]
             ticker_to_id[tk] = ticker_to_id[logo]
             added += 1
             print(f"  alias {tk} -> {logo} ({name.strip()})", flush=True)
+        elif ids:
+            ambiguous += 1
+            print(f"  AMBIGUOUS {tk} ({name.strip()}): '{key}' matches "
+                  f"{', '.join(sorted(logos))} -> left unmapped, resolve by hand",
+                  flush=True)
 
     (ROOT / "ticker_to_id.json").write_text(
         json.dumps(ticker_to_id, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"added {added} name-alias mappings", flush=True)
+    print(f"added {added} name-alias mappings "
+          f"({ambiguous} left unmapped as ambiguous)", flush=True)
 
     # Re-fill inventory.
     lines = text.split("\n")

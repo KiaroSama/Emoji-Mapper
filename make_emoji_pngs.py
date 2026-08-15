@@ -9,8 +9,9 @@ Two modes:
      python make_emoji_pngs.py --in input/myset --out build/myset
    Reads every image in ``--in`` (.svg via resvg; .png/.jpg/.jpeg/.webp/.gif
    via Pillow) and writes ``<name>.png`` (100x100) into ``--out``. When several
-   files share a name (foo.svg, foo.png) the source is picked by
-   ``SOURCE_PRIORITY``, not by file order.
+   files share a name (foo.svg, foo.png) they are tried in ``SOURCE_PRIORITY``
+   order, not file order, and the next one is used if the preferred source
+   renders broken or blank.
 
 2. Legacy crypto-coin mode (default, no --in/--out):
      python make_emoji_pngs.py
@@ -83,17 +84,26 @@ def _report_quarantine(names: set[str], skip: Path) -> None:
               f"{skip} to retry.", flush=True)
 
 
-def _pick_sources(in_dir: Path) -> list[Path]:
-    """One source file per output name, chosen by SOURCE_PRIORITY."""
-    best: dict[str, Path] = {}
+def _source_groups(in_dir: Path) -> list[list[Path]]:
+    """Every source file per output name, best first (SOURCE_PRIORITY).
+
+    The losers are kept, not discarded: the preferred source can render broken
+    or blank (a gradient-only SVG, a clipped-away document), and the sibling
+    raster is then the only way that name gets an emoji at all.
+    """
+    groups: dict[str, list[Path]] = {}
     for p in sorted(in_dir.iterdir()):
-        ext = p.suffix.lower()
-        if ext not in SOURCE_PRIORITY or not p.is_file():
+        if p.suffix.lower() not in SOURCE_PRIORITY or not p.is_file():
             continue
-        cur = best.get(p.stem.lower())
-        if cur is None or SOURCE_PRIORITY.index(ext) < SOURCE_PRIORITY.index(cur.suffix.lower()):
-            best[p.stem.lower()] = p
-    return [best[n] for n in sorted(best)]
+        groups.setdefault(p.stem.lower(), []).append(p)
+    for g in groups.values():
+        g.sort(key=lambda s: SOURCE_PRIORITY.index(s.suffix.lower()))
+    return [groups[n] for n in sorted(groups)]
+
+
+def _pick_sources(in_dir: Path) -> list[Path]:
+    """The preferred source per output name (the one tried first)."""
+    return [g[0] for g in _source_groups(in_dir)]
 
 
 def _output_ok(out: Path, src: Path) -> bool:
@@ -200,29 +210,38 @@ def _run_general(in_dir: Path, out_dir: Path, limit: int) -> int:
     quarantined = _load_skip(skip, marker)
     made = svg_ok = raster_ok = failed = 0
 
-    for p in _pick_sources(in_dir):
+    for group in _source_groups(in_dir):
         if limit and made >= limit:
             break
-        name = p.stem.lower()
+        name = group[0].stem.lower()
         out = out_dir / f"{name}.png"
         # ponytail: the reuse scan is silent to run_convert.ps1's heartbeat at
         # ~1.5 ms/output; only a folder of ~80k finished emojis would out-wait
         # its per-file deadline. Write the marker while checking if that day comes.
-        if name in quarantined or _output_ok(out, p):
+        # Every source must be older than the output, or editing the fallback
+        # source alone would never be picked up.
+        if name in quarantined or all(_output_ok(out, s) for s in group):
             continue
         marker.write_text(name, encoding="utf-8")  # heartbeat + culprit if we hang
         try:
-            if p.suffix.lower() == ".svg":
-                if _convert_svg(p, out):
-                    made += 1; svg_ok += 1
-                else:
-                    failed += 1
-            elif _convert_raster(p, out):
-                made += 1; raster_ok += 1
+            for src in group:
+                is_svg = src.suffix.lower() == ".svg"
+                try:
+                    ok = (_convert_svg(src, out) if is_svg
+                          else _convert_raster(src, out))
+                except Exception:  # noqa: BLE001 - try the next source instead
+                    ok = False
+                if ok:
+                    made += 1
+                    if is_svg:
+                        svg_ok += 1
+                    else:
+                        raster_ok += 1
+                    break
             else:
-                failed += 1  # blank/empty source -> never write a blank emoji
-        except Exception:  # noqa: BLE001
-            failed += 1
+                # Only when EVERY source for this name broke or rendered blank;
+                # a blank source must never become a blank emoji.
+                failed += 1
         finally:
             marker.unlink(missing_ok=True)
         if made and made % 250 == 0:
@@ -303,6 +322,12 @@ def main() -> int:
                     help="Output folder for 100x100 PNGs (general mode).")
     ap.add_argument("--limit", type=int, default=0, help="Max images this run (0=all).")
     args = ap.parse_args()
+
+    # A negative limit is not "no limit": ``made >= limit`` holds before the
+    # first conversion, so the run breaks out immediately and still exits 0.
+    if args.limit < 0:
+        print(f"ERROR: --limit must be 0 or greater (got {args.limit}).")
+        return EXIT_USAGE
 
     if args.in_dir:
         in_dir = Path(args.in_dir)
