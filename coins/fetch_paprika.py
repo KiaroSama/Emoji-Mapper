@@ -258,14 +258,28 @@ def live_stickers(tg: Telegram, name: str) -> list[dict]:
     return tg.get_sticker_set(name).get("stickers", [])
 
 
-def _content_matches(tg: Telegram, candidates: list[dict], png: Path) -> list[str]:
-    """custom_emoji_ids among ``candidates`` whose image IS ``png``.
+def source_dhash(png: Path) -> int:
+    """The identity of the image we are about to send, captured ONCE.
+
+    ``EMOJI/<ticker>.png`` is a shared, mutable path: both fetchers download
+    into it from main(), with no lock held. Re-deriving the identity oracle from
+    that file at check time therefore compares the live sticker against whatever
+    art landed there LAST, not against what we sent -- so our own upload reads
+    as "not ours", the map is left unwritten, and the ticker is uploaded a
+    second time. Hashing at intent time and carrying the value forward is what
+    makes the oracle immutable for the life of the mutation.
+    """
+    return _dhash(Image.open(png).convert("RGBA"))
+
+
+def _content_matches(tg: Telegram, candidates: list[dict], want: int,
+                     label: str) -> list[str]:
+    """custom_emoji_ids among ``candidates`` whose image hashes to ``want``.
 
     Raises LiveStateUnknown for a candidate that cannot be read: an unreadable
     sticker is not a non-match, and scoring it as one re-uploads an emoji that
     is already live.
     """
-    want = _dhash(Image.open(png).convert("RGBA"))
     hits: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         for st in candidates:
@@ -275,14 +289,15 @@ def _content_matches(tg: Telegram, candidates: list[dict], png: Path) -> list[st
                 got = _dhash(Image.open(dest).convert("RGBA"))
             except Exception as exc:  # noqa: BLE001
                 raise LiveStateUnknown(
-                    f"sticker {st.get('custom_emoji_id')} in {png.name}'s set "
+                    f"sticker {st.get('custom_emoji_id')} in {label}'s set "
                     f"could not be read ({exc})") from exc
             if hamming(want, got) <= SAME_IMAGE_MAX:
                 hits.append(str(st["custom_emoji_id"]))
     return hits
 
 
-def _landed_emoji_id(tg: Telegram, name: str, before: int, png: Path) -> str | None:
+def _landed_emoji_id(tg: Telegram, name: str, before: int, want: int,
+                     label: str) -> str | None:
     """custom_emoji_id of OUR upload in ``name``, or None when it is not there.
 
     Identity, never position or count. A sticker added by hand or by another
@@ -296,10 +311,10 @@ def _landed_emoji_id(tg: Telegram, name: str, before: int, png: Path) -> str | N
         raise LiveStateUnknown(f"live state of {name} is unknown")
     if set_state is SetState.MISSING:
         return None                       # a create that never landed
-    hits = _content_matches(tg, (sset.get("stickers") or [])[before:], png)
+    hits = _content_matches(tg, (sset.get("stickers") or [])[before:], want, label)
     if len(hits) > 1:
         raise LiveStateUnknown(
-            f"{len(hits)} live stickers in {name} carry {png.name}; refusing to "
+            f"{len(hits)} live stickers in {name} carry {label}; refusing to "
             f"guess which one is ours")
     return hits[0] if hits else None
 
@@ -331,11 +346,26 @@ def _recover_in_flight(tg: Telegram, state: dict,
         return None
     tk, name = intent.get("key"), intent.get("set_name")
     png = EMOJI / f"{tk}.png"
-    if not tk or not name or not png.is_file():
+    # The identity recorded WITH the mutation, not re-derived from the file now.
+    # Between that run and this one, main() may have re-downloaded the ticker --
+    # it does so whenever the map has no entry, which is exactly the state an
+    # unresolved upload leaves behind. Re-hashing the file would compare the
+    # live sticker against the NEW art, answer "it did not land", and upload a
+    # second copy. No concurrency is needed for that; two sequential runs do it.
+    want = intent.get("source_dhash")
+    if not tk or not name or (want is None and not png.is_file()):
         raise LiveStateUnknown(
             f"the unresolved upload {intent!r} cannot be checked (its ticker, "
-            f"set name or source image is gone)")
-    cid = _landed_emoji_id(tg, name, intent.get("expected_before") or 0, png)
+            f"set name or recorded image identity is gone)")
+    if want is None:
+        # An intent written before identities were recorded. The file is the
+        # only oracle left, and it may already have been overwritten -- say so.
+        print(f"  {tk}: the unresolved upload predates recorded image "
+              f"identities; falling back to {png.name} as it stands now",
+              flush=True)
+        want = source_dhash(png)
+    cid = _landed_emoji_id(tg, name, intent.get("expected_before") or 0,
+                           int(want), f"{tk}.png")
     if cid:
         names = {s["name"] for s in state["sets"]}
         if intent.get("operation") == "create" and name not in names:
@@ -402,6 +432,21 @@ def publish_logos(tg: Telegram, tickers: list[str],
                           flush=True)
                     added += 1
                     continue
+                if ticker_to_id.get(tk):
+                    # Re-reading the map is pointless while the loop still walks
+                    # the list main() built from the map as it was BEFORE this
+                    # run queued for the lock: a ticker another provider mapped
+                    # while we waited is still in that list, and adding it puts
+                    # a SECOND copy of the same coin in the pack and overwrites
+                    # the live sticker's id with the copy's. A non-empty entry is
+                    # proof enough here -- it is younger than that snapshot, and
+                    # every writer of this map (both fetchers, the rebuild,
+                    # remap_ids, verify_logos) records an id only after proving
+                    # by content which live sticker it belongs to.
+                    print(f"  {tk}: mapped to {ticker_to_id[tk]} while this run "
+                          f"waited for the lock; not adding a second copy",
+                          flush=True)
+                    continue
                 png = EMOJI / f"{tk}.png"
                 kw = keywords.get(tk, tk)
                 try:
@@ -419,10 +464,22 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     title, op, before = last.get("title", ""), "add", len(live)
                 # Durable record of the mutation ABOUT to run. An outcome that
                 # cannot be verified afterwards is only recoverable if the next
-                # run knows which image was sent to which set.
-                state["in_flight"] = make_intent(
+                # run knows which image was sent to which set -- and WHICH IMAGE
+                # that was, not merely which path it came from. The path is
+                # shared and unlocked; the hash taken here is what still
+                # identifies this upload after another run overwrites the file.
+                try:
+                    want = source_dhash(png)
+                except Exception as exc:  # noqa: BLE001 - unusable source image
+                    print(f"  add failed {tk}: cannot read {png.name}: {exc}",
+                          flush=True)
+                    failed += 1
+                    continue
+                intent = make_intent(
                     key=tk, operation=op, set_name=name, set_index=index,
                     expected_before=before, title=title)
+                intent["source_dhash"] = want
+                state["in_flight"] = intent
                 write_json_atomic(STATE, state)
                 try:
                     if op == "create":
@@ -442,7 +499,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     failed += 1
                     continue
                 try:
-                    cid = _landed_emoji_id(tg, name, before, png)
+                    cid = _landed_emoji_id(tg, name, before, want, png.name)
                 except LiveStateUnknown as exc:
                     # Leave the intent on disk -- it is the only record of an
                     # upload that may be live -- and stop before the next
