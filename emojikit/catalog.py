@@ -37,6 +37,22 @@ SCHEMA_VERSION = 1
 # content (normalized pixels) + file_unique_id only. Set a >=0 Hamming threshold
 # (e.g. via --phash-threshold) to opt in to merging near-identical images.
 DEFAULT_PHASH_THRESHOLD = -1
+# A dHash is 64 bits, so 64 is the largest distance two hashes can have: at that
+# threshold every same-format item matches every other one and the whole catalog
+# collapses into a single emoji. Anything above it is not "very fuzzy", it is
+# broken, and anything below -1 is meaningless.
+PHASH_BITS = 64
+
+
+def check_phash_threshold(value: int) -> int:
+    """Validate a near-duplicate threshold: -1 disables merging, else 0..64."""
+    value = int(value)
+    if value != -1 and not 0 <= value <= PHASH_BITS:
+        raise ValueError(
+            f"phash threshold {value} is out of range: use -1 to disable "
+            f"near-duplicate merging, or 0..{PHASH_BITS} (a dHash is "
+            f"{PHASH_BITS} bits).")
+    return value
 
 
 @dataclass
@@ -80,9 +96,11 @@ class Catalog:
     """SQLite-backed, content-addressed emoji catalog."""
 
     def __init__(self, db_path: Path, *, phash_threshold: int = DEFAULT_PHASH_THRESHOLD):
+        # Validate before touching the database: an out-of-range threshold
+        # silently merges unrelated emoji, and every caller routes through here.
+        self.phash_threshold = check_phash_threshold(phash_threshold)
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.phash_threshold = phash_threshold
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
         self._init_schema()

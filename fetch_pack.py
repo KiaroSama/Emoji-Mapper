@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-from build_pack import Telegram, ingest_exit_code, load_env
+from build_pack import EXIT_USAGE, Telegram, ingest_exit_code, load_env
 from emojikit import media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
 from emojikit.logsetup import record_exit_code, redact, setup_logging
@@ -123,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
                          "are skipped and do not count (0=all).")
     args = ap.parse_args(argv)
 
+    # A negative limit is not "no limit": ``counts["new"] >= -1`` is true before
+    # the first sticker, so the loop breaks immediately and the run reports
+    # success having downloaded nothing.
+    if args.limit < 0:
+        log.error("--limit must be 0 or greater (got %d).", args.limit)
+        return EXIT_USAGE
+
     token = os.environ.get(args.token_env, "")
     if not token:
         log.error("%s not set (env or .env).", args.token_env)
@@ -141,13 +148,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     total = {"new": 0, "dedup": 0, "failed": 0}
+    packs_failed = 0
     with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
         for raw in args.packs:
             name = pack_name(raw)
             try:
                 c = fetch_one(tg, cat, name, data_dir, tmp_dir, args.limit)
             except RuntimeError as exc:
+                # A pack that never loaded is a failed item, not a no-op: only
+                # per-sticker failures were counted, so a run where every pack
+                # was misspelled or deleted ingested nothing and still exited 0.
                 log.error("pack %s failed: %s", name, redact(str(exc)))
+                packs_failed += 1
                 continue
             for k in total:
                 total[k] += c[k]
@@ -158,11 +170,14 @@ def main(argv: list[str] | None = None) -> int:
         f.unlink(missing_ok=True)
     tmp_dir.rmdir() if not any(tmp_dir.iterdir()) else None
 
-    log.info("TOTAL ingested: new=%d dedup=%d failed=%d", total["new"], total["dedup"], total["failed"])
-    print(f"Done. new={total['new']} dedup={total['dedup']} failed={total['failed']}", flush=True)
+    log.info("TOTAL ingested: new=%d dedup=%d failed=%d packs_failed=%d",
+             total["new"], total["dedup"], total["failed"], packs_failed)
+    extra = f" packs_failed={packs_failed}" if packs_failed else ""
+    print(f"Done. new={total['new']} dedup={total['dedup']} "
+          f"failed={total['failed']}{extra}", flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
-    return ingest_exit_code(total["new"] + total["dedup"], total["failed"])
+    return ingest_exit_code(total["new"] + total["dedup"], total["failed"] + packs_failed)
 
 
 if __name__ == "__main__":

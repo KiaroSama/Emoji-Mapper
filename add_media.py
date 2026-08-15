@@ -31,7 +31,7 @@ from PIL import Image
 
 from build_pack import ingest_exit_code
 from emojikit import media
-from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD
+from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, check_phash_threshold
 from emojikit.logsetup import record_exit_code, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -88,6 +88,14 @@ def _media_path(data_dir: Path, fmt: str, content_key: str) -> Path:
     return data_dir / "media" / fmt / f"{safe}{media.ext_for_format(fmt)}"
 
 
+def phash_threshold(raw: str) -> int:
+    """argparse type: reject a threshold that would merge unrelated emoji."""
+    try:
+        return check_phash_threshold(int(raw))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def iter_sources(args) -> list[Path]:
     files: list[Path] = []
     if args.in_dir:
@@ -111,7 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emoji", default="\U0001F600", help="Associated standard emoji.")
     ap.add_argument("--keywords", default="", help="Comma-separated extra keywords.")
     ap.add_argument("--data-dir", default="collection", help="Catalog/media directory.")
-    ap.add_argument("--phash-threshold", type=int, default=DEFAULT_PHASH_THRESHOLD)
+    ap.add_argument("--phash-threshold", type=phash_threshold,
+                    default=DEFAULT_PHASH_THRESHOLD,
+                    help="Near-duplicate Hamming distance: -1 disables, else 0..64.")
     args = ap.parse_args(argv)
 
     sources = iter_sources(args)
