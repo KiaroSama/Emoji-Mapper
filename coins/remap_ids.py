@@ -13,10 +13,17 @@ sticker whose image is most similar. The result is a corrected, content-based
 ticker -> custom_emoji_id map. It NEVER modifies the Telegram packs.
 
 Usage:
-  python coins/remap_ids.py --emoji-dir "PATH/TO/emoji" [--apply]
+  # 1. dry run: prints the distance/margin distribution used to calibrate the cutoff
+  python coins/remap_ids.py --emoji-dir "PATH/TO/emoji"
+  # 2. apply, with a calibrated cutoff (required)
+  python coins/remap_ids.py --emoji-dir "PATH/TO/emoji" --max-distance 150 --apply
 
-Resumable: live signatures are cached in remap_live_cache.json, so an
-interrupted run continues without re-downloading.
+``--apply`` refuses to overwrite the canonical map from incomplete or ambiguous
+data and writes a reviewable candidate file instead.
+
+Resumable: live signatures are cached in remap_live_cache.json keyed by set name
+plus a digest of that set's live sticker manifest, so an interrupted run
+continues without re-downloading while an edited pack is still re-read.
 """
 
 from __future__ import annotations
@@ -26,18 +33,22 @@ _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import logging
 import os
+import shutil
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import requests
 from PIL import Image
 
-from build_pack import API_BASE, Telegram, load_env
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, Telegram,
+                        api_base, load_env, write_json_atomic)
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -53,42 +64,94 @@ def signature(img: Image.Image) -> np.ndarray:
     return np.frombuffer(im.tobytes(), dtype=np.uint8).astype(np.float32)
 
 
+def manifest_digest(stickers: list[dict]) -> str:
+    """Identity of a live set: its ordered (custom_emoji_id, file_unique_id) pairs.
+
+    The cache used to be keyed by the set INDEX alone, which marked a set "done"
+    forever: a sticker replaced, appended or deleted afterwards was silently
+    skipped and the run matched against a stale manifest.
+    """
+    ident = [[str(st.get("custom_emoji_id")), str(st.get("file_unique_id"))]
+             for st in stickers]
+    return hashlib.sha256(json.dumps(ident).encode("utf-8")).hexdigest()[:32]
+
+
 def load_cache(path: Path) -> dict:
+    """Cache layout: {"sets": {name: manifest digest}, "sigs": {cid: b64},
+    "errors": {cid: reason}}.
+
+    A legacy cache (``done_sets`` keyed by set index) keeps its signatures --
+    they are content-derived and still valid -- but loses its completeness
+    marks, so every set is re-verified against the live manifest once.
+    """
+    raw = {}
     if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {"done_sets": [], "sigs": {}}  # sigs: cid -> base64(768 bytes)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    return {"sets": raw.get("sets", {}), "sigs": raw.get("sigs", {}),
+            "errors": raw.get("errors", {})}
 
 
 def save_cache(path: Path, cache: dict) -> None:
-    path.write_text(json.dumps(cache), encoding="utf-8")
+    write_json_atomic(path, cache)
 
 
 def download_live(tg: Telegram, token: str, sets: list[dict], cache: dict,
-                  cache_path: Path) -> None:
-    """Download every live sticker once and cache its signature (resumable)."""
+                  cache_path: Path) -> list[str]:
+    """Cache one signature per live sticker (resumable).
+
+    Returns the names of sets that are still INCOMPLETE, i.e. at least one
+    sticker has no signature. A set is only recorded as complete -- and thereby
+    skipped on the next run -- when every sticker in its current manifest was
+    downloaded and analysed; marking it done regardless let a set be cached as
+    finished with zero usable signatures.
+    """
     sess = requests.Session()
-    done = set(cache["done_sets"])
+    live_cids: set[str] = set()
+    incomplete: list[str] = []
     for s in sets:
-        if s["index"] in done:
+        sticks = tg.get_sticker_set(s["name"]).get("stickers", [])
+        cids = [str(st.get("custom_emoji_id")) for st in sticks]
+        live_cids.update(cids)
+        digest = manifest_digest(sticks)
+        if cache["sets"].get(s["name"]) == digest:
             continue
-        ss = tg.get_sticker_set(s["name"])
-        sticks = ss.get("stickers", [])
-        for pos, st in enumerate(sticks):
-            cid = str(st.get("custom_emoji_id"))
+        for pos, (cid, st) in enumerate(zip(cids, sticks)):
             if cid in cache["sigs"]:
                 continue
             try:
                 fp = tg._call("getFile", data={"file_id": st["file_id"]})["file_path"]
-                data = sess.get(f"{API_BASE}/file/bot{token}/{fp}", timeout=40).content
-                sig = signature(Image.open(io.BytesIO(data)))
+                r = sess.get(f"{api_base()}/file/bot{token}/{fp}", timeout=40)
+                r.raise_for_status()  # an error page is not an image
+                sig = signature(Image.open(io.BytesIO(r.content)))
                 cache["sigs"][cid] = base64.b64encode(sig.astype(np.uint8).tobytes()).decode()
+                cache["errors"].pop(cid, None)
             except Exception as exc:  # noqa: BLE001
-                log.warning("set %d pos %d cid %s failed: %s", s["index"], pos, cid, exc)
+                # The file URL embeds the bot token, and requests puts the URL
+                # in its exception text -- never store that raw.
+                cache["errors"][cid] = tg._safe(exc)
+                log.warning("set %s pos %d cid %s failed: %s",
+                            s["name"], pos, cid, cache["errors"][cid])
             time.sleep(0.02)
-        cache["done_sets"].append(s["index"])
+        missing = [c for c in cids if c not in cache["sigs"]]
+        if missing:
+            incomplete.append(s["name"])
+            log.warning("set %s: %d/%d stickers still have no signature (not cached "
+                        "as complete; re-run to retry)", s["name"], len(missing), len(cids))
+        else:
+            cache["sets"][s["name"]] = digest
         save_cache(cache_path, cache)
-        log.info("set %d (%s): cached %d live signatures total",
-                 s["index"], s["name"], len(cache["sigs"]))
+        log.info("set %s: cached %d live signatures total", s["name"], len(cache["sigs"]))
+
+    # Ids that are no longer live (deleted or replaced stickers) must stop being
+    # match candidates, otherwise a ticker is mapped to a sticker that is gone.
+    stale = set(cache["sigs"]) - live_cids
+    if stale:
+        for cid in stale:
+            cache["sigs"].pop(cid, None)
+            cache["errors"].pop(cid, None)
+        save_cache(cache_path, cache)
+        log.info("pruned %d cached ids that are no longer live", len(stale))
+    return incomplete
 
 
 def build_local(emoji_dir: Path) -> tuple[list[str], np.ndarray]:
@@ -103,21 +166,34 @@ def build_local(emoji_dir: Path) -> tuple[list[str], np.ndarray]:
     return tickers, np.array(sigs, dtype=np.float32)
 
 
-def nearest(local: np.ndarray, live: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """For each local row, index of nearest live row + squared L2 distance."""
+def nearest(local: np.ndarray, live: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """For each local row: nearest live index, its squared L2 distance, and the
+    runner-up squared distance (inf when there is only one candidate).
+
+    The runner-up is what makes a match checkable: a logo that is nearly as
+    close to a second live sticker is ambiguous, not a match.
+    """
     ln2 = (local * local).sum(1)
     vn2 = (live * live).sum(1)
     out_idx = np.empty(local.shape[0], dtype=np.int64)
     out_d2 = np.empty(local.shape[0], dtype=np.float64)
+    out_second = np.empty(local.shape[0], dtype=np.float64)
     # Chunk over local rows to keep the Gram matrix memory bounded.
     step = 512
     for i in range(0, local.shape[0], step):
         block = local[i:i + step]
         g = block @ live.T
-        d2 = ln2[i:i + step, None] - 2 * g + vn2[None, :]
-        out_idx[i:i + step] = d2.argmin(1)
-        out_d2[i:i + step] = d2[np.arange(block.shape[0]), out_idx[i:i + step]]
-    return out_idx, out_d2
+        # |a-b|^2 expanded this way can go slightly negative on identical rows
+        # (float cancellation); sqrt() of that is NaN, which silently poisons
+        # every distance comparison below.
+        d2 = np.maximum(ln2[i:i + step, None] - 2 * g + vn2[None, :], 0.0)
+        rows = np.arange(block.shape[0])
+        best = d2.argmin(1)
+        out_idx[i:i + step] = best
+        out_d2[i:i + step] = d2[rows, best]
+        d2[rows, best] = np.inf  # mask the winner, then the min is the runner-up
+        out_second[i:i + step] = d2.min(1)
+    return out_idx, out_d2, out_second
 
 
 def main() -> int:
@@ -129,20 +205,32 @@ def main() -> int:
     ap.add_argument("--state", default=str(ROOT / "rebuild_dedup_state.json"))
     ap.add_argument("--cache", default=str(ROOT / "remap_live_cache.json"))
     ap.add_argument("--out", default=str(ROOT / "ticker_to_id.json"))
-    ap.add_argument("--max-distance", type=float, default=0,
-                    help="Omit tickers whose best image match exceeds this distance "
-                         "(0 = keep all). Use to drop coins that were never uploaded.")
+    ap.add_argument("--candidates", default=str(ROOT / "ticker_to_id.candidate.json"),
+                    help="Where a refused --apply writes its reviewable result.")
+    ap.add_argument("--max-distance", type=float, default=None,
+                    help="Reject matches farther than this. REQUIRED with --apply; "
+                         "run without --apply first to calibrate it from the "
+                         "reported distance distribution.")
+    ap.add_argument("--min-margin", type=float, default=None,
+                    help="Reject a match whose runner-up is closer than this "
+                         "(default: --max-distance). Guards against mapping a "
+                         "coin onto whichever of two near-identical stickers "
+                         "happened to win by a hair.")
     ap.add_argument("--apply", action="store_true", help="Write the corrected map.")
     args = ap.parse_args()
 
     emoji_dir = Path(args.emoji_dir)
     if not emoji_dir.is_dir():
         log.error("emoji dir not found: %s", emoji_dir)
-        return 2
+        return EXIT_USAGE
     token = os.environ.get(args.token_env, "")
     if not token:
         log.error("%s not set.", args.token_env)
-        return 2
+        return EXIT_USAGE
+    if args.apply and not (args.max_distance and args.max_distance > 0):
+        log.error("--apply needs a calibrated --max-distance > 0; run without "
+                  "--apply first and pick a cutoff from the reported distances.")
+        return EXIT_USAGE
 
     state = json.loads(Path(args.state).read_text(encoding="utf-8"))
     sets = sorted(state["sets"], key=lambda s: s["index"])
@@ -151,36 +239,40 @@ def main() -> int:
 
     cache_path = Path(args.cache)
     cache = load_cache(cache_path)
-    download_live(tg, token, sets, cache, cache_path)
+    incomplete = download_live(tg, token, sets, cache, cache_path)
 
     cids = list(cache["sigs"].keys())
+    tickers, local = build_local(emoji_dir)
+    if not tickers or not cids:
+        log.error("nothing to match: %d local logos, %d live signatures",
+                  len(tickers), len(cids))
+        return EXIT_FAILED
     live = np.array([np.frombuffer(base64.b64decode(cache["sigs"][c]), dtype=np.uint8)
                      for c in cids], dtype=np.float32)
-    tickers, local = build_local(emoji_dir)
     log.info("matching %d local logos against %d live stickers ...", len(tickers), len(cids))
-    idx, d2 = nearest(local, live)
-
-    new_map: dict[str, str] = {}
-    dists = []
-    for t, j, dd in zip(tickers, idx, d2):
-        new_map[t] = cids[j]
-        dists.append(dd ** 0.5)
-    dists = np.array(dists)
+    idx, d2, d2_second = nearest(local, live)
+    dists = np.sqrt(d2)
+    margins = np.sqrt(d2_second) - dists
 
     # Distance distribution helps choose a cutoff that separates real matches
     # (deduped siblings included) from coins that were never uploaded.
     for thr in (50, 100, 150, 200, 300, 500):
         log.info("  matches with distance > %d: %d", thr, int((dists > thr).sum()))
 
-    # Drop poor matches (no genuine live image) instead of mis-mapping them.
-    omitted = 0
-    if args.max_distance > 0:
-        for t, d in list(zip(tickers, dists)):
-            if d > args.max_distance:
-                new_map.pop(t, None)
-                omitted += 1
-        log.info("omitted %d tickers with distance > %d (no reliable live match)",
-                 omitted, args.max_distance)
+    max_d = args.max_distance
+    margin_min = args.min_margin if args.min_margin is not None else max_d
+    new_map: dict[str, str] = {}
+    far: list[tuple[str, float]] = []
+    ambiguous: list[tuple[str, float, float]] = []
+    for t, j, d, m in zip(tickers, idx, dists, margins):
+        if max_d is None:
+            new_map[t] = cids[j]            # dry run without a cutoff: report only
+        elif d > max_d:
+            far.append((t, float(d)))       # no genuine live image; omit, don't guess
+        elif m < margin_min:
+            ambiguous.append((t, float(d), float(m)))
+        else:
+            new_map[t] = cids[j]
 
     # Compare against the existing (broken) map.
     old = {}
@@ -188,26 +280,54 @@ def main() -> int:
     if outp.is_file():
         old = json.loads(outp.read_text(encoding="utf-8"))
     changed = sum(1 for t, c in new_map.items() if old.get(t) != c)
-    log.info("rebuilt map: %d tickers | changed vs current: %d", len(new_map), changed)
+    log.info("rebuilt map: %d tickers | changed vs current: %d | omitted: %d too far, "
+             "%d ambiguous", len(new_map), changed, len(far), len(ambiguous))
     log.info("match distance: min=%.1f median=%.1f p95=%.1f max=%.1f",
              dists.min(), np.median(dists), np.percentile(dists, 95), dists.max())
+    finite = margins[np.isfinite(margins)]
+    if finite.size:
+        log.info("runner-up margin: min=%.1f median=%.1f", finite.min(), np.median(finite))
     worst = sorted(zip(tickers, dists), key=lambda x: -x[1])[:10]
     log.info("worst matches (review): %s", [(t, round(float(d))) for t, d in worst])
+    if ambiguous:
+        log.warning("ambiguous (best vs runner-up too close): %s",
+                    [(t, round(d), round(m)) for t, d, m in ambiguous[:10]])
+    shared = sum(1 for n in Counter(new_map.values()).values() if n > 1)
+    if shared:
+        log.info("%d live stickers are claimed by more than one ticker (expected for "
+                 "deduped logos -- review if unexpected)", shared)
     for probe in ("btc", "eth", "usdt", "usdu", "sol", "xrp"):
         if probe in new_map:
             log.info("  %s -> %s (was %s)%s", probe, new_map[probe],
                      old.get(probe), "" if new_map[probe] != old.get(probe) else " [unchanged]")
 
-    if args.apply:
-        bak = outp.with_suffix(".prebroken.json")
-        if outp.is_file() and not bak.exists():
-            bak.write_text(outp.read_text(encoding="utf-8"), encoding="utf-8")
-            log.info("backed up old map -> %s", bak.name)
-        outp.write_text(json.dumps(new_map, ensure_ascii=False, indent=1), encoding="utf-8")
-        log.info("WROTE corrected map -> %s", outp)
-    else:
-        log.info("dry run (no file written). Re-run with --apply to save.")
-    return 0
+    if not args.apply:
+        log.info("dry run (no file written). Re-run with --max-distance N --apply to save.")
+        return EXIT_OK
+
+    # The canonical map is what every consumer resolves tickers through: never
+    # overwrite it from data we know is partial or unresolved.
+    problems = []
+    if incomplete:
+        problems.append(f"{len(incomplete)} set(s) not fully downloaded ({incomplete[:5]})")
+    if cache["errors"]:
+        problems.append(f"{len(cache['errors'])} live sticker(s) failed to analyse")
+    if ambiguous:
+        problems.append(f"{len(ambiguous)} ambiguous match(es)")
+    if problems:
+        cand = Path(args.candidates)
+        write_json_atomic(cand, new_map)
+        log.error("NOT writing %s: %s", outp.name, "; ".join(problems))
+        log.error("wrote %d reviewable candidates -> %s", len(new_map), cand)
+        return EXIT_PARTIAL
+
+    bak = outp.with_suffix(".prebroken.json")
+    if outp.is_file() and not bak.exists():
+        shutil.copyfile(outp, bak)
+        log.info("backed up old map -> %s", bak.name)
+    write_json_atomic(outp, new_map)
+    log.info("WROTE corrected map -> %s", outp)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

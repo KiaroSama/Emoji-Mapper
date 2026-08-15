@@ -17,7 +17,8 @@
     Do not relaunch in Windows Terminal / PowerShell 7.
 
 .PARAMETER Check
-    Non-interactive environment "doctor" for CI / scripted use.
+    Non-interactive environment "doctor" for CI / scripted use. Never prompts and
+    never installs anything; exits 0 when the environment is usable, else 1.
 #>
 
 [CmdletBinding()]
@@ -114,12 +115,26 @@ function Show-Banner {
 }
 
 # Run a Python entry point, logging the command (no secrets) and its exit code.
+# The child's output is pushed straight to the host instead of being left on the
+# success stream: otherwise the caller receives "stdout + exit code" as one array
+# and a test like `(Invoke-Py ...) -ne 0` reports failure for every successful
+# command that happened to print something.
 function Invoke-Py ($py, [string[]]$Argv) {
     Write-Log 'INFO' ("run: python " + ($Argv -join ' '))
-    & $py @Argv
-    $code = $LASTEXITCODE
+    & $py @Argv | Out-Host
+    $code = [int]$LASTEXITCODE
     Write-Log 'INFO' ("exit $code (" + $Argv[0] + ")")
     return $code
+}
+
+# Same, plus a user-visible verdict. Menu actions used to pipe Invoke-Py to
+# Out-Null, which threw the real exit code away and always looked successful.
+# Returns nothing on purpose: a stray value would be picked up as extra output
+# by the wizard step that calls it.
+function Invoke-PyReport ($py, [string[]]$Argv, $what) {
+    $code = Invoke-Py $py $Argv
+    if ($code -eq 0) { Write-Ok "$what finished." }
+    else { Write-Err "$what failed (exit $code)." }
 }
 
 # Ask for text with a colored {back=0, quit=exit} hint. Returns the raw answer;
@@ -162,13 +177,28 @@ if (-not $NoRelaunch -and -not $env:EMOJI_MAPPER_RELAUNCHED) {
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh -and $PSVersionTable.PSVersion.Major -lt 7) {
         $env:EMOJI_MAPPER_RELAUNCHED = '1'
-        $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
         $self = $MyInvocation.MyCommand.Definition
+        # Forward every switch the caller passed. Passing only -NoRelaunch used to
+        # drop -Check, so a scripted doctor run silently became an interactive menu.
+        $fwd = @('-NoRelaunch')
+        foreach ($e in $PSBoundParameters.GetEnumerator()) {
+            if ($e.Key -eq 'NoRelaunch') { continue }
+            if ($e.Value -is [System.Management.Automation.SwitchParameter] -and $e.Value.IsPresent) {
+                $fwd += "-$($e.Key)"
+            }
+        }
         try {
+            if ($Check) {
+                # Doctor mode stays attached and non-interactive: a detached window
+                # would hand the caller exit 0 no matter what the check found.
+                & $pwsh.Source -NoProfile -File $self @fwd
+                exit $LASTEXITCODE
+            }
+            $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
             if ($wt) {
-                & $wt.Source $pwsh.Source -NoExit -File $self -NoRelaunch
+                & $wt.Source $pwsh.Source -NoExit -File $self @fwd
             } else {
-                & $pwsh.Source -NoExit -File $self -NoRelaunch
+                & $pwsh.Source -NoExit -File $self @fwd
             }
             return
         } catch {
@@ -224,19 +254,23 @@ function Ensure-Environment {
             return $null
         }
         Write-Step "Creating .venv ..."
-        & (Get-Command $base.Exe).Source @($base.Args + @('-m','venv','.venv'))
+        # Out-Host, or venv's chatter would be returned alongside $py.
+        & (Get-Command $base.Exe).Source @($base.Args + @('-m','venv','.venv')) | Out-Host
         $py = Get-PythonExe
         if (-not $py) { Write-Err "Failed to create .venv."; return $null }
     }
     return $py
 }
 
+# Returns $true only when the requirements install succeeded; the caller aborts
+# otherwise instead of opening a menu whose every action would fail.
 function Install-Deps ($py) {
     Write-Step "Installing requirements ..."
-    & $py -m pip install --upgrade pip
-    & $py -m pip install -r (Join-Path $ScriptRoot 'requirements.txt')
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Dependencies installed." }
-    else { Write-Err "Dependency install failed (exit $LASTEXITCODE)." }
+    Invoke-Py $py @('-m','pip','install','--upgrade','pip') | Out-Null   # self-upgrade is best-effort
+    $code = Invoke-Py $py @('-m','pip','install','-r',(Join-Path $ScriptRoot 'requirements.txt'))
+    if ($code -eq 0) { Write-Ok "Dependencies installed."; return $true }
+    Write-Err "Dependency install failed (exit $code)."
+    return $false
 }
 
 function Test-Deps ($py) {
@@ -303,8 +337,9 @@ function Action-ConvertOnly ($py) {
           $st.inDir = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Output folder (blank = <folder>_emoji)"; if ($v -eq '0') { return 'back' }
           $st.outDir = $v
-          if ([string]::IsNullOrWhiteSpace($st.outDir)) { Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir) | Out-Null }
-          else { Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir,'--out',$st.outDir) | Out-Null }
+          $argv = @('make_emoji_pngs.py','--in',$st.inDir)
+          if (-not [string]::IsNullOrWhiteSpace($st.outDir)) { $argv += @('--out',$st.outDir) }
+          Invoke-PyReport $py $argv "Conversion"
           'ok' }.GetNewClosure()
     )
     Run-Wizard $steps | Out-Null
@@ -317,7 +352,7 @@ function Action-CoinRebuild ($py) {
     if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_dedup.py not found."; return }
     $yn = Ask-YesNo "Run coins/rebuild_dedup.py now? (duplicate-proof: build + map + links)"
     if ($yn -eq 'back' -or -not $yn) { return }   # back or no -> return to menu
-    Invoke-Py $py @($script) | Out-Null
+    Invoke-PyReport $py @($script) "Coin pack rebuild"
 }
 
 function Action-CollectPacks ($py) {
@@ -327,7 +362,9 @@ function Action-CollectPacks ($py) {
     $steps = @(
         { $line = Ask "Pack (blank = done)"
           if ($line -eq '0') {
-              if ($st.packs.Count -gt 0) { $st.packs = @($st.packs[0..($st.packs.Count-2)]); Write-Info "Removed last." }
+              # Drop the last entry. 0..(Count-2) is wrong for a single entry:
+              # 0..-1 counts down and yields indices 0 and -1, i.e. that one entry twice.
+              if ($st.packs.Count -gt 0) { $st.packs = @($st.packs | Select-Object -SkipLast 1); Write-Info "Removed last." }
               return 'stay' }                       # 0 = undo last entry (one step)
           if ([string]::IsNullOrWhiteSpace($line)) {
               if ($st.packs.Count -eq 0) { Write-Warn "No packs entered."; return 'back' }
@@ -335,7 +372,7 @@ function Action-CollectPacks ($py) {
           $st.packs += $line.Trim(); return 'stay' }.GetNewClosure(),
         { $v = Ask "Token env var (default GENERAL_BOT_TOKEN)"; if ($v -eq '0') { return 'back' }
           $tokenEnv = if ([string]::IsNullOrWhiteSpace($v)) { 'GENERAL_BOT_TOKEN' } else { $v }
-          Invoke-Py $py (@('fetch_pack.py') + $st.packs + @('--token-env',$tokenEnv)) | Out-Null
+          Invoke-PyReport $py (@('fetch_pack.py') + $st.packs + @('--token-env',$tokenEnv)) "Collect"
           'ok' }.GetNewClosure()
     )
     Run-Wizard $steps | Out-Null
@@ -354,7 +391,7 @@ function Action-AddMedia ($py) {
           $st.inDir = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Associated standard emoji (default 😀)"; if ($v -eq '0') { return 'back' }
           if (-not [string]::IsNullOrWhiteSpace($v)) { $st.emoji = $v }
-          Invoke-Py $py @('add_media.py','--in',$st.inDir,'--emoji',$st.emoji) | Out-Null
+          Invoke-PyReport $py @('add_media.py','--in',$st.inDir,'--emoji',$st.emoji) "Add media"
           'ok' }.GetNewClosure()
     )
     Run-Wizard $steps | Out-Null
@@ -389,14 +426,14 @@ function Action-PublishCollection ($py) {
 function Action-Panel ($py) {
     Write-Title "Curate panel (pick which emoji go into the pack)"
     Write-Info "Opening the web panel in your browser... (Ctrl+C here to stop it)"
-    Invoke-Py $py @('panel.py') | Out-Null
+    Invoke-PyReport $py @('panel.py') "Web panel"
 }
 
 function Action-RunBot ($py) {
     Write-Title "Run the Emoji Mapper bot (premium-emoji ID extractor)"
     Write-Info "Send the bot a premium emoji or a post with emoji, or add it to a channel/group."
     Write-Info "Press Ctrl+C to stop the bot."
-    Invoke-Py $py @('emoji_bot.py') | Out-Null
+    Invoke-PyReport $py @('emoji_bot.py') "Bot"
 }
 
 # --- Menu -----------------------------------------------------------------
@@ -443,24 +480,46 @@ function Invoke-Choice ($choice, $py) {
 # --- Bootstrap ------------------------------------------------------------
 Initialize-Log
 Show-Banner
+
+# Non-interactive environment check ("doctor") for CI / scripted use. It runs
+# before Ensure-Environment / the dependency prompt on purpose: those ask
+# questions, and a doctor that blocks on stdin is useless in a script.
+if ($Check) {
+    $py = Get-PythonExe
+    if (-not $py) {
+        Write-Err ".venv not found. Run the launcher once without -Check to create it."
+        Write-Log 'INFO' 'doctor: exit 1'
+        exit 1
+    }
+    Check-Env $py            # logs .env status (warns only if missing)
+    Log-Ok ("Python: " + (& $py --version))
+    if (Test-Ffmpeg) { Log-Ok "ffmpeg present (video emoji enabled)." }
+    else { Write-Warn "ffmpeg not found: video emoji disabled (winget install Gyan.FFmpeg)." }
+    if (-not (Test-Deps $py)) {
+        Write-Err "Some dependencies are missing."
+        Write-Log 'INFO' 'doctor: exit 1'
+        exit 1
+    }
+    Write-Ok "All Python dependencies import correctly."
+    Write-Ok "Environment check complete."
+    Write-Log 'INFO' 'doctor: exit 0'
+    exit 0
+}
+
 $py = Ensure-Environment
 if (-not $py) { Write-Log 'CRITICAL' 'no Python environment; exiting'; exit 1 }
 if (-not (Test-Deps $py)) {
-    if (Confirm-YesDefault "Install/repair Python dependencies?") { Install-Deps $py }
+    if (Confirm-YesDefault "Install/repair Python dependencies?") {
+        # A broken install must not reach the menu: every action would fail on import.
+        if (-not (Install-Deps $py)) { Write-Log 'CRITICAL' 'dependency install failed; exiting'; exit 1 }
+    } else {
+        Write-Warn "Continuing without the missing dependencies; actions may fail."
+    }
 }
 Check-Env $py            # logs .env status (warns only if missing)
 Log-Ok ("Python: " + (& $py --version))   # quiet: log only
 if (Test-Ffmpeg) { Log-Ok "ffmpeg present (video emoji enabled)." }  # quiet
 else { Write-Warn "ffmpeg not found: video emoji disabled (winget install Gyan.FFmpeg)." }
-
-# Non-interactive environment check ("doctor") for CI / scripted use.
-if ($Check) {
-    if (Test-Deps $py) { Write-Ok "All Python dependencies import correctly." }
-    else { Write-Err "Some dependencies are missing."; Write-Log 'INFO' 'doctor: exit 1'; exit 1 }
-    Write-Ok "Environment check complete."
-    Write-Log 'INFO' 'doctor: exit 0'
-    exit 0
-}
 
 # --- Menu loop ------------------------------------------------------------
 $running = $true
