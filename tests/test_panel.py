@@ -8,11 +8,15 @@ sent to /api/save. These tests lock down that separation.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib import error, request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -74,6 +78,130 @@ class BrandLogoPreview(unittest.TestCase):
         logo = self.data / "logo.png"; _make_png(logo)
         view, _ = self._view("", logo)
         self.assertEqual(len(view), 3)
+
+
+class InertItemJson(unittest.TestCase):
+    """A catalog label must never be able to escape the data block."""
+
+    def test_script_close_is_escaped(self):
+        out = p._json_for_script([{"label": "</script><script>alert(1)</script>"}])
+        self.assertNotIn("</script>", out)
+        self.assertNotIn("<", out)
+        self.assertIn("\\u003c", out)
+
+    def test_js_line_separators_are_escaped(self):
+        out = p._json_for_script([{"label": "a b c"}])
+        self.assertNotIn(" ", out)
+        self.assertNotIn(" ", out)
+
+    def test_roundtrips(self):
+        items = [{"key": "s:1", "label": "ok <b>", "included": True}]
+        self.assertEqual(json.loads(p._json_for_script(items)), items)
+
+
+class LoopbackCheck(unittest.TestCase):
+    def test_accepts_loopback_forms(self):
+        for h in ("127.0.0.1:8765", "localhost:8765", "127.0.0.1",
+                  "http://127.0.0.1:8765", "[::1]:8765"):
+            self.assertTrue(p._is_loopback(h), h)
+
+    def test_rejects_foreign_hosts(self):
+        for h in ("evil.com", "evil.com:8765", "http://evil.com",
+                  "127.0.0.1.evil.com", ""):
+            self.assertFalse(p._is_loopback(h), h)
+
+
+class MutationGuard(unittest.TestCase):
+    """POST routes must reject anything a hostile page could actually send."""
+
+    TOKEN = "test-token-value"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        data = Path(self.tmp.name)
+        self.db = data / "catalog.db"
+        with Catalog(self.db) as cat:
+            for i in range(2):
+                img = data / "media" / "static" / f"i{i}.png"
+                _make_png(img)
+                cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
+                        emojis=["😀"], keywords=[f"item{i}"])
+            self.view, by_key = p.build_view(cat, "")
+
+        handler = p.make_handler(self.view, by_key, self.db, self.TOKEN)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.thread.join(timeout=10)
+        self.assertFalse(self.thread.is_alive(), "panel server thread leaked")
+        self.httpd.server_close()
+        self.tmp.cleanup()
+
+    def _post(self, path, body, *, token=TOKEN, ctype="application/json",
+              origin=None, length=None):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        req = request.Request(f"http://127.0.0.1:{self.port}{path}", data=raw,
+                              method="POST")
+        if ctype:
+            req.add_header("Content-Type", ctype)
+        if token is not None:
+            req.add_header("X-Panel-Token", token)
+        if origin:
+            req.add_header("Origin", origin)
+        if length is not None:
+            req.add_header("Content-Length", str(length))
+        try:
+            with request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def _keys(self):
+        return [v["key"] for v in self.view if not v.get("isLogo")]
+
+    def test_missing_token_is_rejected(self):
+        code, _ = self._post("/api/save", {"excluded": []}, token=None)
+        self.assertEqual(code, 403)
+
+    def test_wrong_token_is_rejected(self):
+        code, _ = self._post("/api/save", {"excluded": []}, token="nope")
+        self.assertEqual(code, 403)
+
+    def test_non_json_content_type_is_rejected(self):
+        # The exact shape a cross-origin no-cors POST can send.
+        code, _ = self._post("/api/save", {"excluded": []}, ctype="text/plain")
+        self.assertEqual(code, 403)
+
+    def test_foreign_origin_is_rejected(self):
+        code, _ = self._post("/api/save", {"excluded": []}, origin="http://evil.com")
+        self.assertEqual(code, 403)
+
+    def test_malformed_json_is_400(self):
+        code, _ = self._post("/api/save", b"{not json")
+        self.assertEqual(code, 400)
+
+    def test_unknown_keys_rejected(self):
+        code, _ = self._post("/api/save", {"excluded": [], "wat": 1})
+        self.assertEqual(code, 400)
+
+    def test_order_must_be_a_permutation(self):
+        keys = self._keys()
+        code, _ = self._post("/api/order", {"order": keys[:1]})
+        self.assertEqual(code, 400, "a partial order would silently drop items")
+        code, _ = self._post("/api/order", {"order": keys + ["s:bogus"]})
+        self.assertEqual(code, 400)
+
+    def test_valid_requests_still_work(self):
+        keys = self._keys()
+        code, body = self._post("/api/order", {"order": list(reversed(keys))})
+        self.assertEqual((code, body["ok"]), (200, True))
+        code, body = self._post("/api/save", {"excluded": [keys[0]]})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["excluded"], 1)
 
 
 if __name__ == "__main__":
