@@ -22,8 +22,9 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 
-from build_pack import Telegram, load_env
+from build_pack import Telegram, load_env, write_json_atomic
 from emojikit.logsetup import redact, setup_logging
 
 log = logging.getLogger("emoji_bot")
@@ -72,8 +73,25 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
 
 DEFAULT_FALLBACK = "\u2b50"   # ⭐ shown if a custom emoji has no associated char
 PER_ID_COST = 110             # worst-case chars per id (rich <tg-emoji> + code)
-COPY_MAX = 256                # CopyTextButton.text hard limit
-IDS_PER_COPY_BTN = 12         # ~19-digit ids + newline fit under COPY_MAX
+COPY_MAX = 256                # CopyTextButton.text hard limit (Bot API)
+
+# getUpdates cursor, persisted so a restart does not replay handled updates.
+OFFSET_FILE = Path(__file__).resolve().parent / "state_emoji_bot.json"
+
+
+def _load_offset() -> int:
+    try:
+        return int(json.loads(OFFSET_FILE.read_text(encoding="utf-8"))["offset"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+def _save_offset(offset: int) -> None:
+    try:
+        write_json_atomic(OFFSET_FILE, {"offset": offset})
+    except OSError as exc:
+        # Losing the cursor only costs a replay, so this must never stop the bot.
+        log.warning("could not persist update offset: %s", exc)
 
 
 def _fallback_char(labels: dict[str, str] | None, cid: str) -> str:
@@ -129,6 +147,31 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
     )
 
 
+def _copy_text(ids: list[str]) -> str:
+    """The text one copy button places on the clipboard."""
+    return "\n".join(ids) + "\n"
+
+
+def _chunk_for_copy(ids: list[str], limit: int = COPY_MAX) -> list[list[str]]:
+    """Split ids into chunks whose copied text fits Telegram's 256-char cap.
+
+    Packing a FIXED number of ids per button silently overflows: the id parser
+    accepts up to 25 digits, and 12 of those plus newlines is 312 characters,
+    so Telegram rejects the button. Measure the encoded text instead.
+    """
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    for cid in ids:
+        cost = len(cid) + 1                     # id + its newline
+        if current and len(_copy_text(current)) + cost > limit:
+            chunks.append(current)
+            current = []
+        current.append(cid)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _copy_keyboard(ids: list[str]) -> dict:
     """Inline keyboard whose button(s) copy every id in one tap (all platforms).
 
@@ -138,17 +181,18 @@ def _copy_keyboard(ids: list[str]) -> dict:
     immediately followed by a blank line (handy when pasting several button
     copies in sequence, or pasting an id above other text).
     """
-    chunks = [ids[i:i + IDS_PER_COPY_BTN] for i in range(0, len(ids), IDS_PER_COPY_BTN)]
+    chunks = _chunk_for_copy(ids)
     kb: list[list[dict]] = []
     if len(chunks) <= 1:
         kb.append([{"text": f"📋 Copy all {len(ids)} IDs",
-                    "copy_text": {"text": "\n".join(ids) + "\n"}}])
+                    "copy_text": {"text": _copy_text(ids)}}])
     else:
-        for k, ch in enumerate(chunks, 1):
-            lo = (k - 1) * IDS_PER_COPY_BTN + 1
+        lo = 1
+        for ch in chunks:
             hi = lo + len(ch) - 1
             kb.append([{"text": f"📋 Copy {lo}-{hi}",
-                        "copy_text": {"text": "\n".join(ch) + "\n"}}])
+                        "copy_text": {"text": _copy_text(ch)}}])
+            lo = hi + 1
     return {"inline_keyboard": kb}
 
 
@@ -267,6 +311,11 @@ def main() -> int:
         log.error("GENERAL_BOT_TOKEN not set (.env).")
         return 2
     owner_id = int(os.environ.get("PACK_OWNER_USER_ID", "0"))
+    if owner_id <= 0:
+        # Zero is not a usable chat id; without this the bot polls happily and
+        # only fails later, per message, when it tries to reply.
+        log.error("PACK_OWNER_USER_ID is not set to a valid numeric id (.env).")
+        return 2
     tg = Telegram(token)
     me = tg.get_me()
     log.info("Emoji Mapper bot @%s started (owner=%s)", me.get("username"), owner_id)
@@ -278,8 +327,13 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - non-fatal
         log.debug("setMyCommands failed: %s", exc)
 
-    offset = 0
-    allowed = ["message", "channel_post", "edited_channel_post", "my_chat_member"]
+    # The offset survives a restart: keeping it only in memory made every
+    # restart re-fetch old updates and reply to them a second time.
+    offset = _load_offset()
+    if offset:
+        log.info("resuming from update offset %d", offset)
+    # Only ask for update types this bot actually dispatches.
+    allowed = ["message", "channel_post", "my_chat_member"]
     while True:
         try:
             updates = tg._call("getUpdates", data={
@@ -287,15 +341,28 @@ def main() -> int:
                 "allowed_updates": json.dumps(allowed),
             })
         except Exception as exc:  # noqa: BLE001
-            log.warning("getUpdates failed: %s", redact(str(exc)))
+            text = redact(str(exc))
+            if "conflict" in text.lower():
+                # Another poller, or a webhook, owns this bot. Retrying every
+                # three seconds forever just hides a configuration error.
+                log.error("getUpdates conflict -- another instance or a webhook "
+                          "is active for this bot: %s", text)
+                return 4
+            log.warning("getUpdates failed: %s", text)
             time.sleep(3)
             continue
         for upd in updates or []:
-            offset = upd["update_id"] + 1
             try:
                 handle_update(tg, owner_id, upd)
             except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
-                log.warning("handle_update error: %s", redact(str(exc)))
+                # Explicitly dead-lettered: acknowledged so a poison update
+                # cannot wedge the queue, but recorded at error level rather
+                # than dropped silently.
+                log.error("dead-lettering update %s after handler error: %s",
+                          upd.get("update_id"), redact(str(exc)))
+            # Advance only AFTER the update has been handled or dead-lettered.
+            offset = upd["update_id"] + 1
+            _save_offset(offset)
 
 
 if __name__ == "__main__":
