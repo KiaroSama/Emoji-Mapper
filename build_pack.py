@@ -41,6 +41,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -196,20 +197,46 @@ def pack_family_lock_path(base: str) -> Path:
     return LOCK_DIR / f"pack_{safe}.lock"
 
 
+def canonical_map_lock():
+    """Serialise read-modify-write of coins/ticker_to_id.json.
+
+    alias_map, enhance_map, remap_ids --apply, the providers, verify_logos and
+    the rebuild mapping all rewrite the WHOLE file. Atomic replace stops a
+    truncated file; it does not stop a lost update, where two writers each read
+    the same map, apply different edits, and the second write silently discards
+    the first. One lock around the whole read-modify-write does.
+    """
+    return exclusive_lock(LOCK_DIR / "canonical_map.lock")
+
+
 def _lock_owner_is_alive(pid: int) -> bool:
-    """Best-effort liveness check for the recorded lock holder."""
+    """Best-effort liveness check for the recorded lock holder.
+
+    Returning True for every error made a crashed POSIX process look alive
+    forever, so its lock could never be reclaimed. Distinguish the cases:
+    "no such process" is a definite no, "not permitted" is a definite yes
+    (the pid exists, it just is not ours), and anything genuinely unknown stays
+    conservative.
+    """
     if pid <= 0:
         return False
-    try:
-        if os.name == "nt":
+    if os.name == "nt":
+        try:
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True, timeout=15).stdout
             return str(pid) in out
-        os.kill(pid, 0)          # signal 0 only checks existence
+        except (OSError, subprocess.SubprocessError):
+            return True          # cannot tell -> never steal
+    try:
+        os.kill(pid, 0)          # signal 0 only probes existence
         return True
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return True              # cannot tell -> assume alive, never steal
+    except ProcessLookupError:
+        return False             # ESRCH: the holder is genuinely gone
+    except PermissionError:
+        return True              # EPERM: it exists under another user
+    except OSError:
+        return True              # unknown failure -> stay conservative
 
 
 @contextlib.contextmanager
@@ -383,6 +410,16 @@ class LiveStateUnknown(RuntimeError):
     """Live Telegram state could not be determined; callers must not guess."""
 
 
+class BotApiError(RuntimeError):
+    """Telegram answered ok:false -- a definite rejection of THIS request.
+
+    Distinct from a RuntimeError raised after the retries ran out, which means
+    we never got an answer at all. That difference decides whether it is safe
+    to send a replacement request: a rejection definitely did not apply, an
+    unanswered request may have.
+    """
+
+
 class AmbiguousUploadError(RuntimeError):
     """A state-changing call failed at the network level and the live state
     could not be verified: the change may or may not have been applied.
@@ -450,13 +487,13 @@ class Telegram:
                 if "stickerset_invalid" in desc.lower():
                     remaining = deadline - time.monotonic()
                     if not name_lock_retry or attempt >= retries or remaining <= 0:
-                        raise RuntimeError(f"{method} failed: {desc}")
+                        raise BotApiError(f"{method} failed: {desc}")
                     wait = min(30 * attempt, 90, remaining)
                     print(f"  stickerset_invalid; name not released yet, "
                           f"wait {wait:.0f}s ({method})", flush=True)
                     time.sleep(wait)
                     continue
-                raise RuntimeError(f"{method} failed: {desc}")
+                raise BotApiError(f"{method} failed: {desc}")
             except requests.RequestException as exc:
                 if applied_check is not None:
                     time.sleep(2)  # let Telegram settle before probing
@@ -520,8 +557,22 @@ class Telegram:
             return 0
         raise LiveStateUnknown(f"live state of {name} is unknown")
 
-    def _added_check(self, name: str, expected_before: int | None):
-        """applied_check for addStickerToSet: did the set grow by exactly one?"""
+    def _added_check(self, name: str, expected_before: int | None, *,
+                     known_before: set[str] | None = None):
+        """applied_check for addStickerToSet: did OUR sticker land?
+
+        A count is not identity. "the set grew by one" is equally true when a
+        second writer added something entirely different while our request
+        failed -- and acting on that marks the wrong item done, which is how a
+        ticker ends up pointing at another coin's artwork.
+
+        When the caller captures the set's file_unique_ids beforehand
+        (``known_before``) the check becomes identity-based: exactly one NEW
+        identity appeared, so something really was added and we can attribute
+        it. Two or more new identities means a concurrent writer was involved
+        and attribution is unsafe -> UNKNOWN. Callers that cannot supply the
+        snapshot fall back to the count, which is weaker and documented as such.
+        """
         if expected_before is None:
             return None
 
@@ -529,7 +580,16 @@ class Telegram:
             known, sset = self.probe_sticker_set(name)
             if not known or sset is None:
                 return None  # unknown / set vanished: reconcile, don't guess
-            n = len(sset.get("stickers", []))
+            stickers = sset.get("stickers", [])
+            if known_before is not None:
+                now = {str(s.get("file_unique_id")) for s in stickers}
+                new = now - known_before
+                if len(new) == 1:
+                    return True
+                if not new:
+                    return False
+                return None      # several new stickers: someone else wrote too
+            n = len(stickers)
             if n == expected_before + 1:
                 return True
             if n == expected_before:
@@ -538,15 +598,61 @@ class Telegram:
 
         return check
 
-    def _created_check(self, name: str):
-        """applied_check for createNewStickerSet: does the set now exist?"""
+    def set_fuids(self, name: str) -> set[str] | None:
+        """Current file_unique_ids of a set, or None if the live state is unknown."""
+        state, sset = self.probe_set_state(name)
+        if state is not SetState.EXISTS:
+            return None
+        return {str(s.get("file_unique_id")) for s in sset.get("stickers", [])}
+
+    def _created_check(self, name: str, *, expect_first: Path | None = None):
+        """applied_check for createNewStickerSet: did WE create this set?
+
+        Mere existence is not proof. A set with the same name may already
+        belong to someone else, or be left over from an earlier run, and
+        adopting it after a transport failure silently attaches our state to a
+        pack we did not build. When ``expect_first`` names the image we were
+        creating the set with, the check also requires the live set to hold
+        exactly one sticker whose content matches it.
+        """
         def check():
             known, sset = self.probe_sticker_set(name)
             if not known:
                 return None
-            return sset is not None
+            if sset is None:
+                return False
+            if expect_first is None:
+                return True
+            stickers = sset.get("stickers", [])
+            if len(stickers) != 1:
+                return None       # not the shape our create would have left
+            return self._sticker_matches(stickers[0], expect_first)
 
         return check
+
+    def _sticker_matches(self, sticker: dict, source: Path) -> bool | None:
+        """Does a live sticker hold the image in ``source``?
+
+        Telegram re-encodes on upload, so bytes never match; compare the
+        decoded pixels through the project's own content key. Returns None when
+        the comparison itself could not be made, so the caller keeps treating
+        the outcome as unknown rather than as a negative.
+        """
+        try:
+            from emojikit import media
+        except Exception:         # noqa: BLE001 - media stack unavailable
+            return None
+        tmp = None
+        try:
+            fmt = media.telegram_sticker_format(sticker)
+            tmp = Path(tempfile.gettempdir()) / f"_em_{sticker['file_unique_id']}"
+            self.download_file(sticker["file_id"], tmp)
+            return media.content_key(tmp, fmt) == media.content_key(source, fmt)
+        except Exception:         # noqa: BLE001 - a failed probe is not a "no"
+            return None
+        finally:
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
     def get_me(self) -> dict:
         return self._call("getMe")
@@ -588,19 +694,26 @@ class Telegram:
             "sticker_type": "custom_emoji",
             "stickers": json.dumps([_sticker_json(emoji, keywords)]),
         }, files={"file0": (png.name, png.read_bytes(), "image/png")},
-            applied_check=self._created_check(name))
+            applied_check=self._created_check(name, expect_first=png))
 
     def add_sticker(self, user_id: int, name: str, png: Path,
                     emoji: str, keywords: str, *,
                     expected_before: int | None = None) -> None:
         """Add a static sticker. Pass ``expected_before`` (the live sticker
         count the caller expects BEFORE this add) to make network retries
-        duplicate-proof; without it the historical blind retry is kept."""
+        duplicate-proof; without it the historical blind retry is kept.
+
+        The set's identities are snapshotted first so the applied-check can ask
+        "did exactly one NEW sticker appear?" rather than "is the count one
+        higher?", which a concurrent writer can satisfy while our own request
+        failed."""
+        before = self.set_fuids(name) if expected_before is not None else None
         self._call("addStickerToSet", data={
             "user_id": user_id, "name": name,
             "sticker": json.dumps(_sticker_json(emoji, keywords)),
         }, files={"file0": (png.name, png.read_bytes(), "image/png")},
-            applied_check=self._added_check(name, expected_before))
+            applied_check=self._added_check(name, expected_before,
+                                            known_before=before))
 
     # ----- multi-format helpers (static / animated / video) -------------- #
     def get_sticker_set(self, name: str) -> dict:
@@ -650,7 +763,7 @@ class Telegram:
             "sticker_type": "custom_emoji",
             "stickers": json.dumps([_input_sticker(fmt, emoji_list, keywords)]),
         }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
-            applied_check=self._created_check(name))
+            applied_check=self._created_check(name, expect_first=path))
 
     def add_emoji(self, user_id: int, name: str, path: Path, fmt: str,
                   emoji_list: list[str], keywords: list[str], *,
@@ -659,11 +772,13 @@ class Telegram:
 
         ``expected_before`` (the live sticker count expected BEFORE this add)
         makes network retries duplicate-proof; see ``add_sticker``."""
+        before = self.set_fuids(name) if expected_before is not None else None
         self._call("addStickerToSet", data={
             "user_id": user_id, "name": name,
             "sticker": json.dumps(_input_sticker(fmt, emoji_list, keywords)),
         }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
-            applied_check=self._added_check(name, expected_before))
+            applied_check=self._added_check(name, expected_before,
+                                            known_before=before))
 
 
 _MIME_BY_FORMAT = {
