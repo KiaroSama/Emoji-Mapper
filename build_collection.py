@@ -177,7 +177,7 @@ def load_plan(data_dir: Path, base: str) -> dict:
 
 
 def load_state(data_dir: Path, base: str) -> dict:
-    """Resume state for ``base``, shape-checked.
+    """Resume state for ``base``, fully shape-checked.
 
     A state file belonging to a DIFFERENT pack family records other packs' set
     names and upload order; publishing ``base`` from it would add this catalog
@@ -194,12 +194,80 @@ def load_state(data_dir: Path, base: str) -> dict:
     for field in ("sets", "sent", "skipped"):
         if not isinstance(state.setdefault(field, []), list):
             raise StateError(f"{path}: {field!r} must be a list.")
-    if not all(isinstance(s, dict) and isinstance(s.get("name"), str)
-               and s.get("fmt") in FMT_TAG and isinstance(s.get("index"), int)
-               for s in state["sets"]):
-        raise StateError(f"{path}: every entry of 'sets' must record a name, a "
-                         f"known format and an index.")
+    _validate_state(state, path)
     return state
+
+
+def _validate_state(state: dict, path: Path) -> None:
+    """Reject resume state that cannot be trusted, BEFORE anything mutates.
+
+    Modelled on :func:`build_pack.validate_state_shape`. Valid JSON is not valid
+    state: a file can parse cleanly and still claim a negative live count, two
+    sets sharing an index, one emoji recorded in two sets, or more recorded keys
+    than the set holds stickers -- and every later decision is built on those
+    numbers. Which set is active, how much room is left and, above all, which
+    LIVE POSITION holds which key all come from here, so a set that records more
+    keys than it has stickers hands the next emoji another one's
+    custom_emoji_id. Checking only a name/format/index left every one of those
+    through.
+    """
+    def bad(msg: str) -> StateError:
+        return StateError(
+            f"{path}: {msg} Refusing to publish from state that cannot be "
+            f"trusted; inspect or delete the file deliberately, then re-run.")
+
+    for field in ("sent", "skipped"):
+        if not all(isinstance(x, str) and x for x in state[field]):
+            raise bad(f"{field!r} must hold non-empty strings.")
+
+    seen_names: set[str] = set()
+    seen_keys: set[str] = set()
+    last_index: dict[str, int] = {}          # highest index seen, per format
+    for i, s in enumerate(state["sets"]):
+        if not isinstance(s, dict):
+            raise bad(f"sets[{i}] is not an object.")
+        name, fmt, index = s.get("name"), s.get("fmt"), s.get("index")
+        if not isinstance(name, str) or not name:
+            raise bad(f"sets[{i}] has no name.")
+        if fmt not in FMT_TAG:
+            raise bad(f"sets[{i}] ({name}) has unknown format {fmt!r}.")
+        # bool is an int in Python, and JSON `true` must not pass as index 1.
+        if isinstance(index, bool) or not isinstance(index, int) or index < 1:
+            raise bad(f"sets[{i}] ({name}) has a bad index {index!r}.")
+        if name in seen_names:
+            raise bad(f"sets[{i}] repeats the set name {name}.")
+        if index <= last_index.get(fmt, 0):
+            raise bad(f"sets[{i}] ({name}) index {index} does not follow "
+                      f"{last_index.get(fmt, 0)} for format {fmt}.")
+        seen_names.add(name)
+        last_index[fmt] = index
+
+        title = s.setdefault("title", name)
+        if not isinstance(title, str) or not title:
+            raise bad(f"sets[{i}] ({name}) has a bad title {title!r}.")
+        logo = s.setdefault("logo", False)
+        if not isinstance(logo, bool):
+            raise bad(f"sets[{i}] ({name}) has a non-boolean 'logo' {logo!r}.")
+        keys = s.setdefault("keys", [])
+        if not isinstance(keys, list) or not all(
+                isinstance(k, str) and k for k in keys):
+            raise bad(f"sets[{i}] ({name}) 'keys' must be a list of item keys.")
+        if len(set(keys)) != len(keys):
+            raise bad(f"sets[{i}] ({name}) records the same emoji twice.")
+        clash = sorted(seen_keys.intersection(keys))
+        if clash:
+            raise bad(f"sets[{i}] ({name}) records {clash[0]}, which an earlier "
+                      f"set already claims.")
+        seen_keys.update(keys)
+        live = s.setdefault("live", 0)
+        if isinstance(live, bool) or not isinstance(live, int) \
+                or not 0 <= live <= PER_SET:
+            raise bad(f"sets[{i}] ({name}) live count {live!r} is outside "
+                      f"0..{PER_SET}.")
+        recorded = (1 if logo else 0) + len(keys)
+        if live < recorded:
+            raise bad(f"sets[{i}] ({name}) claims {live} live sticker(s) but "
+                      f"records {recorded}.")
 
 
 def freeze_plan(cat: Catalog, data_dir: Path, base: str, formats: list[str]) -> dict:
@@ -259,35 +327,33 @@ def _manifest_mismatch(tg, cat: Catalog, live: list[dict], keys: list[str],
                        tmp_dir: Path) -> str | None:
     """Why ``live`` no longer matches the recorded ``keys`` -- None if it does.
 
-    EVERY recorded position must resolve to the key recorded there. Checking
-    only ids we happen to know already let an *unknown* identity pass: a
-    foreign sticker swapped onto one of our positions is by definition one we
-    have never seen, so ``seen_file_unique_id`` returns None and the position
-    was accepted on order alone -- after which its custom_emoji_id was written
-    onto our key.
+    EVERY recorded position must resolve BY IDENTITY to the key recorded there.
+    There is no positional window, not even for a fresh upload. There used to
+    be one: an unknown file_unique_id was accepted whenever that key had no
+    stored custom_emoji_id yet, on the theory that Telegram re-encodes on upload
+    so a fresh copy's id cannot be predicted. It cannot be predicted -- but it
+    CAN be read back at the moment of the upload, which is what
+    :func:`_confirm_new_upload` now does. Trusting order in the meantime is
+    exactly how ``sol`` ended up on a Solama memecoin llama: reorder or replace
+    a same-length set inside that window and a foreign sticker inherits our key,
+    our publication record and our custom_emoji_id.
 
-    A position is allowed to hold an unknown id in exactly one window: before
-    it has ever been read back. Telegram re-encodes on upload, so a fresh
-    copy's file_unique_id (and its content hash) cannot be predicted; the add
-    itself is what was verified, by ``expected_before``. That window closes the
-    first time :func:`_record_cids` stores the position's custom_emoji_id,
-    because it records the file_unique_id in the same step. An unknown id on a
-    position whose cid is already stored therefore means the sticker was
-    replaced: resolve it by content, or fail closed.
+    So a position resolves by the recorded custom_emoji_id of that very
+    sticker, by a recorded file_unique_id, or by downloading and
+    content-hashing it (the owner may have re-uploaded the very same picture: a
+    new id, but not a different emoji) -- or it is drift.
     """
     if len(live) < offset + len(keys):
         return (f"{name} holds {len(live)} sticker(s) but this publisher "
                 f"recorded {offset + len(keys)}: emoji were removed from the set.")
     for i, key in enumerate(keys):
         st = live[i + offset]
-        fuid = str(st.get("file_unique_id") or "")
+        fuid, cid = _identity(st)
+        if cid and cat.custom_emoji_id_for(base, key) == cid:
+            continue                     # this exact live sticker is ours
         known = cat.seen_file_unique_id(fuid) if fuid else None
         if known == key:
             continue
-        if known is None and not cat.custom_emoji_id_for(base, key):
-            continue                     # never read back yet: our fresh upload
-        # Last chance before failing closed: the owner may have re-uploaded the
-        # very same picture, which is a new id but not a different emoji.
         if _resolve_sticker_key(tg, cat, st, tmp_dir) == key:
             continue
         return (f"{name} position {i + offset} now holds "
@@ -339,6 +405,68 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
     if fuid:
         cat.record_file_unique_id(fuid, key)
     return key
+
+
+def _identity(st: dict) -> tuple[str, str]:
+    """A live sticker's Telegram identity: (file_unique_id, custom_emoji_id).
+
+    Both are assigned by Telegram and unique to one sticker, so either one
+    distinguishes it from any other -- unlike its position in the set.
+    """
+    return (str(st.get("file_unique_id") or ""),
+            str(st.get("custom_emoji_id") or ""))
+
+
+def _live_index(tg, name: str) -> dict[tuple[str, str], dict]:
+    """Live stickers of a set, keyed by identity.
+
+    Raises instead of guessing: this snapshot is what tells our upload apart
+    from everything else in the set, and a wrong snapshot means a wrong
+    identity.
+    """
+    state, sset = _probe(tg, name)
+    if state is SetState.UNKNOWN:
+        raise LiveStateUnknown(f"live state of {name} is unknown")
+    if state is SetState.MISSING:
+        return {}
+    return {_identity(st): st for st in sset.get("stickers", [])}
+
+
+def _confirm_new_upload(tg, cat: Catalog, set_name: str, key: str,
+                        before: dict[tuple[str, str], dict]) -> dict:
+    """Identify the sticker an upload just created -- by identity, not position.
+
+    Telegram re-encodes on upload, so the new copy's identity cannot be
+    predicted; it can only be READ BACK, which is what this does. ``before`` is
+    the set's identities from immediately before the mutation, so exactly one
+    new identity must have appeared. None means the add did not land; several
+    mean somebody else wrote to the set at the same time. In both cases which
+    sticker is ours would be a guess, and guessing is what put a foreign llama
+    on ``sol``.
+
+    Recording that identity is what closes the fresh-upload window for good:
+    from here on the position is checked by identity on every later run (see
+    :func:`_manifest_mismatch`), so a reorder or a replacement before the first
+    read-back is drift instead of a silent re-pointing.
+    """
+    new = [st for ident, st in _live_index(tg, set_name).items()
+           if ident not in before and any(ident)]
+    if len(new) != 1:
+        raise SetDrift(
+            f"cannot identify the sticker just uploaded for {key} in "
+            f"{set_name}: {len(new)} new identities appeared, expected exactly "
+            f"one. Refusing to attribute it by position.")
+    st = new[0]
+    fuid = str(st.get("file_unique_id") or "")
+    owner = cat.seen_file_unique_id(fuid) if fuid else None
+    if owner is not None and owner != key:
+        raise SetDrift(
+            f"the sticker just uploaded for {key} in {set_name} is already "
+            f"known as {owner}: refusing to attribute one live sticker to two "
+            f"emoji.")
+    if fuid:
+        cat.record_file_unique_id(fuid, key)
+    return st
 
 
 def reconcile_set(tg, cat: Catalog, s: dict, data_dir: Path, base: str) -> int:
@@ -565,9 +693,14 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             skip(key, "blank media (no blank emoji)")
             continue
         emojis = item.emojis or [default_emoji]
+        # The set's live identities BEFORE this upload: what the copy it creates
+        # is identified against afterwards (see _confirm_new_upload). A create
+        # starts from nothing, so an empty snapshot is the correct baseline.
+        before: dict[tuple[str, str], dict] = {}
         try:
             placed = False
             if in_set != 0:
+                before = _live_index(tg, set_name)
                 try:
                     tg.add_emoji(user_id, set_name, path, fmt, emojis,
                                  item.keywords, expected_before=in_set)
@@ -577,6 +710,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                         raise
                     in_set = 0
             if not placed:
+                before = {}             # the create below starts from nothing
                 set_index += 1
                 set_name = f"{base}{FMT_TAG[fmt]}{set_index}_by_{bot}"
                 set_title = f"{title} {FMT_WORD[fmt]} {set_index}"
@@ -625,12 +759,14 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                                     "adding %s yet (will retry)", fmt, set_name, key)
                         failed += 1
                         continue
+                    before = _live_index(tg, set_name)
                     tg.add_emoji(user_id, set_name, path, fmt, emojis,
                                  item.keywords, expected_before=in_set)
                 elif logo_png:
                     # Set now exists with the logo at position 0; protect it from
                     # index rollback, then place this item as the second sticker.
                     in_set = 1
+                    before = _live_index(tg, set_name)
                     tg.add_emoji(user_id, set_name, path, fmt, emojis,
                                  item.keywords, expected_before=in_set)
         except AmbiguousUploadError as exc:
@@ -657,12 +793,19 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             log.warning("[%s] upload failed for %s (will retry): %s", fmt, key, redact(str(exc)))
             failed += 1
             continue
+        # Identity BEFORE any record: keys[], the publication row and the
+        # custom_emoji_id all map this key onto a live position, so the position
+        # has to be proven ours first, not assumed from order.
+        st = _confirm_new_upload(tg, cat, set_name, key, before)
         in_set += 1
         fmt_sets[-1]["live"] = in_set
         # Record actual upload order (for cid mapping) + mark uploaded (committed
-        # immediately -> crash-safe duplicate guard).
+        # immediately -> crash-safe duplicate guard). The cid comes from the
+        # sticker just identified, so it is right even if the set drifts before
+        # _record_cids reads it back.
         fmt_sets[-1].setdefault("keys", []).append(key)
-        cat.mark_uploaded(key, None, base=base, set_name=set_name)
+        cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None,
+                          base=base, set_name=set_name)
         n += 1
         if n % 20 == 0:
             save_json(_state_path(data_dir, base), state)
@@ -819,6 +962,10 @@ def main(argv: list[str] | None = None) -> int:
 def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
              capacity: int, logo_planned: bool) -> int:
     """Publish (or dry-run) one pack family, with its lock already held."""
+    # Validated FIRST, before the catalog adopts legacy publication records, the
+    # frozen plan is rewritten or a single Telegram call is made: every one of
+    # those acts on the numbers in this file.
+    state = load_state(data_dir, base)
     with Catalog(db) as cat:
         # Databases written before publication records existed only knew "this
         # item was uploaded", not to which base. The first base to publish
@@ -860,7 +1007,6 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
             else:
                 log.warning("brand logo requested but not found: %s", args.brand_logo)
 
-        state = load_state(data_dir, base)
         ok = failed = 0
         for fmt in formats:
             done, bad = publish_format(
