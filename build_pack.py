@@ -409,12 +409,34 @@ def links_chat_id(owner_id: int) -> str | int:
     return raw if raw.startswith("@") else int(raw)
 
 
+def _under_a_test_runner() -> bool:
+    """True when a test runner, not a tool, owns this process.
+
+    The suite's own guard (tests/__init__.py) sets EMOJI_MAPPER_NO_DOTENV, but
+    it protects only what is imported AFTER it, and it runs at all only when
+    `tests` is imported as a package -- `unittest discover -s tests` without
+    `-t .` loads the modules as top level and skips it. Either way the modules
+    under test call load_env() at import time and put the real credentials back;
+    the scrub that follows removes credential-SHAPED names, so anything else in
+    .env survives in os.environ for the whole run.
+
+    Deciding here makes the protection independent of how the suite was invoked
+    and of which module imported first. The signal is exact -- it reads the spec
+    of the process entry point, so an ordinary CLI run cannot trip it -- and a
+    false positive would only mean .env is not auto-loaded, with explicit
+    environment variables still working. It fails safe in both directions.
+    """
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    entry = getattr(spec, "name", "") or ""
+    return entry.split(".")[0] in {"unittest", "pytest"} or "pytest" in sys.modules
+
+
 def load_env() -> None:
-    # The test package sets this. Several modules call load_env() at IMPORT
-    # time, which would put the real credentials straight back into os.environ
-    # after the suite scrubbed them -- reopening the hole that let a test reach
-    # live Telegram.
-    if os.environ.get("EMOJI_MAPPER_NO_DOTENV") == "1":
+    # Several modules call load_env() at IMPORT time, which would put the real
+    # credentials straight back into os.environ after the suite scrubbed them --
+    # reopening the hole that once let a test reach live Telegram and replace a
+    # sticker in a production pack.
+    if os.environ.get("EMOJI_MAPPER_NO_DOTENV") == "1" or _under_a_test_runner():
         return
     env = ROOT / ".env"
     if env.is_file():
