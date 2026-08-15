@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — sixth audit pass (3 critical, 4 high, plus two found while fixing them)
+
+The fifth pass established identity correctly. This one is about where that
+answer leaked back out: code that **read the value it protects before taking the
+lock that protects it**, and code that turned *"I could not determine X"* into
+*"X is false"* — the same defect re-entering through the error path.
+
+- **An unproven answer is no longer a negative.** `build_collection` resolved a
+  live sticker through one function that returned `None` for three different
+  facts: the content is not in our catalog, the download failed, the hash
+  failed. Callers answer absence by publishing another copy — so one flaky fetch
+  duplicated an emoji, and on a host without ffmpeg *every* video and animated
+  sticker duplicated on *every* run. Unresolvable is now its own outcome and
+  every caller refuses on it.
+- **A provider's identity oracle can no longer be edited out from under it.** It
+  was `EMOJI/<ticker>.png` — a shared path both fetchers write with no lock
+  held. An unresolved upload leaves the map unwritten, the next run re-downloads
+  that ticker and overwrites the file, and recovery then compares the live
+  sticker against the *new* art, concludes the upload never landed, and sends a
+  second copy. No concurrency required. The image's identity is now recorded with
+  the mutation.
+- **Providers re-filter under the lock**, so the loser of a race no longer
+  uploads a coin the winner just published.
+- **Whole-map writers hold the pack lock across the read**, not just the map lock
+  across the write; `verify_logos` no longer chooses a sticker from an unlocked
+  read of the map.
+- **`build_pack` measures the set instead of assuming.** A post-add read that had
+  not caught up recorded one too few and every later expectation inherited the
+  drift; a set that answered MISSING read as *zero*, so the run created a second
+  pack, announced its link and exited 0. Restart reconciliation demanded
+  `expected` or `expected + 1`, but the sequence it exists for leaves the set two
+  bigger — it stopped forever with a live sticker off the books.
+- **The lock's own recovery no longer defeats the lock.** Reclaiming a stale lock
+  unlinked and re-created unconditionally, so two runs that judged the same dead
+  record stale could each delete the other's fresh claim and both proceed.
+- **Two refusals that stated no workable repair now state one**, and the tests
+  execute the repair rather than matching words in the message.
+
+`tests/test_lock_order.py` is new: it enforces the documented lock order and
+non-reentrancy across every tool by parsing them, because that invariant spans
+files and no single-file review can see it.
+
 ### Fixed — fifth audit pass (7 findings)
 
 One defect, in seven places: **a count is not an identity.** "Exactly one new
