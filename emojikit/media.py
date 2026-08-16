@@ -76,7 +76,6 @@ _RIFF_MAGIC = b"RIFF"
 _GIF_MAGIC = (b"GIF87a", b"GIF89a")
 
 RASTER_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".apng"}
-VIDEO_SOURCE_EXTS = {".webm", ".mp4", ".mov", ".mkv", ".gif", ".apng", ".m4v", ".avi"}
 
 
 class MediaError(RuntimeError):

@@ -179,7 +179,6 @@ class LockBusy(RuntimeError):
 
 LOCK_DIR = ROOT / ".locks"
 LOCK_STALE_AFTER = 6 * 3600
-LOCK_HEARTBEAT_AFTER = 300.0
 
 
 def pack_family_lock_path(base: str) -> Path:
@@ -371,10 +370,6 @@ def write_json_atomic(path: Path, data) -> None:
 # --source-dir / --keywords so the same engine builds any kind of emoji pack.
 EMOJI_DIR = ROOT / "logos" / "emoji"
 KEYWORDS_CSV = ROOT / "keywords.csv"
-# Legacy default state file (kept for backwards compatibility); the actual state
-# file used by a run defaults to state_<base>.json so different packs never
-# clobber each other.
-STATE_FILE = ROOT / "pack_state.json"
 
 # Custom emoji must be 100x100 PNG; build_pack uploads the prepared PNGs.
 _MIME = {".png": "image/png", ".webp": "image/webp"}
@@ -953,12 +948,6 @@ class Telegram:
         return self._live_after_add(name, check)
 
 
-_MIME_BY_FORMAT = {
-    "static": "image/png",
-    "animated": "application/gzip",
-    "video": "video/webm",
-}
-
 _MIME_BY_EXT = {
     ".png": "image/png",
     ".webp": "image/webp",
@@ -966,10 +955,6 @@ _MIME_BY_EXT = {
     ".tgs": "application/gzip",
     ".webm": "video/webm",
 }
-
-
-def _mime_for(fmt: str) -> str:
-    return _MIME_BY_FORMAT.get(fmt, "application/octet-stream")
 
 
 def _mime_for_path(path: Path) -> str:
