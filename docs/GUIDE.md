@@ -404,12 +404,16 @@ Behaviour:
 - **Blank guard**: if an SVG renders blank (e.g. an unsupported gradient), it is
   **not** saved — the loop falls back to the raster `png/` source; a blank raster
   is skipped too. No blank emoji is ever produced.
-- **`logos/.incoming/`** is staging, not a source folder. The coin fetchers
-  download there and promote a logo into `logos/emoji/` only once its upload is
-  confirmed and the map records its id, so `logos/emoji/<ticker>.png` always
-  describes a sticker that really exists — the other tools use that file to
-  decide which live sticker belongs to which ticker. Leftovers there after an
-  interrupted run are harmless; the next run reuses or replaces them.
+- **`logos/.incoming/<run>/`** is staging, not a source folder. Each fetcher run
+  gets its OWN subdirectory: the download happens before any lock is taken, so a
+  path shared by ticker name could be replaced by a second fetcher between this
+  run's hash, its upload, its verification and its promotion. A logo moves into
+  `logos/emoji/` only once its upload is confirmed and the map records its id,
+  so `logos/emoji/<ticker>.png` always describes a sticker that really exists —
+  the other tools use that file to decide which live sticker belongs to which
+  ticker. A run deletes only its own staging directory, never another's, which
+  may still be mid-upload; a directory left by a killed run is harmless and can
+  be removed by hand once no fetcher is running.
 
 Examples:
 
