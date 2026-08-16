@@ -491,7 +491,7 @@ class PublisherLock(unittest.TestCase):
     def test_lock_is_released_even_on_error(self):
         with self.assertRaises(ZeroDivisionError):
             with bp.exclusive_lock(self.lock):
-                1 / 0
+                1 / 0  # noqa: B018 - the point is to leave the block by raising
         self.assertFalse(self.lock.exists())
 
     def test_stale_lock_is_reclaimed(self):

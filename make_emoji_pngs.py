@@ -275,13 +275,16 @@ def _run_legacy(limit: int) -> int:
         t = p.stem.lower()
         out = OUT_DIR / f"{t}.png"
         if _output_ok(out, p):
-            done.add(t); continue
+            done.add(t)
+            continue
         if t in quarantined:
             continue
         marker.write_text(t, encoding="utf-8")  # heartbeat + culprit if we hang here
         try:
             if _convert_svg(p, out):
-                done.add(t); made += 1; svg_ok += 1
+                done.add(t)
+                made += 1
+                svg_ok += 1
             else:
                 failed_stems.add(t)
         except Exception:  # noqa: BLE001
@@ -301,10 +304,14 @@ def _run_legacy(limit: int) -> int:
             continue
         out = OUT_DIR / f"{t}.png"
         if _output_ok(out, p):
-            done.add(t); failed_stems.discard(t); continue
+            done.add(t)
+            failed_stems.discard(t)
+            continue
         try:
             if _convert_raster(p, out):
-                done.add(t); made += 1; png_ok += 1
+                done.add(t)
+                made += 1
+                png_ok += 1
                 failed_stems.discard(t)   # the fallback source carried this stem
             else:
                 failed_stems.add(t)  # blank/empty source -> skip, no blank emoji

@@ -173,7 +173,7 @@ def main() -> int:
         lines.append(f"  failed cid={c} set={live[c]['set']} pos={live[c]['pos']} "
                      f"({audit.get(c, {}).get('error', 'not analysed')})")
     lines.append(f"BLANK stickers: {len(blanks)}")
-    for c, v in blanks:
+    for c, _v in blanks:
         lines.append(f"  blank cid={c} set={live[c]['set']} pos={live[c]['pos']}")
     dup_count = sum(len(cs) - 1 for cs in dup_groups.values())
     lines.append(f"DUPLICATE image groups: {len(dup_groups)} "

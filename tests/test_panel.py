@@ -57,7 +57,8 @@ class BrandLogoPreview(unittest.TestCase):
                 return p.build_view(cat, bot_username)
 
     def test_logo_shown_first_for_emoji_mapper_bot(self):
-        logo = self.data / "logo.png"; _make_png(logo)
+        logo = self.data / "logo.png"
+        _make_png(logo)
         view, by_key = self._view("YourEmojiBot", logo)
         self.assertTrue(view[0]["isLogo"])
         self.assertEqual(view[0]["key"], p.LOGO_KEY)
@@ -67,7 +68,8 @@ class BrandLogoPreview(unittest.TestCase):
         self.assertTrue(all(not v.get("isLogo") for v in view[1:]))
 
     def test_logo_hidden_for_coin_bot(self):
-        logo = self.data / "logo.png"; _make_png(logo)
+        logo = self.data / "logo.png"
+        _make_png(logo)
         view, _ = self._view("YourCoinEmojiBot", logo)
         self.assertEqual(len(view), 3)  # no logo card injected
         self.assertTrue(all(not v.get("isLogo") for v in view))
@@ -78,7 +80,8 @@ class BrandLogoPreview(unittest.TestCase):
         self.assertEqual(len(view), 3)
 
     def test_logo_hidden_when_bot_unknown(self):
-        logo = self.data / "logo.png"; _make_png(logo)
+        logo = self.data / "logo.png"
+        _make_png(logo)
         view, _ = self._view("", logo)
         self.assertEqual(len(view), 3)
 

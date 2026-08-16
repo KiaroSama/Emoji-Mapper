@@ -345,7 +345,7 @@ def _content_matches(tg: Telegram, candidates: list[dict], want: int,
             try:
                 tg.download_file(str(st["file_id"]), dest)
                 got = _dhash(Image.open(dest).convert("RGBA"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise LiveStateUnknown(
                     f"sticker {st.get('custom_emoji_id')} in {label}'s set "
                     f"could not be read ({exc})") from exc

@@ -343,7 +343,7 @@ def _remap(args: argparse.Namespace, token: str) -> int:
     finite = margins[np.isfinite(margins)]
     if finite.size:
         log.info("runner-up margin: min=%.1f median=%.1f", finite.min(), np.median(finite))
-    worst = sorted(zip(tickers, dists), key=lambda x: -x[1])[:10]
+    worst = sorted(zip(tickers, dists, strict=True), key=lambda x: -x[1])[:10]
     log.info("worst matches (review): %s", [(t, round(float(d))) for t, d in worst])
     if ambiguous:
         log.warning("ambiguous (best vs runner-up too close): %s",

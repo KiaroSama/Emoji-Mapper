@@ -45,7 +45,7 @@ from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
-                        LiveStateUnknown, LockBusy, SetState, exclusive_lock)
+                        LiveStateUnknown, SetState, exclusive_lock)
 from emojikit import media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
@@ -528,7 +528,11 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
         # reading the set back -- which _confirm_new_upload does at the moment
         # of the upload. Once recorded, the position resolves by identity.
         with Catalog(self.data / "catalog.db") as cat:
-            for fuid, key in zip(("BRAND-NEW-0", "BRAND-NEW-1"), self.keys):
+            # strict: if the fixture ever stops having exactly two keys, this
+            # records fewer fuids than it names and the assertions below pass
+            # without having exercised the case.
+            for fuid, key in zip(("BRAND-NEW-0", "BRAND-NEW-1"), self.keys,
+                                 strict=True):
                 cat.record_file_unique_id(fuid, key)
         tg = FakeTG(sets={SET: [_sticker("BRAND-NEW-0", "c0"),
                                 _sticker("BRAND-NEW-1", "c1")]})

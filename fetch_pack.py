@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 
 from build_pack import EXIT_USAGE, Telegram, ingest_exit_code, load_env

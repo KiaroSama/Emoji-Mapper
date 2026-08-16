@@ -442,7 +442,7 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
     try:
         tg.download_file(file_id, tmp)
         key = media.content_key(tmp, media.telegram_sticker_format(st))
-    except Exception as exc:  # noqa: BLE001 - could not look; not a verdict
+    except Exception as exc:
         log.warning("reconcile download failed (%s): %s", fuid or file_id,
                     redact(str(exc)))
         raise Unresolvable(
