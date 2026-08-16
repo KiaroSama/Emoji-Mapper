@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — seventh audit pass (1 critical, 1 high)
+
+- **Provider staging is private per run.** Sharing it by ticker name still meant
+  a shared *mutable* path: downloads happen before any lock, so a second fetcher
+  could replace the file between this run's hash, its upload, its
+  applied-check and its promotion — four steps that must describe the same
+  image, or an ambiguous request is decided against the wrong picture. Each run
+  now stages into its own directory, carries that exact path through every step,
+  records it in the in-flight intent so a recovery run reads what was actually
+  sent, and deletes only its own staging.
+- **`verify_logos --fix` reads the set list under the lock it needs.** It built
+  the list from `--state` and only then waited for the pack lock; a rebuild
+  finishing in that window deletes the old packs and writes a new list, so the
+  run searched packs that no longer existed while the map already pointed at the
+  new family. Lock order is unchanged: pack lock, then canonical map lock.
+
 ### Fixed — sixth audit pass (3 critical, 4 high, plus two found while fixing them)
 
 The fifth pass established identity correctly. This one is about where that
