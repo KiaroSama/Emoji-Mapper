@@ -415,6 +415,16 @@ Behaviour:
   may still be mid-upload; a directory left by a killed run is harmless and can
   be removed by hand once no fetcher is running.
 
+  One file survives on purpose: if a run ends with an **unresolved** upload (the
+  add reached Telegram but could not be confirmed), the image it sent is kept so
+  the next run can prove what landed. Deleting it would leave that run falling
+  back to its own fresh download of the same ticker and publishing *that* as the
+  logo for a sticker made from the original image. It is removed once the
+  unresolved upload is settled. If it is ever lost anyway, the next run still
+  identifies the live sticker and updates the map, but says plainly that
+  `logos/emoji/<ticker>.png` was **not** updated — re-fetch the ticker to refresh
+  it.
+
 Examples:
 
 ```powershell
