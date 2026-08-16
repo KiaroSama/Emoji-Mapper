@@ -7,7 +7,6 @@ changes cannot silently reintroduce the bugs we hit manually:
   * cross-file and within-file duplicates must be detected and collapsed to one.
 """
 
-import os
 import sys
 import tempfile
 import unittest
@@ -15,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fetch_emoji_ids import (  # noqa: E402
+from fetch_emoji_ids import (
     collect_ids,
     extract_real_ids,
     within_file_duplicates,

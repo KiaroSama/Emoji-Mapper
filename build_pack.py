@@ -281,10 +281,14 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
             pass
         holder_pid = int(held.get("pid") or 0)
         if age < stale_after or _lock_owner_is_alive(holder_pid):
+            # from None: the FileExistsError above is not a failure, it IS the
+            # expected finding ("someone holds this"). Chaining it prints
+            # "During handling of the above exception..." over a routine
+            # outcome, which reads like a bug in the handler.
             raise LockBusy(
                 f"{path.name} is held by pid {holder_pid or '?'} "
                 f"(started {held.get('started', 'unknown')}, {age:.0f}s ago). "
-                f"Refusing to mutate the same pack family concurrently.")
+                f"Refusing to mutate the same pack family concurrently.") from None
         print(f"  reclaiming lock {path.name}: pid {holder_pid} is gone "
               f"({age:.0f}s old)", flush=True)
         # Reclaiming is the one path where two processes can both decide to act:
@@ -321,7 +325,7 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
             raise LockBusy(
                 f"{path.name} was taken by another run immediately after this "
                 f"one claimed it. Refusing to mutate the same pack family "
-                f"concurrently.")
+                f"concurrently.") from None
 
     def heartbeat() -> None:
         """Refresh the mtime so a healthy long run is never judged stale."""

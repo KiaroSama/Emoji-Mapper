@@ -279,7 +279,11 @@ def send_reply(tg: Telegram, chat_id: int, ids: list[str], *, reply_to: int | No
     rich = build_payloads(ids, labels, rich=True)
     plain: list[tuple[str, dict]] | None = None
     for i, (text, kb) in enumerate(rich):
-        def _data(body: str) -> dict:
+        # i and kb are bound as defaults, not captured: a closure defined in a
+        # loop reads the loop variable at CALL time. Both calls happen inside
+        # this iteration so today it makes no difference -- binding costs one
+        # line and means it still makes none if _data ever outlives the turn.
+        def _data(body: str, *, i: int = i, kb=kb) -> dict:
             body = (header + "\n\n" + body) if (header and i == 0) else body
             d = {"chat_id": chat_id, "text": body, "parse_mode": "HTML",
                  "disable_web_page_preview": True, "reply_markup": json.dumps(kb)}

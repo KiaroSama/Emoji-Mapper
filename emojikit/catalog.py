@@ -352,7 +352,8 @@ class Catalog:
         row = self.db.execute(
             "SELECT emojis, keywords, sources FROM items WHERE content_key=?", (key,)
         ).fetchone()
-        cur_e = json.loads(row["emojis"]); cur_k = json.loads(row["keywords"])
+        cur_e = json.loads(row["emojis"])
+        cur_k = json.loads(row["keywords"])
         cur_s = json.loads(row["sources"])
         merged_e = _merge_unique(cur_e, emojis)
         merged_k = _merge_unique(cur_k, keywords)

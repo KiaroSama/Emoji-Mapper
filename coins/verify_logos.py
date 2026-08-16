@@ -220,7 +220,8 @@ def verified_new_cid(before: list[str], after: list[str], pos: int) -> str | Non
     """
     if len(after) != len(before) or not 0 <= pos < len(after):
         return None
-    if any(a != b for i, (a, b) in enumerate(zip(before, after)) if i != pos):
+    if any(a != b for i, (a, b) in enumerate(zip(before, after, strict=True))
+           if i != pos):
         return None
     new_cid = after[pos]
     # A genuine replacement carries a NEW id: unchanged means nothing happened,
