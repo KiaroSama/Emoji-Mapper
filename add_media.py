@@ -101,6 +101,12 @@ def iter_sources(args) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # This script never loaded .env at all, so every setting configured there --
+    # the ffmpeg timeout it leans on more than any other tool, the log retention
+    # window, the secret values the logger masks -- was invisible to it. Before
+    # setup_logging, so the masking sweep sees a loaded environment.
+    from build_pack import load_env
+    load_env()
     setup_logging("add_media")
     ap = argparse.ArgumentParser(description="Build emoji media from local files into the catalog.")
     ap.add_argument("files", nargs="*", help="Individual source files.")
@@ -132,8 +138,10 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 fmt = choose_format(src, args.as_fmt)
                 tmp = convert(src, fmt, tmp_dir)
-                key = media.content_key(tmp, fmt)
-                phash = media.perceptual_hash(tmp, fmt)
+                # One decode for both keys: separately, a video paid two ffmpeg
+                # launches over the same clip -- the priciest step in ingest,
+                # doubled.
+                key, phash = media.fingerprint(tmp, fmt)
                 dest = _media_path(data_dir, fmt, key)
                 if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)

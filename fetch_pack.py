@@ -83,8 +83,10 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
         tmp = tmp_dir / f"{name}_{i}.dl"
         try:
             tg.download_file(st["file_id"], tmp)
-            key = media.content_key(tmp, fmt)
-            phash = media.perceptual_hash(tmp, fmt)
+            # One decode for both keys: separately, a video paid two ffmpeg
+            # launches over the same clip -- the priciest step in ingest,
+            # doubled, once per sticker of every fetched pack.
+            key, phash = media.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
             dest = _media_path(data_dir, fmt, key, ext)
             if not dest.exists():

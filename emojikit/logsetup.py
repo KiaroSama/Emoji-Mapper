@@ -43,12 +43,30 @@ from build_pack import safe_int_env
 # Project root = parent of this package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
-# Each execution writes its own file, so without pruning the directory grows
-# without bound. Override with EMOJI_LOG_RETENTION_DAYS (0 disables pruning).
-# Parsed defensively: a bare int() here turned one stray character in .env into
-# an ImportError, killing logging (and the script) before startup could report
-# anything. Negative values are clamped so "-1" cannot mean "prune everything".
-LOG_RETENTION_DAYS = safe_int_env("EMOJI_LOG_RETENTION_DAYS", 30, minimum=0)
+LOG_RETENTION_DEFAULT_DAYS = 30
+
+# The import-time snapshot. Kept because it is part of this module's published
+# surface and because it pins the defensive parsing below -- but nothing that
+# ACTS on the retention window may read it, because at import time load_env()
+# has not run yet. Use log_retention_days().
+LOG_RETENTION_DAYS = safe_int_env("EMOJI_LOG_RETENTION_DAYS",
+                                  LOG_RETENTION_DEFAULT_DAYS, minimum=0)
+
+
+def log_retention_days() -> int:
+    """Resolve the retention window per call, not at import.
+
+    ``load_env()`` runs inside main(), which is *after* this module is imported,
+    so a value set only in .env was read strictly too late and every run silently
+    used the built-in default -- while .env.example advertised the setting as
+    supported. Same hazard, and the same fix, as build_pack.api_base().
+
+    Parsed defensively: a bare int() here turned one stray character in .env into
+    an ImportError, killing logging (and the script) before startup could report
+    anything. Negative values are clamped so "-1" cannot mean "prune everything".
+    """
+    return safe_int_env("EMOJI_LOG_RETENTION_DAYS",
+                        LOG_RETENTION_DEFAULT_DAYS, minimum=0)
 
 # Env vars whose *values* are secrets and must be masked wherever they appear.
 SECRET_ENV_KEYS = ("TELEGRAM_BOT_TOKEN", "GENERAL_BOT_TOKEN", "CMC_API_KEY",
@@ -203,7 +221,7 @@ def setup_logging(script_name: str, *, console_level: int = logging.INFO,
     pruned = prune_old_logs()
     if pruned:
         logger.debug("pruned %d log file(s) older than %d days",
-                     pruned, LOG_RETENTION_DAYS)
+                     pruned, log_retention_days())
     return logger
 
 
@@ -255,12 +273,18 @@ def record_exit_code(code: int) -> int:
     return code
 
 
-def prune_old_logs(keep_days: int = LOG_RETENTION_DAYS) -> int:
+def prune_old_logs(keep_days: int | None = None) -> int:
     """Delete run logs older than ``keep_days``; returns how many were removed.
 
     Every execution writes a fresh file, so an unattended box accumulated them
     forever. Failures here are ignored: log housekeeping must never break a run.
+
+    ``keep_days`` defaults to None rather than to the module constant it used to
+    bind: a default argument is evaluated at import, which is before load_env()
+    has read .env, so the configured window never reached this function.
     """
+    if keep_days is None:
+        keep_days = log_retention_days()
     if keep_days <= 0 or not LOG_DIR.is_dir():
         return 0
     cutoff = time.time() - keep_days * 86400
