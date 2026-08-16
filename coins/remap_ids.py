@@ -33,7 +33,8 @@ continues without re-downloading while an edited pack is still re-read.
 
 from __future__ import annotations
 
-import os as _os, sys as _sys
+import os as _os
+import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import argparse
@@ -48,9 +49,18 @@ import time
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
 import requests
 from PIL import Image
+
+# numpy is used ONLY here, by nearest()'s blocked distance matrix -- nothing
+# else in the first-party tree imports it. It is therefore an extra for the coin
+# tools rather than a requirement of the emoji-pack builder, and someone who
+# never runs this reconciliation should not be made to install the wheel.
+try:
+    import numpy as np
+except ImportError as exc:
+    raise SystemExit("coins/remap_ids.py needs numpy: "
+                     "pip install -r requirements-coins.txt") from exc
 
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LockBusy,
                         Telegram, api_base, canonical_map_lock, exclusive_lock,
@@ -127,7 +137,10 @@ def download_live(tg: Telegram, token: str, sets: list[dict], cache: dict,
         digest = manifest_digest(sticks)
         if cache["sets"].get(s["name"]) == digest:
             continue
-        for pos, (cid, st) in enumerate(zip(cids, sticks)):
+        # strict: this loop's whole job is to bind an id to the sticker at that
+        # position, so a length disagreement must raise rather than silently
+        # drop the tail into a shorter, plausible-looking cache.
+        for pos, (cid, st) in enumerate(zip(cids, sticks, strict=True)):
             if cid in cache["sigs"]:
                 continue
             try:
@@ -304,7 +317,10 @@ def _remap(args: argparse.Namespace, token: str) -> int:
     new_map: dict[str, str] = {}
     far: list[tuple[str, float]] = []
     ambiguous: list[tuple[str, float, float]] = []
-    for t, j, d, m in zip(tickers, idx, dists, margins):
+    # strict: four parallel arrays out of the matching step. If one is short the
+    # tickers past that point never reach new_map, and --apply then replaces the
+    # canonical map with fewer coins than it examined while reporting success.
+    for t, j, d, m in zip(tickers, idx, dists, margins, strict=True):
         if max_d is None:
             new_map[t] = cids[j]            # dry run without a cutoff: report only
         elif d > max_d:

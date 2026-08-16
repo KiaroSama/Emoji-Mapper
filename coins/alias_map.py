@@ -9,7 +9,8 @@ unmapped rather than guessed. Then it re-fills the inventory.
 
 from __future__ import annotations
 
-import os as _os, sys as _sys
+import os as _os
+import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import csv
@@ -18,6 +19,7 @@ import re
 from pathlib import Path
 
 from build_pack import EXIT_FAILED, LockBusy, canonical_map_lock, write_json_atomic
+from coins._inventory import parse_missing, refill_inventory
 
 ROOT = Path(__file__).resolve().parent
 INV = ROOT / "currency-emoji-inventory.md"
@@ -28,6 +30,8 @@ DROP = {"network", "token", "protocol", "finance", "labs", "the", "bridged",
         "trc20", "usd"}
 
 
+# Deliberately NOT _inventory.norm: that one keeps every alphanumeric run, while
+# matching a coin NAME to a logo needs the generic words above dropped too.
 def norm(name: str) -> str:
     name = re.sub(r"\(.*?\)", " ", name.lower())   # drop "(BSC)" etc.
     words = re.findall(r"[a-z0-9]+", name)
@@ -36,8 +40,6 @@ def norm(name: str) -> str:
 
 
 def main() -> int:
-    text = INV.read_text(encoding="utf-8")
-    blocks = re.findall(r"##\s*(\S+)\s*[\u2014-]+\s*(.+?)\n\s*ticker:\s*(\S+)", text)
     map_path = ROOT / "ticker_to_id.json"
     try:
         # ONE lock across the COMPLETE read-modify-write. Atomic replacement
@@ -65,10 +67,7 @@ def main() -> int:
                             name_to_logos.setdefault(key, set()).add(t)
 
             added = ambiguous = 0
-            for _hdr, name, tk in blocks:
-                tk = tk.lower()
-                if tk in have:
-                    continue
+            for name, tk in parse_missing(have, INV):
                 key = norm(name)
                 logos = name_to_logos.get(key) or set()
                 # Only auto-apply when the match is unambiguous. Several logos
@@ -79,10 +78,10 @@ def main() -> int:
                     logo = sorted(logos)[0]
                     ticker_to_id[tk] = ticker_to_id[logo]
                     added += 1
-                    print(f"  alias {tk} -> {logo} ({name.strip()})", flush=True)
+                    print(f"  alias {tk} -> {logo} ({name})", flush=True)
                 elif ids:
                     ambiguous += 1
-                    print(f"  AMBIGUOUS {tk} ({name.strip()}): '{key}' matches "
+                    print(f"  AMBIGUOUS {tk} ({name}): '{key}' matches "
                           f"{', '.join(sorted(logos))} -> left unmapped, "
                           f"resolve by hand", flush=True)
 
@@ -96,26 +95,7 @@ def main() -> int:
     print(f"added {added} name-alias mappings "
           f"({ambiguous} left unmapped as ambiguous)", flush=True)
 
-    # Re-fill inventory.
-    lines = text.split("\n")
-    t_re = re.compile(r"^\s*ticker:\s*(?P<v>.+?)\s*$")
-    p_re = re.compile(r"^(?P<prefix>\s*)premium-id:\s*.*$")
-    cur = None
-    filled = total = 0
-    for i, ln in enumerate(lines):
-        m = t_re.match(ln)
-        if m:
-            cur = m.group("v").strip().lower()
-            total += 1
-            continue
-        pm = p_re.match(ln)
-        if pm and cur is not None:
-            eid = ticker_to_id.get(cur, "")
-            lines[i] = (f"{pm.group('prefix')}premium-id: {eid}").rstrip()
-            if eid:
-                filled += 1
-            cur = None
-    OUT_INV.write_text("\n".join(lines), encoding="utf-8")
+    filled, total = refill_inventory(ticker_to_id, INV, OUT_INV)
     print(f"inventory filled: {filled}/{total}", flush=True)
     return 0
 
