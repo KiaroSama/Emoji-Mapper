@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/check.ps1`** — one command that byte-compiles every source file,
+  runs `ruff check .`, then runs the full unit suite. Cheap gates first, each
+  step bounded (per-step wall ceiling, exit 124 on timeout) and propagating a
+  real exit code. `run.ps1` menu **D1** and `.github/workflows/ci.yml` both call
+  it, so a local run and CI can no longer drift into different invocations.
+- **Lint wired up** — `ruff check .` (no arguments; `ruff.toml` owns the rule
+  set) runs in `scripts/check.ps1` and as its own CI step ahead of the suite, and
+  CI installs `ruff`. The rule set is narrow on purpose: ruff's defaults plus
+  `E402`, `BLE001`, `B` and `RUF100`, so the ~120 `# noqa: E402` /
+  `# noqa: BLE001` comments already in the source mean something, and `RUF100`
+  keeps them honest.
+- **`CLAUDE.md`** — short agent-facing instruction file: commands, the `-t .`
+  rule and why it is load-bearing, the secrets rule, the conventions a change
+  must match, and the identity/locking code that must not be touched casually.
+
+### Fixed — documentation caught up with the code
+
+Every command block in `README.md` and `docs/GUIDE.md` was re-checked against
+the code and re-run. The stale ones:
+
+- `--per-set` was documented as defaulting to **400**. The default and the hard
+  cap are both **200**; 400 is rejected as a usage error (exit 2).
+- `README` told the reader to run `coins\rebuild_packs.py`, which does not
+  exist. The tool is `coins\rebuild_dedup.py`, whose default subcommand `all`
+  is destructive (it deletes the old packs first) — now stated.
+- `README` referred to launcher "option 7" / "option 8". The menu uses lettered
+  keys (`A1`…`D1`); the bot is `C1` and the panel is `B4`. `run.ps1`'s own
+  header comment still claimed the sections were `B`/`C`/`R`.
+- Both files taught the suite as bare `python -m unittest`. Everything now uses
+  `python -m unittest discover -s tests -t . -p "test_*.py"` (or
+  `scripts\check.ps1`) and explains that dropping `-t .` silently disables the
+  test-suite credential scrub and network block.
+- `coins\remap_ids.py --apply` was documented with `--max-distance` optional; it
+  is required (and must be > 0), because an uncalibrated run would overwrite the
+  map with nearest-but-wrong matches.
+- `--brand-logo`'s default was documented as a machine-specific `F:\...` path;
+  it is the repo's own `assets/emoji-mapper-logo.png`.
+- The curate panel was described as autoplaying video and looping animations.
+  Nothing plays until hover — that was the fix for the page hanging on large
+  catalogs. The observer margin is 200 px, not 250, and `POST /api/order` was
+  missing from the route table.
+- CI was described as Python 3.11 only; the matrix is 3.11 **and** 3.12.
+- `emoji_bot.py` was described as replying with two collapsed quotes; it sends
+  one, plus `copy_text` buttons.
+- `.env.example` listed `GENERAL_BOT_USERNAME` / `GENERAL_BOT_NAME`, which no
+  code reads (the bot's username comes from `getMe`), and omitted
+  `EMOJI_FFMPEG_TIMEOUT`, `TELEGRAM_API_BASE` and `EMOJI_MAPPER_NO_DOTENV`,
+  which it does.
+
 ### Fixed — eighth audit pass (1 critical)
 
 - **An unresolved upload keeps the image that can prove it.** Per-run staging

@@ -10,7 +10,8 @@
     - Creates/reuses .venv and offers to install requirements (Enter = Yes).
     - Reads tokens from .env (never printed).
     - Menu is grouped into sections; each section has its own numbering with a
-      one-letter prefix (B = Build, C = Collection, R = Run bot), e.g. B1, C3.
+      one-letter prefix (A = Build, B = Collection, C = Bot, D = Maintenance),
+      e.g. A1, B3, D1.
     - Writes a per-run UTC log under logs\run_<UTC>.log (values never logged).
 
 .PARAMETER NoRelaunch
@@ -73,9 +74,11 @@ $script:CHeading = '38;5;123'            # cyan action/screen titles (like the s
 $script:CBuild   = '38;5;222'            # Build section header (amber)
 $script:CColl    = '38;5;123'            # Collection section header (cyan)
 $script:CBot     = '38;5;219'            # Bot section header (pink/magenta)
+$script:CMaint   = '38;5;150'            # Maintenance section header (sage)
 $script:CKeyA    = '38;5;154'            # Build keys (chartreuse)
 $script:CKeyB    = '38;5;87'             # Collection keys (aqua)
 $script:CKeyC    = '38;5;209'            # Bot keys (coral)
+$script:CKeyD    = '38;5;120'            # Maintenance keys (mint)
 $script:CText    = '38;5;252'            # menu item text (near-white)
 $script:CDim     = '38;5;244'            # dim / separators
 $script:CPrompt  = '38;5;117'            # prompt label
@@ -273,8 +276,16 @@ function Install-Deps ($py) {
     return $false
 }
 
+# Core manifest only. numpy lives in requirements-coins.txt because exactly one
+# optional tool (coins/remap_ids.py) needs it, so treating it as required here
+# would tell every general-pack user their environment is broken.
 function Test-Deps ($py) {
-    & $py -c "import requests,PIL,numpy,resvg_py" *> $null
+    & $py -c "import requests,PIL,resvg_py" *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-CoinDeps ($py) {
+    & $py -c "import numpy" *> $null
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -436,9 +447,25 @@ function Action-RunBot ($py) {
     Invoke-PyReport $py @('emoji_bot.py') "Bot"
 }
 
+function Action-Check ($py) {
+    Write-Title "Run the project checks (byte-compile + unit tests)"
+    $script = Join-Path $ScriptRoot 'scripts\check.ps1'
+    if (-not (Test-Path -LiteralPath $script)) { Write-Err "scripts\check.ps1 not found."; return }
+    # Called with & so its `exit` ends the script, not the launcher, and its exit
+    # code lands in $LASTEXITCODE. -Python pins the interpreter the launcher
+    # already resolved, so the menu never checks a different environment than the
+    # one its other actions use.
+    Write-Log 'INFO' 'run: scripts\check.ps1'
+    & $script -Python $py
+    $code = [int]$LASTEXITCODE
+    Write-Log 'INFO' "exit $code (scripts\check.ps1)"
+    if ($code -eq 0) { Write-Ok "Project checks passed." }
+    else { Write-Err "Project checks failed (exit $code)." }
+}
+
 # --- Menu -----------------------------------------------------------------
 # Each row: Key, Text, Action. Grouped by section; per-section numbering with a
-# one-letter section prefix so keys stay unique (B/C/R).
+# one-letter section prefix so keys stay unique (A/B/C/D).
 function Menu-Item ($keyColor, $key, $text) {
     Write-Host ("  " + (Paint $keyColor "$key)") + " " + (Paint $script:CText $text))
 }
@@ -459,6 +486,9 @@ function Show-Menu {
     Write-Host (Paint $script:CBot 'Bot')
     Menu-Item $script:CKeyC 'C1' 'Run the Emoji Mapper bot (premium-emoji ID extractor)'
     Write-Host ''
+    Write-Host (Paint $script:CMaint 'Maintenance')
+    Menu-Item $script:CKeyD 'D1' 'Run the project checks (byte-compile + unit tests)'
+    Write-Host ''
 }
 
 function Invoke-Choice ($choice, $py) {
@@ -471,8 +501,9 @@ function Invoke-Choice ($choice, $py) {
         'b3' { Action-PublishCollection $py }
         'b4' { Action-Panel $py }
         'c1' { Action-RunBot $py }
+        'd1' { Action-Check $py }
         { $_ -in @('q','quit','exit','0') } { return $false }
-        default { Write-Warn "Unknown option: $choice  (use e.g. A1, B3, C1, or exit)" }
+        default { Write-Warn "Unknown option: $choice  (use e.g. A1, B3, C1, D1, or exit)" }
     }
     return $true
 }
@@ -499,6 +530,9 @@ if ($Check) {
         Write-Err "Some dependencies are missing."
         Write-Log 'INFO' 'doctor: exit 1'
         exit 1
+    }
+    if (-not (Test-CoinDeps $py)) {
+        Write-Warn "numpy not installed: coins\remap_ids.py is unavailable (pip install -r requirements-coins.txt)."
     }
     Write-Ok "All Python dependencies import correctly."
     Write-Ok "Environment check complete."
