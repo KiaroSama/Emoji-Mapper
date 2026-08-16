@@ -486,10 +486,14 @@ def main() -> int:
     tg = Telegram(token)
     map_path = Path(args.map)
     state_path = Path(args.state)
-    try:
+    def read_sets() -> list[dict]:
+        """The pack family's current set list, and the map is parseable."""
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        sets = sorted(state["sets"], key=lambda s: s["index"])
         json.loads(map_path.read_text(encoding="utf-8"))
+        return sorted(state["sets"], key=lambda s: s["index"])
+
+    try:
+        read_sets()                 # fail on bad input BEFORE waiting for a lock
     except (OSError, ValueError, KeyError, TypeError) as exc:
         log.error("cannot read --state %s / --map %s: %s",
                   args.state, args.map, exc)
@@ -500,6 +504,19 @@ def main() -> int:
         # Replacing a sticker mutates the same pack family the fetchers append
         # to; two runs at once corrupt both the pack and the map.
         with exclusive_lock(PACK_LOCK):
+            # RE-READ the state now the lock is held. The check above ran before
+            # the wait, and a rebuild that finished during it deletes the old
+            # packs and writes a new set list -- so the pre-lock snapshot names
+            # sets that no longer exist while the map already points at the new
+            # family. cid_location() would then search deleted packs and report
+            # the ticker as missing. Lock order is unchanged: PACK_LOCK here,
+            # canonical_map_lock inside fix_one/repoint.
+            try:
+                sets = read_sets()
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                log.error("--state %s became unreadable while waiting for the "
+                          "pack lock: %s. Nothing was changed.", args.state, exc)
+                return EXIT_FAILED
             # An unresolved replacement must be settled before anything else is
             # mutated: the next fix would overwrite the only record of it.
             if not reconcile_intent(tg, map_path, state_path):

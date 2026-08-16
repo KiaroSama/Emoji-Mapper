@@ -1105,6 +1105,49 @@ class VerifyLogosMainContracts(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             return self.mod.main()
 
+    def test_the_set_list_is_read_after_the_pack_lock_not_before(self):
+        """A rebuild finishing during the wait invalidates the pre-lock snapshot.
+
+        --state is read to build the set list, then the run waits for
+        PACK_LOCK. A rebuild that completes in that window deletes the old packs
+        and writes a new set list, and the map already points at the new family
+        -- so acting on the snapshot searches packs that no longer exist and
+        reports the ticker as missing instead of repairing it.
+        """
+        state = self.tmp / "state.json"
+        state.write_text(json.dumps(
+            {"sets": [{"name": "old_pack_1", "index": 1}]}), encoding="utf-8")
+        (self.tmp / "map.json").write_text(json.dumps({"btc": OLD_CID}),
+                                           encoding="utf-8")
+        seen: list[list[str]] = []
+
+        real_lock = self.mod.exclusive_lock
+
+        @contextlib.contextmanager
+        def rebuild_finishes_while_we_wait(path, **kw):
+            # The rebuild lands its new state exactly while this run blocks.
+            state.write_text(json.dumps(
+                {"sets": [{"name": "rebuilt_pack_1", "index": 1}]}),
+                encoding="utf-8")
+            with real_lock(path, **kw) as beat:
+                yield beat
+
+        def record(tg, uid, sets, *a, **kw):
+            seen.append([s["name"] for s in sets])
+            return False
+
+        with mock.patch.object(self.mod, "exclusive_lock",
+                               rebuild_finishes_while_we_wait), \
+                mock.patch.object(self.mod, "fix_one", record), \
+                mock.patch.object(self.mod, "reconcile_intent",
+                                  lambda *a, **k: True):
+            self._main({"TELEGRAM_BOT_TOKEN": "t", "PACK_OWNER_USER_ID": "7"},
+                       "--fix", "--only", "btc")
+
+        self.assertEqual(seen, [["rebuilt_pack_1"]],
+                         "the fix ran against the set list captured BEFORE the "
+                         "lock; those packs no longer exist")
+
     def test_a_requested_fix_that_failed_exits_nonzero(self):
         code = self._main({"TELEGRAM_BOT_TOKEN": "t", "PACK_OWNER_USER_ID": "7"},
                           "--fix", "--only", "sol")

@@ -476,10 +476,15 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
                          "a skipped upload replaced the identity oracle for a "
                          "sticker it did not publish")
 
+        self.assertFalse((fp.incoming_dir() / "aaa.png").exists(),
+                         "an unpublished download must not survive the run that "
+                         "declined to publish it")
+
         # (b) PUBLISHED: the same art, now actually uploaded and mapped, MUST
         #     become the oracle -- otherwise the map names a sticker the other
         #     tools cannot recognize, which is the same breakage from the other
         #     direction.
+        fp.to_emoji_png(fresh, fp.incoming_dir() / "aaa.png")
         bp.write_json_atomic(self.ids, current)
         tg = FakeTelegram(existing=2)
         self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (1, 0))
@@ -487,6 +492,42 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
                             "the published art never became the oracle")
         self.assertFalse((fp.incoming_dir() / "aaa.png").exists(),
                          "staging must not keep a copy after promotion")
+
+    def test_another_process_cannot_swap_the_image_mid_upload(self):
+        """Staging is private per run, so there is no shared name to overwrite.
+
+        The download happens before any lock, so with one staging path per
+        TICKER a second fetcher could replace the file between this run's hash,
+        its upload, its applied-check and its promotion -- four steps that must
+        all describe the same image, or an ambiguous request is decided against
+        the wrong picture and the emoji is duplicated.
+
+        The other process is simulated at the worst moment: inside the upload,
+        after the hash was taken, writing the file it WOULD have shared.
+        """
+        tg = FakeTelegram(existing=2)
+        mine = _png_bytes(_gradient())
+        fp.to_emoji_png(mine, fp.incoming_dir() / "aaa.png")
+        theirs = _png_bytes(_gradient(reverse=True))
+        real_add = tg.add_sticker
+
+        def add_then_someone_else_downloads(*a, **kw):
+            out = real_add(*a, **kw)
+            # A concurrent fetcher, mid-run, resolving the SAME ticker.
+            fp.to_emoji_png(theirs, fp.EMOJI.parent / ".incoming" / "aaa.png")
+            fp.to_emoji_png(theirs, fp.EMOJI / "aaa.png")
+            return out
+
+        tg.add_sticker = add_then_someone_else_downloads
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (1, 0))
+        self.assertEqual(len(tg.adds), 1, "the upload was sent more than once")
+        # The oracle describes what WE uploaded, not what landed in the shared
+        # location afterwards.
+        published = (self.emoji / "aaa.png").read_bytes()
+        self.assertEqual(
+            fp._dhash(Image.open(io.BytesIO(published)).convert("RGBA")),
+            fp._dhash(Image.open(io.BytesIO(mine)).convert("RGBA")),
+            "the promoted oracle is the other process's image")
 
     def test_an_upload_that_never_landed_is_retried_once(self):
         """The mirror case: a recorded intent must not block a real retry."""
