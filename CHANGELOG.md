@@ -20,9 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `E402`, `BLE001`, `B` and `RUF100`, so the ~120 `# noqa: E402` /
   `# noqa: BLE001` comments already in the source mean something, and `RUF100`
   keeps them honest.
-- **`CLAUDE.md`** — short agent-facing instruction file: commands, the `-t .`
-  rule and why it is load-bearing, the secrets rule, the conventions a change
-  must match, and the identity/locking code that must not be touched casually.
+
+### Removed
+
+- Four pieces of internal surface with no callers: a format-keyed MIME table
+  and its only reader (uploads resolve the type from the file's real extension
+  instead), a `pack_state.json` default that nothing had used since state files
+  became per-pack, an unread set of video source extensions, and an unread lock
+  heartbeat interval. No public behaviour changes.
 
 ### Fixed — documentation caught up with the code
 
