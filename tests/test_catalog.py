@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -123,6 +125,112 @@ class TestCatalogIntegrity(unittest.TestCase):
         self.assertEqual(stats["pending"], len(pending_rows),
                          "stats must use the publisher's own predicate")
         self.assertEqual(stats["pending"], 2)
+
+
+class TestCatalogDurabilityAndScale(unittest.TestCase):
+    """The connection-level settings and the limits they have to survive."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cat = Catalog(self.tmp / "catalog.db", phash_threshold=-1)
+
+    def tearDown(self):
+        self.cat.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _media(self, name: str, data: bytes = b"x") -> Path:
+        p = self.tmp / name
+        p.write_bytes(data)
+        return p
+
+    def test_wal_and_relaxed_sync(self):
+        """Every add/mark_uploaded commits, so the journal mode is the cost."""
+        self.assertEqual(
+            self.cat.db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(
+            self.cat.db.execute("PRAGMA synchronous").fetchone()[0], 1)  # NORMAL
+
+    def test_failed_init_does_not_leak_the_connection(self):
+        """The panel builds a Catalog per POST; a locked migration leaked one
+        open connection per failed request, with no owner left to close it."""
+        opened = []
+        real_connect = sqlite3.connect
+
+        def spy(*a, **kw):
+            con = real_connect(*a, **kw)
+            opened.append(con)
+            return con
+
+        with mock.patch.object(sqlite3, "connect", spy), \
+                mock.patch.object(Catalog, "_init_schema",
+                                  side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaises(sqlite3.OperationalError):
+                Catalog(self.tmp / "broken.db")
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
+    def test_set_order_survives_a_key_list_past_the_variable_limit(self):
+        """The exclusion list used one SQL parameter per key, so a catalog
+        larger than SQLite's ~32 766 variable ceiling could not be reordered."""
+        self.cat.add(content_key="s:real", fmt="static",
+                     file_path=self._media("r.png"))
+        keys = ["s:real"] + [f"s:ghost{i}" for i in range(40_000)]
+        self.assertEqual(self.cat.set_order(keys), 1, "only the real row exists")
+        self.assertEqual(self.cat.all_items()[0].content_key, "s:real")
+
+    def test_set_order_pushes_unlisted_items_after(self):
+        for i in range(3):
+            self.cat.add(content_key=f"s:k{i}", fmt="static",
+                         file_path=self._media(f"m{i}.png", bytes([i])))
+        self.assertEqual(self.cat.set_order(["s:k2"]), 1)
+        self.assertEqual([it.content_key for it in self.cat.all_items()],
+                         ["s:k2", "s:k0", "s:k1"],
+                         "unlisted items keep their relative order, after")
+
+    def _publications(self, cat: Catalog) -> list[tuple]:
+        return [tuple(r)[:4] for r in cat.db.execute(
+            "SELECT base, content_key, set_name, custom_emoji_id FROM "
+            "publications ORDER BY base, content_key")]
+
+    def test_record_publications_matches_a_mark_uploaded_loop(self):
+        """It has to be a drop-in for the per-row loop, minus the per-row
+        commit (and its fsyncs) -- a full pack is thousands of rows."""
+        rows = [(f"s:k{i}", f"cid{i}", "one", "one1") for i in range(4)]
+        other = Catalog(self.tmp / "other.db", phash_threshold=-1)
+        try:
+            for cat in (self.cat, other):
+                for i in range(4):
+                    cat.add(content_key=f"s:k{i}", fmt="static",
+                            file_path=self._media(f"m{i}.png", bytes([i])))
+            for key, cid, base, set_name in rows:
+                other.mark_uploaded(key, cid, base=base, set_name=set_name)
+            self.assertEqual(self.cat.record_publications(rows), 4)
+
+            self.assertEqual(self._publications(self.cat), self._publications(other))
+            self.assertEqual([(it.content_key, it.custom_emoji_id, it.uploaded)
+                              for it in self.cat.all_items()],
+                             [(it.content_key, it.custom_emoji_id, it.uploaded)
+                              for it in other.all_items()])
+            self.assertEqual(self.cat.pending(base="one"), [])
+        finally:
+            other.close()
+
+    def test_record_publications_upserts_and_tolerates_an_empty_batch(self):
+        self.cat.add(content_key="s:k", fmt="static", file_path=self._media("m.png"))
+        self.cat.record_publications([("s:k", "cid1", "one", "one1")])
+        # A re-record must not duplicate the row nor drop the known set_name.
+        self.cat.record_publications([("s:k", "cid2", "one", None)])
+        self.assertEqual(self._publications(self.cat),
+                         [("one", "s:k", "one1", "cid2")])
+        self.assertEqual(self.cat.record_publications([]), 0)
+
+    def test_record_publications_without_a_base_only_marks_the_item(self):
+        """Mirrors mark_uploaded(base=None), used by the ingest commands."""
+        self.cat.add(content_key="s:k", fmt="static", file_path=self._media("m.png"))
+        self.cat.record_publications([("s:k", "cid", None, None)])
+        self.assertTrue(self.cat.get("s:k").uploaded)
+        self.assertEqual(self.cat.publication_bases(), [])
 
 
 class TestCatalog(unittest.TestCase):

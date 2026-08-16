@@ -125,7 +125,22 @@ class Catalog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path)
         self.db.row_factory = sqlite3.Row
-        self._init_schema()
+        try:
+            # add() / mark_uploaded() / record_file_unique_id() commit per row,
+            # and the default rollback journal at synchronous=FULL makes each of
+            # those several fsyncs. WAL at NORMAL can lose only the last
+            # transaction if the OS itself dies -- it can never corrupt the
+            # database or tear a committed row.
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+            self._init_schema()
+        except Exception:
+            # Otherwise a failed migration (routinely "database is locked",
+            # since the panel builds a Catalog per request while
+            # build_collection holds the file) leaks this connection: nobody
+            # holds the half-built object, so nobody can close it.
+            self.db.close()
+            raise
 
     # ----- lifecycle ----------------------------------------------------- #
     def _init_schema(self) -> None:
@@ -463,20 +478,20 @@ class Catalog:
         but are pushed after the listed ones (their position is offset). Returns
         the number of items whose position was set.
         """
-        n = 0
-        for i, key in enumerate(ordered_keys):
-            cur = self.db.execute(
-                "UPDATE items SET position=? WHERE content_key=?", (i, key))
-            n += cur.rowcount
-        # Any item not in the list goes after, preserving its relative order.
-        base = len(ordered_keys)
-        self.db.execute(
-            "UPDATE items SET position = position + ? "
-            "WHERE content_key NOT IN (%s)" % (",".join("?" * len(ordered_keys)) or "''"),
-            [base] + list(ordered_keys) if ordered_keys else [base],
-        )
+        # Push EVERY item back first, then overwrite the listed ones. The old
+        # form excluded the listed keys with a ``NOT IN (?,?,...)`` holding one
+        # SQL parameter per key, which raises "too many SQL variables" past
+        # SQLite's ~32 766 limit -- a hard ceiling on catalog size reachable
+        # from a single drag in the panel. Offsetting everything is equivalent
+        # (a listed key's pushed position is immediately replaced by its index)
+        # and takes no parameters at all.
+        self.db.execute("UPDATE items SET position = position + ?",
+                        (len(ordered_keys),))
+        cur = self.db.executemany(
+            "UPDATE items SET position=? WHERE content_key=?",
+            list(enumerate(ordered_keys)))
         self.db.commit()
-        return n
+        return cur.rowcount
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -523,6 +538,35 @@ class Catalog:
                 (base, content_key, set_name, custom_emoji_id, _now()),
             )
         self.db.commit()
+
+    def record_publications(self, rows) -> int:
+        """Batch form of :meth:`mark_uploaded`: one commit for the whole set.
+
+        ``rows`` is an iterable of ``(content_key, custom_emoji_id, base,
+        set_name)`` -- :meth:`mark_uploaded`'s own argument order, so a caller
+        looping over it can swap in this call unchanged. That loop pays a commit
+        (and its fsyncs) per emoji; a full pack is thousands of them.
+        """
+        rows = [tuple(r) for r in rows]
+        if not rows:
+            return 0
+        self.db.executemany(
+            "UPDATE items SET uploaded=1, custom_emoji_id=? WHERE content_key=?",
+            [(cid, key) for key, cid, _base, _set in rows])
+        now = _now()
+        self.db.executemany(
+            "INSERT INTO publications"
+            "(base, content_key, set_name, custom_emoji_id, uploaded_utc) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(base, content_key) DO UPDATE SET "
+            "  set_name=COALESCE(excluded.set_name, set_name),"
+            "  custom_emoji_id=COALESCE(excluded.custom_emoji_id, custom_emoji_id)",
+            # A row with no base only updates the legacy per-item columns,
+            # exactly as mark_uploaded(base=None) does.
+            [(base, key, set_name, cid, now)
+             for key, cid, base, set_name in rows if base])
+        self.db.commit()
+        return len(rows)
 
     def get(self, content_key: str) -> Item | None:
         row = self.db.execute(
