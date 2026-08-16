@@ -360,7 +360,7 @@ def load_state(plan: list[dict] | None = None) -> dict:
             f"       Refusing to restart from zero -- that would re-upload "
             f"every image already published.\n"
             f"       Inspect the file (a .tmp sibling may hold the last "
-            f"write) and restore it deliberately.")
+            f"write) and restore it deliberately.") from exc
     problem = _state_problem(state, plan)
     if problem:
         raise SystemExit(
@@ -869,7 +869,7 @@ def resolve_by_image(tg: Telegram, live: list[tuple[str, str]],
             try:
                 tg.download_file(str(file_id), dest)
                 got = _dhash(Image.open(dest).convert("RGBA"))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # Unreadable is not "not ours": guessing here is what writes a
                 # wrong id into the canonical map.
                 raise MapIdentityUnproven(

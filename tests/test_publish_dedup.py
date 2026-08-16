@@ -28,7 +28,6 @@ sys.path.insert(0, str(ROOT))
 import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
-import build_pack  # noqa: E402
 import build_collection as bc  # noqa: E402
 from build_pack import AmbiguousUploadError, Telegram  # noqa: E402
 from emojikit import media  # noqa: E402

@@ -28,7 +28,8 @@ class OrderTests(unittest.TestCase):
         self.keys = []
         with Catalog(self.db) as cat:
             for i in range(5):
-                img = Path(self.tmp.name) / f"m{i}.png"; _png(img)
+                img = Path(self.tmp.name) / f"m{i}.png"
+                _png(img)
                 k = f"s:k{i:030d}"
                 cat.add(content_key=k, fmt="static", file_path=img, keywords=[f"k{i}"])
                 self.keys.append(k)
@@ -53,7 +54,8 @@ class OrderTests(unittest.TestCase):
         new = [self.keys[2], self.keys[0], self.keys[1], self.keys[3], self.keys[4]]
         with Catalog(self.db) as cat:
             cat.set_order(new)
-            img = Path(self.tmp.name) / "m5.png"; _png(img)
+            img = Path(self.tmp.name) / "m5.png"
+            _png(img)
             cat.add(content_key="s:k99", fmt="static", file_path=img, keywords=["k99"])
         with Catalog(self.db) as cat:
             got = [it.content_key for it in cat.all_items()]
