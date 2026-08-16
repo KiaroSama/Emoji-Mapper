@@ -15,7 +15,13 @@
 # virtual environment (.venv) are at the PROJECT ROOT, one level up. Coin images
 # live in coins/logos/{svg,png} and are written to coins/logos/emoji.
 
-$ErrorActionPreference = 'SilentlyContinue'
+# NOT a script-wide SilentlyContinue. That swallowed every failure below,
+# including a Start-Process that never started: $proc stayed $null, and
+# '-not $null.HasExited' is $true, so the watchdog waited out the full PERFILE
+# deadline 100 times -- 3.3 hours of nothing, 100 '(unknown)' quarantine
+# entries, then exit 3 ("sources need review") on a first run that simply had no
+# .venv yet. Only the reads that legitimately race the converter are silenced,
+# one call at a time.
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $ProjectRoot = Split-Path -Parent $ScriptRoot
 Set-Location -LiteralPath $ScriptRoot
@@ -29,11 +35,26 @@ $marker   = Join-Path $emojiDir '.svg_cur'
 $PERFILE  = 120   # seconds one source may take before we call it stuck
 $POLL     = 2
 
+# This script is run directly, not through run.ps1, so the venv it needs may
+# simply not exist yet. Say so in one line instead of watchdogging a process
+# that was never started.
+foreach ($required in @($py, $convert)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        Write-Host "[watchdog] required file not found: $required"
+        Write-Host "[watchdog] create the project venv and install requirements first (see README)."
+        exit 2
+    }
+}
+
 # Marker state = "<mtime ticks>|<name>". Any change means real progress.
+# The converter clears and rewrites this file constantly, so both reads can
+# legitimately land on a file that is being replaced.
 function Get-MarkerState ($path) {
     if (-not (Test-Path -LiteralPath $path)) { return '' }
-    $item = Get-Item -LiteralPath $path
-    return "$($item.LastWriteTimeUtc.Ticks)|$((Get-Content -LiteralPath $path -Raw))"
+    $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if (-not $item) { return '' }
+    $text = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue
+    return "$($item.LastWriteTimeUtc.Ticks)|$text"
 }
 
 $exit = 0
@@ -48,6 +69,12 @@ for ($iter = 1; $iter -le 100; $iter++) {
     $proc = Start-Process -FilePath $py -ArgumentList $svgArgs `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput 'emoji_conv.txt' -RedirectStandardError 'emoji_err.txt'
+    if (-not $proc) {
+        # No process object means nothing is running, so every $proc member
+        # below reads as $null and the watchdog would "supervise" a corpse.
+        Write-Host "[watchdog] could not start '$py' - see emoji_err.txt."
+        exit 2
+    }
     $state = Get-MarkerState $marker
     $since = Get-Date
     $killed = $false
@@ -56,7 +83,8 @@ for ($iter = 1; $iter -le 100; $iter++) {
         $now = Get-MarkerState $marker
         if ($now -ne $state) { $state = $now; $since = Get-Date; continue }
         if (((Get-Date) - $since).TotalSeconds -lt $PERFILE) { continue }
-        $stuck = (Get-Content -LiteralPath $marker -Raw).Trim()
+        # Races the converter clearing the marker; '' is a real answer here.
+        $stuck = "$(Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue)".Trim()
         if (-not $stuck) { $stuck = '(unknown)' }
         Stop-Process -Id $proc.Id -Force
         $quarantined += $stuck
@@ -69,7 +97,8 @@ for ($iter = 1; $iter -le 100; $iter++) {
 
     # Only a kill justifies a restart. A converter that exited on its own without
     # printing DONE hit a real error, and rerunning it 99 more times just hides it.
-    $tail = Get-Content 'emoji_conv.txt' -Tail 1
+    # Still being flushed if WaitForExit timed out: absent is not an error here.
+    $tail = Get-Content 'emoji_conv.txt' -Tail 1 -ErrorAction SilentlyContinue
     if ($tail -match '^DONE:') {
         Write-Host "[watchdog] SVG conversion complete: $tail"
         if ($proc.ExitCode -gt $exit) { $exit = $proc.ExitCode }
@@ -84,7 +113,8 @@ for ($iter = 1; $iter -le 100; $iter++) {
 # Surface the converter's own quarantine notice (entries recorded by an earlier
 # run) plus anything this run killed: a skipped source must never be dropped
 # silently, and the run is not "clean" while one is waiting for review.
-$review = Get-Content 'emoji_conv.txt' | Select-String -Pattern '^(REVIEW|QUARANTINE):'
+$review = Get-Content 'emoji_conv.txt' -ErrorAction SilentlyContinue |
+    Select-String -Pattern '^(REVIEW|QUARANTINE):'
 foreach ($line in $review) { Write-Host "[watchdog] $($line.Line)" }
 if ($quarantined.Count) {
     Write-Host "[watchdog] REVIEW killed sources: $($quarantined -join ', ') - listed in $(Join-Path $emojiDir '.svg_skip.txt'); delete a line to retry one."

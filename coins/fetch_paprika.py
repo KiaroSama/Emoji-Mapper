@@ -26,7 +26,8 @@ from __future__ import annotations
 
 # This script lives in coins/; allow importing the shared engine (build_pack.py)
 # from the project root.
-import os as _bootstrap_os, sys as _bootstrap_sys
+import os as _bootstrap_os
+import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
@@ -40,9 +41,7 @@ import sys
 import tempfile
 import time
 import uuid
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from PIL import Image
@@ -51,6 +50,10 @@ from build_pack import (AmbiguousUploadError, LiveStateUnknown, LockBusy,
                         SetState, Telegram, canonical_map_lock, exclusive_lock,
                         ingest_exit_code, load_env, load_keywords, make_intent,
                         pack_family_lock_path, safe_int_env, write_json_atomic)
+from coins import _http, _inventory
+# One definition of the inventory format and of "which asset is this ticker",
+# shared with alias_map, enhance_map, fetch_cmc and rebuild_dedup.
+from coins._inventory import base_ticker, norm
 from emojikit.media import _dhash, hamming
 # The pipeline's single definition of "this image is effectively empty".
 from make_emoji_pngs import _is_blank
@@ -107,48 +110,20 @@ SLEEP = 2.5  # seconds between metered /search calls
 QUOTA_EXHAUSTED = object()  # sentinel returned by http_json on HTTP 402
 
 
-def norm(s: str) -> str:
-    """Lowercase, drop parenthetical qualifiers, keep only [a-z0-9]."""
-    s = re.sub(r"\(.*?\)", " ", s.lower())
-    return "".join(re.findall(r"[a-z0-9]+", s))
-
-
-def base_ticker(t: str) -> str:
-    """Strip common chain suffixes (e.g. kibabsc -> kiba)."""
-    for suf in ("mainnet", "erc20", "bep20", "trc20", "polygon", "base", "matic",
-                "avax", "bsc", "arb", "ton", "sol", "trx", "eth", "op"):
-        if t.endswith(suf) and len(t) > len(suf) + 1:
-            return t[: -len(suf)]
-    return t
-
-
 def http_json(url: str, retries: int = 4):
     """GET JSON. Returns dict, None (transient failure), or QUOTA_EXHAUSTED on 402."""
-    for a in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=40) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 402:
-                return QUOTA_EXHAUSTED  # free quota gone; do not retry
-            print(f"  http retry {a}: HTTP {exc.code}", flush=True)
-            time.sleep(min(4 * a, 20))
-        except Exception as exc:  # noqa: BLE001
-            print(f"  http retry {a}: {exc}", flush=True)
-            time.sleep(min(4 * a, 20))
-    return None
+    r = _http.get(url, headers=HEADERS, retries=retries, stop_on=(402,))
+    if r is None:
+        return None
+    if r.status_code == 402:
+        return QUOTA_EXHAUSTED  # free quota gone; do not retry
+    return r.json()
 
 
 def http_bytes(url: str, retries: int = 3):
-    for a in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=40) as r:
-                return r.read()
-        except Exception:  # noqa: BLE001
-            time.sleep(2 * a)
-    return None
+    r = _http.get(url, headers=HEADERS, retries=retries, backoff=2.0,
+                  max_backoff=6.0)
+    return r.content if r is not None else None
 
 
 def to_emoji_png(data: bytes, dest: Path) -> bool:
@@ -223,35 +198,15 @@ def search_match(name: str, ticker: str):
     return None, conf
 
 
+# Bound to THIS module's INV/OUT_INV rather than imported outright: fetch_cmc
+# calls these names and the tests retarget the inventory by patching fp.INV, so
+# the paths have to be read at call time, not at import.
 def parse_missing(have: set[str]) -> list[tuple[str, str]]:
-    text = INV.read_text(encoding="utf-8")
-    blocks = re.findall(r"##\s*(\S+)\s*[\u2014-]+\s*(.+?)\n\s*ticker:\s*(\S+)", text)
-    return [(name.strip(), tk.lower()) for _h, name, tk in blocks
-            if tk.lower() not in have]
+    return _inventory.parse_missing(have, INV)
 
 
 def refill_inventory(ticker_to_id: dict[str, str]) -> tuple[int, int]:
-    text = INV.read_text(encoding="utf-8")
-    lines = text.split("\n")
-    t_re = re.compile(r"^\s*ticker:\s*(?P<v>.+?)\s*$")
-    p_re = re.compile(r"^(?P<prefix>\s*)premium-id:\s*.*$")
-    cur = None
-    filled = total = 0
-    for i, ln in enumerate(lines):
-        m = t_re.match(ln)
-        if m:
-            cur = m.group("v").strip().lower()
-            total += 1
-            continue
-        pm = p_re.match(ln)
-        if pm and cur is not None:
-            eid = ticker_to_id.get(cur, "")
-            lines[i] = (f"{pm.group('prefix')}premium-id: {eid}").rstrip()
-            if eid:
-                filled += 1
-            cur = None
-    OUT_INV.write_text("\n".join(lines), encoding="utf-8")
-    return filled, total
+    return _inventory.refill_inventory(ticker_to_id, INV, OUT_INV)
 
 
 def load_cache() -> dict[str, dict]:

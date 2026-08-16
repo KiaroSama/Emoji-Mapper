@@ -26,7 +26,8 @@ from __future__ import annotations
 
 # This script lives in coins/; allow importing the shared engine (build_pack.py)
 # from the project root.
-import os as _bootstrap_os, sys as _bootstrap_sys
+import os as _bootstrap_os
+import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
@@ -47,6 +48,7 @@ from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
                         LiveStateUnknown, SetState, Telegram, canonical_map_lock,
                         exclusive_lock, links_chat_id, load_env,
                         pack_family_lock_path, safe_int_env, write_json_atomic)
+from coins._inventory import refill_inventory
 from emojikit.media import _dhash, hamming
 
 ROOT = Path(__file__).resolve().parent
@@ -988,25 +990,7 @@ def _map_and_fill(tg: Telegram) -> None:
 
 
 def fill_inventory(ticker_to_id: dict[str, str]) -> None:
-    lines = INV.read_text(encoding="utf-8").split("\n")
-    t_re = re.compile(r"^\s*ticker:\s*(?P<v>.+?)\s*$")
-    p_re = re.compile(r"^(?P<prefix>\s*)premium-id:\s*.*$")
-    cur = None
-    filled = total = 0
-    for i, ln in enumerate(lines):
-        m = t_re.match(ln)
-        if m:
-            cur = m.group("v").strip().lower()
-            total += 1
-            continue
-        pm = p_re.match(ln)
-        if pm and cur is not None:
-            eid = ticker_to_id.get(cur, "")
-            lines[i] = (f"{pm.group('prefix')}premium-id: {eid}").rstrip()
-            if eid:
-                filled += 1
-            cur = None
-    OUT_INV.write_text("\n".join(lines), encoding="utf-8")
+    filled, total = refill_inventory(ticker_to_id, INV, OUT_INV)
     print(f"inventory filled: {filled}/{total} -> {OUT_INV.name}", flush=True)
 
 

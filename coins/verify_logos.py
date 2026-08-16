@@ -18,7 +18,8 @@ Usage:
 
 from __future__ import annotations
 
-import os as _os, sys as _sys
+import os as _os
+import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import argparse
@@ -29,7 +30,6 @@ import logging
 import os
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -39,6 +39,7 @@ from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, AmbiguousUploadError,
                         exclusive_lock, ingest_exit_code, load_env, make_intent,
                         pack_family_lock_path, safe_int_env, _input_sticker,
                         _mime_for_path, write_json_atomic)
+from coins import _http
 from emojikit import media
 from emojikit.media import _dhash, hamming
 from emojikit.logsetup import setup_logging
@@ -98,18 +99,22 @@ def fetch_markets(top: int) -> list[dict]:
     for page in range(1, (top + per - 1) // per + 1):
         url = (f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd"
                f"&order=market_cap_desc&per_page={per}&page={page}&sparkline=false")
-        req = urllib.request.Request(url, headers=UA)
-        out.extend(json.loads(urllib.request.urlopen(req, timeout=60).read()))
+        # Through the shared pooled client: this had no retry at all, so a
+        # single 429 on page 2 of 4 ended the whole review with a traceback.
+        resp = _http.get(url, headers=UA, timeout=60)
+        if resp is None:
+            raise RuntimeError(f"CoinGecko markets page {page} is unavailable")
+        out.extend(resp.json())
         time.sleep(3)
     return out[:top]
 
 
 def fetch_image(url: str) -> bytes | None:
-    try:
-        return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=40).read()
-    except Exception as exc:  # noqa: BLE001
-        log.debug("image fetch failed %s: %s", url, exc)
+    resp = _http.get(url, headers=UA, retries=3, backoff=2.0, max_backoff=6.0)
+    if resp is None:
+        log.debug("image fetch failed %s", url)
         return None
+    return resp.content
 
 
 def logo_distance(ours: Image.Image, theirs: Image.Image) -> int:

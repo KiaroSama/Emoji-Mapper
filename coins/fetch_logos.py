@@ -14,21 +14,28 @@ Downloads go to a temp file and are only published to their final name once they
 decode as a real, non-empty image, so an error page or a truncated body can
 never be cached as a logo.
 
-Networking is pure standard library (urllib); Pillow is used only to validate
-downloaded images.
+Networking goes through coins/_http.py (one pooled requests.Session, shared
+retry rules); Pillow is used only to validate downloaded images.
 """
 
 from __future__ import annotations
 
+# This script lives in coins/; allow importing the shared HTTP client whether it
+# is run as ``python coins/fetch_logos.py`` or imported from the project root.
+import os as _bootstrap_os
+import sys as _bootstrap_sys
+_bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
+    _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
+
 import csv
-import json
 import re
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 from PIL import Image
+
+from coins import _http
 
 ROOT = Path(__file__).resolve().parent
 SVG_DIR = ROOT / "logos" / "svg"
@@ -38,7 +45,7 @@ KEYWORDS_CSV = ROOT / "keywords.csv"
 API = "https://api.coingecko.com/api/v3/coins/markets"
 PER_PAGE = 250
 MAX_PAGES = int(sys.argv[1]) if len(sys.argv) > 1 else 40  # 40 * 250 = up to 10,000 coins
-PAGE_DELAY = 12.0        # CoinGecko free tier rate-limits hard; be patient
+PAGE_DELAY = _http.page_delay()   # COIN_PAGE_DELAY overrides; see coins/_http.py
 IMG_DELAY = 0.05
 HEADERS = {"User-Agent": "Mozilla/5.0 (logo-fetcher; local tool)"}
 
@@ -51,20 +58,12 @@ def safe_ticker(symbol: str) -> str:
 
 
 def _get(url: str, *, binary: bool = False, retries: int = 6):
-    last = None
-    for attempt in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
-                return data if binary else json.loads(data.decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            # Long, escalating backoff so transient 429s don't end the run.
-            wait = min(8.0 * attempt, 60.0)
-            print(f"  retry {attempt}/{retries}: {exc} (wait {wait:.0f}s)", flush=True)
-            time.sleep(wait)
-    raise RuntimeError(f"GET failed after {retries} attempts: {url} ({last})")
+    # Long, escalating backoff so transient 429s don't end the run.
+    resp = _http.get(url, headers=HEADERS, timeout=30, retries=retries,
+                     backoff=8.0, max_backoff=60.0)
+    if resp is None:
+        raise RuntimeError(f"GET failed after {retries} attempts: {url}")
+    return resp.content if binary else resp.json()
 
 
 def _valid_image(path: Path) -> bool:

@@ -16,6 +16,7 @@ import io
 import json
 import os
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -37,6 +38,10 @@ import fetch_pack  # noqa: E402
 import make_emoji_pngs as m  # noqa: E402
 import panel as p  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_USAGE  # noqa: E402
+from coins import _http, _inventory  # noqa: E402
+from coins import fetch_cmc as coins_cmc  # noqa: E402
+from coins import fetch_paprika as coins_fp  # noqa: E402
+from coins import rebuild_dedup as coins_rd  # noqa: E402
 from emojikit.media import TGS_MAX_UNPACKED  # noqa: E402
 
 RED = (240, 20, 20, 255)
@@ -1092,6 +1097,236 @@ class VerifyLogosFix(unittest.TestCase):
         self.assertIsNone(v(["a", OLD_CID], ["z", NEW_CID], 1))     # neighbour moved
         self.assertIsNone(v(["a", OLD_CID], ["a", "a"], 1))         # id already present
         self.assertIsNone(v(["a", OLD_CID], ["a", OLD_CID], 1))     # nothing changed
+
+
+# --------------------------------------------------------------------------- #
+# coins/_http: one pooled client, and the status codes that are ANSWERS
+# --------------------------------------------------------------------------- #
+class StubResponse:
+    def __init__(self, status=200, payload=None, body=b"", headers=None):
+        self.status_code = status
+        self.content = body
+        self.headers = headers or {}
+        self._payload = payload
+
+    @property
+    def ok(self) -> bool:
+        return self.status_code < 400
+
+    def json(self):
+        return self._payload
+
+
+class StubSession:
+    """Records every GET and answers from a queue of StubResponses."""
+
+    def __init__(self, *responses):
+        self.queue = list(responses)
+        self.calls: list[str] = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append(url)
+        r = self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+class SharedHttpClient(unittest.TestCase):
+    """Four hand-rolled urllib wrappers became one Session; the semantics stayed.
+
+    Each fetcher used to open a fresh TCP+TLS connection per call (urllib pools
+    nothing) and carried its own retry ladder. The dangerous half of the merge is
+    the status branches: 402 means "CoinPaprika's free quota is spent, resume
+    later" and 400/404 mean "CMC has no such symbol". Both must stay
+    distinguishable from a transient failure, and neither may be retried -- a
+    retry there burns the very rate limit that produced it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Standalone: fetch_logos reads sys.argv at import, so a plain import
+        # under the test runner would parse the runner's own arguments.
+        cls.logos = _load_standalone(ROOT / "coins" / "fetch_logos.py",
+                                     "http_fetch_logos")
+
+    def setUp(self):
+        self.slept: list[float] = []
+        self.patches = [
+            mock.patch.object(_http.time, "sleep", self.slept.append),
+            mock.patch.object(_http, "SESSION", None),
+        ]
+        for pt in self.patches:
+            pt.start()
+
+    def tearDown(self):
+        for pt in reversed(self.patches):
+            pt.stop()
+
+    def _session(self, *responses) -> StubSession:
+        sess = StubSession(*responses)
+        _http.SESSION = sess
+        return sess
+
+    def test_no_coin_script_hand_rolls_urlopen_again(self):
+        """The regression that matters: a per-call connection to one image host.
+
+        fetch_logos hits the same CDN thousands of times per run, so a fresh
+        handshake each time is the whole cost. Anything reintroducing urlopen
+        here has silently opted out of the pool.
+        """
+        offenders = sorted(p.name for p in (ROOT / "coins").glob("*.py")
+                           if re.search(r"urlopen\s*\(", p.read_text(encoding="utf-8")))
+        self.assertEqual(offenders, [])
+
+    def test_402_is_a_quota_answer_and_is_never_retried(self):
+        sess = self._session(StubResponse(402))
+        self.assertIs(coins_fp.http_json("https://paprika.test/search?q=x"),
+                      coins_fp.QUOTA_EXHAUSTED)
+        self.assertEqual(len(sess.calls), 1, "a spent quota must not be retried")
+        self.assertEqual(self.slept, [])
+
+    def test_400_and_404_are_no_match_and_are_never_retried(self):
+        for code in (400, 404):
+            with self.subTest(code=code):
+                sess = self._session(StubResponse(code))
+                self.assertIsNone(
+                    coins_cmc.cmc_json("https://cmc.test/map?symbol=zzz", {}))
+                self.assertEqual(len(sess.calls), 1)
+
+    def test_a_transient_failure_is_retried_and_then_reported_as_None(self):
+        """None, not QUOTA_EXHAUSTED: a 500 is not a spent quota."""
+        sess = self._session(StubResponse(500))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(coins_fp.http_json("https://paprika.test/x"))
+        self.assertEqual(len(sess.calls), 4)     # the caller's retries=4
+        self.assertEqual(len(self.slept), 3,     # no pointless wait after the last
+                         "the run slept once more than it had attempts left")
+
+    def test_a_success_is_decoded_and_costs_one_call(self):
+        self._session(StubResponse(200, payload={"currencies": [{"id": "btc"}]}))
+        self.assertEqual(coins_fp.http_json("https://paprika.test/x"),
+                         {"currencies": [{"id": "btc"}]})
+
+    def test_retry_after_beats_the_backoff_ladder(self):
+        """The server knows how long it wants us gone better than a fixed ramp."""
+        sess = self._session(StubResponse(429, headers={"Retry-After": "7"}),
+                             StubResponse(200, payload=[]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(_http.get("https://gecko.test/p1", retries=3).json(), [])
+        self.assertEqual(self.slept, [7.0])
+        self.assertEqual(len(sess.calls), 2)
+
+    def test_an_absurd_retry_after_is_capped(self):
+        """"Come back in an hour" must not turn one 429 into a hung run."""
+        self._session(StubResponse(429, headers={"Retry-After": "3600"}),
+                      StubResponse(200, payload=[]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _http.get("https://gecko.test/p1", retries=3)
+        self.assertEqual(self.slept, [_http.RETRY_AFTER_MAX])
+
+    def test_a_transport_exception_is_retried_like_a_bad_status(self):
+        sess = self._session(requests.ConnectionError("connection reset"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(_http.get("https://gecko.test/p1", retries=2))
+        self.assertEqual(len(sess.calls), 2)
+
+    def test_fetch_logos_still_raises_after_its_retries(self):
+        """main() breaks out of paging on RuntimeError; None would page on."""
+        self._session(StubResponse(503))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(RuntimeError):
+            self.logos._get("https://gecko.test/markets", retries=2)
+
+
+class PagingDelay(unittest.TestCase):
+    """12 s x 40 pages was ~8 minutes of pure sleep, on top of a real backoff."""
+
+    def test_the_default_is_short(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(_http.PAGE_DELAY_ENV, None)
+            self.assertLessEqual(_http.page_delay(), 3.0)
+
+    def test_the_env_var_overrides_it(self):
+        with mock.patch.dict(os.environ, {_http.PAGE_DELAY_ENV: "15"}):
+            self.assertEqual(_http.page_delay(), 15.0)
+
+    def test_a_typo_falls_back_instead_of_crashing_at_import(self):
+        with mock.patch.dict(os.environ, {_http.PAGE_DELAY_ENV: "12 seconds"}):
+            self.assertEqual(_http.page_delay(), _http.PAGE_DELAY_DEFAULT)
+
+
+# --------------------------------------------------------------------------- #
+# coins/_inventory: one re-fill loop, one ticker->asset resolver
+# --------------------------------------------------------------------------- #
+ALIAS_INVENTORY = """\
+## \U0001f7e1 — Avalanche C-Chain
+   ticker: avaxc
+   premium-id:
+
+## \U0001f7e2 — BitTorrent Chain
+   ticker: bttc
+   premium-id:
+"""
+
+
+class OneInventoryImplementation(unittest.TestCase):
+    """Four verbatim copies of the re-fill loop, and a resolver that had drifted.
+
+    enhance_map knew that avaxc is Avalanche and bttc is BitTorrent Chain;
+    fetch_paprika's base_ticker did not, so "which asset is this ticker" had two
+    answers depending on which tool ran. Merging that alias set is the ONE
+    intentional behaviour change here.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.inv = self.tmp / "inv.md"
+        self.out = self.tmp / "out.md"
+        self.inv.write_text(ALIAS_INVENTORY, encoding="utf-8")
+
+    def test_the_explicit_aliases_now_reach_the_fetchers(self):
+        self.assertEqual(_inventory.base_ticker("avaxc"), "avax")
+        self.assertEqual(_inventory.base_ticker("bttc"), "btt")
+        self.assertIs(coins_fp.base_ticker, _inventory.base_ticker)
+        self.assertIs(coins_cmc.base_ticker, _inventory.base_ticker)
+
+    def test_the_suffix_rules_are_unchanged(self):
+        self.assertEqual(_inventory.base_ticker("kibabsc"), "kiba")
+        self.assertEqual(_inventory.base_ticker("btc"), "btc")
+        # A one-character suffix is not identity evidence: "ghc" must not
+        # inherit "gh"'s logo.
+        self.assertEqual(_inventory.base_ticker("ghc"), "ghc")
+
+    def test_the_re_fill_loop_has_exactly_one_definition(self):
+        """It lived in four verbatim copies; the count IS the regression."""
+        copies = sorted(p.name for p in (ROOT / "coins").glob("*.py")
+                        if "premium-id: {eid}" in p.read_text(encoding="utf-8"))
+        self.assertEqual(copies, ["_inventory.py"])
+
+    def test_every_tool_re_fills_through_the_same_function(self):
+        self.assertIs(coins_rd.refill_inventory, _inventory.refill_inventory)
+        self.assertIs(coins_cmc.refill_inventory, coins_fp.refill_inventory,
+                      "fetch_cmc must not grow its own copy again")
+
+    def test_an_unmapped_ticker_is_blanked_not_left_stale(self):
+        self.inv.write_text("   ticker: btc\n   premium-id: 999\n",
+                            encoding="utf-8")
+        self.assertEqual(_inventory.refill_inventory({}, self.inv, self.out),
+                         (0, 1))
+        self.assertEqual(self.out.read_text("utf-8"),
+                         "   ticker: btc\n   premium-id:\n")
+
+    def test_indentation_and_ids_survive_the_round_trip(self):
+        filled, total = _inventory.refill_inventory(
+            {"avaxc": "111", "bttc": "222"}, self.inv, self.out)
+        self.assertEqual((filled, total), (2, 2))
+        self.assertIn("   premium-id: 111", self.out.read_text("utf-8"))
+
+    def test_parse_missing_skips_what_is_already_mapped(self):
+        self.assertEqual(_inventory.parse_missing({"avaxc"}, self.inv),
+                         [("BitTorrent Chain", "bttc")])
 
 
 class VerifyLogosMainContracts(unittest.TestCase):

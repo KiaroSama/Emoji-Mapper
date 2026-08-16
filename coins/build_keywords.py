@@ -7,11 +7,18 @@ then lists every SVG and PNG logo present in logos/.
 
 from __future__ import annotations
 
+# This script lives in coins/; allow importing the shared HTTP client whether it
+# is run as ``python coins/build_keywords.py`` or imported from the project root.
+import os as _bootstrap_os
+import sys as _bootstrap_sys
+_bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
+    _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
+
 import csv
-import json
 import time
-import urllib.request
 from pathlib import Path
+
+from coins import _http
 
 ROOT = Path(__file__).resolve().parent
 SVG_DIR = ROOT / "logos" / "svg"
@@ -21,21 +28,15 @@ LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 MARKETS_PAGES = 12   # market-cap order: gives canonical names for the top coins
 HEADERS = {"User-Agent": "Mozilla/5.0 (logo-fetcher; local tool)"}
+PAGE_DELAY = _http.page_delay()   # COIN_PAGE_DELAY overrides; see coins/_http.py
 
 
 def _get_json(url: str, *, retries: int = 6):
-    last = None
-    for attempt in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            wait = min(8.0 * attempt, 40.0)
-            print(f"  retry {attempt}/{retries}: {exc} (wait {wait:.0f}s)", flush=True)
-            time.sleep(wait)
-    raise RuntimeError(str(last))
+    resp = _http.get(url, headers=HEADERS, timeout=60, retries=retries,
+                     backoff=8.0, max_backoff=40.0)
+    if resp is None:
+        raise RuntimeError(f"GET failed after {retries} attempts: {url}")
+    return resp.json()
 
 
 def fetch_canonical_names() -> dict[str, str]:
@@ -62,7 +63,7 @@ def fetch_canonical_names() -> dict[str, str]:
             if sym and sym not in names:
                 names[sym] = name
         print(f"  markets page {page}: {len(names)} canonical names so far.", flush=True)
-        time.sleep(12.0)
+        time.sleep(PAGE_DELAY)
     # 2) Long tail from /coins/list (only fills tickers not already set).
     try:
         for c in _get_json(LIST_URL):
