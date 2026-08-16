@@ -106,16 +106,21 @@ class BrandLogo:
             return None
 
 
-def _static_is_blank(path: Path, min_visible: int = 8) -> bool:
-    """True if a static image is effectively empty (guards against blank emoji)."""
+def _static_is_blank(path: Path) -> bool:
+    """True if a static image is effectively empty (guards against blank emoji).
+
+    Delegates to the shared rule rather than carrying a third copy of it: this
+    file, emojikit.media and coins/check_all_packs each had their own pixel loop
+    with their own re-declared thresholds, so "is this emoji blank?" -- the
+    pipeline's central quality gate -- had more than one implementation that
+    could drift apart. media.is_blank_image is also the fast one, and this runs
+    on every static item of every publish.
+    """
     try:
-        im = Image.open(path).convert("RGBA")
+        im = Image.open(path)
     except Exception:  # noqa: BLE001 - non-static or unreadable: let upload decide
         return False
-    alpha = im.split()[3]
-    if alpha.getbbox() is None:
-        return True
-    return sum(1 for v in alpha.get_flattened_data() if v > 10) <= min_visible
+    return media.is_blank_image(im)
 
 
 class StateError(RuntimeError):

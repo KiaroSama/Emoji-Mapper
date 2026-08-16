@@ -703,6 +703,14 @@ def _detect_bot_username() -> str:
 
 
 def main() -> int:
+    # BEFORE setup_logging: the logger registers the literal values of
+    # SECRET_ENV_KEYS so they can be masked wherever they appear, and it can only
+    # register what is already in the environment. Loading .env afterwards -- as
+    # this did, via _detect_bot_username() further down -- left any .env-only
+    # credential unregistered for literal masking in the one process that serves
+    # a browser UI. It also decides the log retention window.
+    from build_pack import load_env
+    load_env()
     setup_logging("panel")
     ap = argparse.ArgumentParser(description="Curate downloaded emoji before publishing.")
     ap.add_argument("--data-dir", default="collection")
