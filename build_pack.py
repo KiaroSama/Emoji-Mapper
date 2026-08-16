@@ -696,8 +696,11 @@ class Telegram:
 
         check.fired = False
         # Exposed so the post-add size read can require the set to actually
-        # contain something new, rather than trusting a bare len().
+        # contain OUR sticker, rather than trusting a bare len(). Both halves
+        # are needed there: the snapshot says which identities are new, the
+        # source says which of them we sent.
         check.known_before = known_before
+        check.source = source
         return check
 
     def _live_after_add(self, name: str, check) -> int | None:
@@ -732,11 +735,22 @@ class Telegram:
         stickers = sset.get("stickers", [])
         now = _usable_fuids(stickers)
         if now is not None and check.known_before is not None:
-            if not (now - check.known_before):
+            new = now - check.known_before
+            # "Something new is here" is not "ours is here", and a FOREIGN
+            # sticker landing during the failed attempt is the exact case this
+            # whole path exists for -- so a bare difference passed the guard in
+            # precisely the situation it was written to catch, and the size read
+            # off a set that may not hold our sticker at all was booked as the
+            # result of our upload. Only the content answers it. This costs
+            # nothing on the happy path: it runs only when a live probe was
+            # already needed, and stops at the first match.
+            if not any(self._sticker_matches(s, check.source) is True
+                       for s in stickers
+                       if str(s.get("file_unique_id")) in new):
                 raise AmbiguousUploadError(
-                    f"addStickerToSet reported success for {name} but the set "
-                    f"read back afterwards holds no sticker that was not "
-                    f"already there; its size cannot be trusted")
+                    f"addStickerToSet reported success for {name} but no "
+                    f"sticker in the set read back afterwards holds the image "
+                    f"we sent; its size cannot be trusted")
         return len(stickers)
 
     def set_fuids(self, name: str) -> set[str] | None:
@@ -1244,13 +1258,28 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
             # sticker live and off the books forever. Ask the only question that
             # matters instead: is OUR image among the ones that arrived?
             #
-            # Bounded by the drift, not by the set: adds append, so anything
-            # that arrived after our snapshot sits past `expected`. In practice
-            # that is one or two stickers, not two hundred.
-            arrived = sset.get("stickers", [])[expected:]
-            verdicts = ([tg._sticker_matches(st, in_flight_src) for st in arrived]
-                        if in_flight_src else [None] * len(arrived))
-            if any(v is True for v in verdicts):
+            # POSITION cannot bound that question. `expected` marks the tail
+            # only while stickers are appended and never removed: delete one
+            # and add ours and live_n == expected, which left the old slice
+            # EMPTY, never consulted the content oracle, announced "did not
+            # land" and re-uploaded an image that was already live -- exiting 0.
+            # So the search space is the whole set, tail first: an ordinary
+            # append is still found in one comparison, and the walk over the
+            # rest costs downloads once per interrupted run, never once per
+            # upload.
+            stickers = sset.get("stickers", [])
+            grew = live_n > expected
+            # True: ours is live. False: provably absent. None: unproven.
+            found = False
+            for st in stickers[expected:] + stickers[:expected]:
+                verdict = (tg._sticker_matches(st, in_flight_src)
+                           if in_flight_src else None)
+                if verdict is True:
+                    found = True
+                    break
+                if verdict is None:
+                    found = None         # keep looking; a match still decides it
+            if found is True:
                 # Ours is there. WHAT ELSE arrived does not change that, which
                 # is the whole point: expected+2 is the normal outcome of a
                 # foreign sticker landing between our failed attempt and our
@@ -1262,22 +1291,22 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
                     recorded["count"] = live_n
                 print(f"  reconciled from live: {in_flight} was applied "
                       f"before the interruption", flush=True)
-            elif not arrived:
+            elif found is False and not grew:
                 print(f"  {in_flight} did not land; it stays pending", flush=True)
-            elif all(v is False for v in verdicts):
+            elif found is False:
                 # Ours is provably absent, yet the set grew: a hand edit, not
                 # our upload. The counts every later position is derived from
                 # are no longer ours to reason about.
-                print(f"ERROR: {target} grew by {len(arrived)}, and none of "
-                      f"those stickers is {in_flight} -- someone else wrote to "
-                      f"this set.\n       Refusing to attribute it to this run.",
-                      file=sys.stderr)
+                print(f"ERROR: {target} grew by {live_n - expected}, and none "
+                      f"of its {live_n} stickers is {in_flight} -- someone else "
+                      f"wrote to this set.\n       Refusing to attribute it to "
+                      f"this run.", file=sys.stderr)
                 return EXIT_FAILED
             else:
                 print(f"ERROR: cannot verify whether {in_flight} is among the "
-                      f"{len(arrived)} sticker(s) added to {target} since this "
-                      f"run's snapshot.\n       Refusing to guess. Retry when "
-                      f"the images can be compared.", file=sys.stderr)
+                      f"{live_n} sticker(s) in {target}.\n       Refusing to "
+                      f"guess. Retry when the images can be compared.",
+                      file=sys.stderr)
                 return EXIT_PARTIAL
         state["in_flight"] = None                # verified postcondition
 
