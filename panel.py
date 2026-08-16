@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import sys
 import threading
 import webbrowser
@@ -26,11 +27,11 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
-from emojikit.catalog import Catalog
+from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 # ``_load_lottie`` is private to media, but it owns the .tgs decompression bound
 # (TGS_MAX_UNPACKED). Importing it keeps one bound; a copy here would drift.
-from emojikit.media import _load_lottie, hamming
+from emojikit.media import _load_lottie
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -73,13 +74,29 @@ def order_by_similarity(items: list) -> list:
         hashed = [it for it in group if it.phash is not None]
         plain = [it for it in group if it.phash is None]
         if hashed:
+            # The walk stays quadratic on purpose: the greedy nearest-neighbour
+            # chain IS the look-alike grouping the panel is for, and every index
+            # that would make it sub-quadratic (LSH buckets, BK-tree pruning)
+            # changes which near-twin ends up next to which. What is free is the
+            # comparison -- ``(a ^ b).bit_count()`` is media.hamming's exact
+            # result with no per-pair Python call, ~8x on a 3 600-item catalog
+            # (3.7 s -> 0.44 s) for a byte-identical order.
+            # ponytail: O(n^2) scan; revisit only if a catalog grows past ~10k
+            # items AND a different grouping is acceptable.
             remaining = hashed[:]
             ordered = [remaining.pop(0)]
+            hashes = [it.phash for it in remaining]
+            last = ordered[0].phash
             while remaining:
-                last = ordered[-1].phash
-                j = min(range(len(remaining)),
-                        key=lambda i: hamming(remaining[i].phash, last))
-                ordered.append(remaining.pop(j))
+                best, best_d = 0, PHASH_BITS + 1
+                for i, h in enumerate(hashes):
+                    d = (h ^ last).bit_count()
+                    if d < best_d:
+                        best, best_d = i, d
+                        if d == 0:
+                            break   # nothing beats 0, and min() takes the first
+                ordered.append(remaining.pop(best))
+                last = hashes.pop(best)
             out.extend(ordered)
         out.extend(plain)
     return out
@@ -189,9 +206,21 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 self.close_connection = True
 
         def do_GET(self):
+            # Reads need the same Host check as writes. Binding to 127.0.0.1
+            # keeps remote sockets out, but any page whose hostname resolves to
+            # loopback reaches this server same-origin and can read every
+            # response -- and "/" carries the per-run mutation token in its
+            # body, which is the one secret the POST guard rests on.
+            if not _is_loopback(self.headers.get("Host", "")):
+                self._send(403, b"unexpected Host", "text/plain")
+                return
             if self.path == "/" or self.path.startswith("/index"):
-                page = (PAGE.replace("__ITEMS__", _json_for_script(view))
-                            .replace("__TOKEN__", token))
+                # /api/order sorts ``view`` in place, and CPython empties a list
+                # for the duration of list.sort(); serialising it unlocked
+                # rendered an empty grid.
+                with lock:
+                    items = _json_for_script(view)
+                page = PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -258,6 +287,18 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 return None
 
         def do_POST(self):
+            try:
+                self._route_post()
+            except sqlite3.Error as exc:
+                # build_collection.py reads the same database file and
+                # sqlite3.connect only waits 5 s, so "database is locked" is
+                # routine here, not freak. Uncaught it escaped the handler and
+                # closed the socket with no HTTP response at all, so the panel
+                # could only say "Save failed" with no reason.
+                self._send(503, json.dumps(
+                    {"error": f"catalog unavailable: {exc}"}).encode())
+
+        def _route_post(self):
             n = self._body_length()
             if n is None:
                 return
@@ -291,9 +332,15 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
                     self._send(400, b'{"error":"excluded must be a list of keys"}')
                     return
-                known = {v["key"] for v in view if not v.get("isLogo")}
-                excluded = set(raw) & known
+                # ``known`` MUST be read under the lock: /api/order sorts
+                # ``view`` in place and CPython empties a list for the duration
+                # of list.sort(), so a save landing in that window saw no known
+                # keys, intersected the request down to nothing, and
+                # set_inclusion(set()) re-included every row -- discarding the
+                # whole de-selection while still answering {"ok": true}.
                 with lock:
+                    known = {v["key"] for v in view if not v.get("isLogo")}
+                    excluded = set(raw) & known
                     cat = Catalog(db_path)
                     try:
                         inc, exc = cat.set_inclusion(excluded)
@@ -318,20 +365,26 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                     self._send(400, b'{"error":"order must be a list of keys"}')
                     return
                 keys = [k for k in raw if k != LOGO_KEY]
-                expected = [v["key"] for v in view if not v.get("isLogo")]
-                if sorted(keys) != sorted(expected):
+                with lock:
+                    # Under the lock for the same reason as /api/save, and
+                    # because this is check-then-act: validating against a
+                    # ``view`` that a concurrent sort has emptied rejects a
+                    # perfectly good order as "not a permutation".
+                    expected = sorted(v["key"] for v in view if not v.get("isLogo"))
+                    ok = sorted(keys) == expected
+                    if ok:
+                        cat = Catalog(db_path)
+                        try:
+                            cat.set_order(keys)
+                            cat.set_meta("order_seeded", "1")
+                        finally:
+                            cat.close()
+                        # Reorder the in-memory view to match (logo stays first).
+                        pos = {k: i for i, k in enumerate(keys)}
+                        view.sort(key=lambda v: (not v.get("isLogo"), pos.get(v["key"], 1 << 30)))
+                if not ok:
                     self._send(400, b'{"error":"order must be a permutation of current keys"}')
                     return
-                with lock:
-                    cat = Catalog(db_path)
-                    try:
-                        cat.set_order(keys)
-                        cat.set_meta("order_seeded", "1")
-                    finally:
-                        cat.close()
-                    # Reorder the in-memory view to match (keep the logo first).
-                    pos = {k: i for i, k in enumerate(keys)}
-                    view.sort(key=lambda v: (not v.get("isLogo"), pos.get(v["key"], 1 << 30)))
                 self._send(200, json.dumps({"ok": True, "count": len(keys)}).encode())
                 return
 
