@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import requests  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageOps  # noqa: E402
 
 import build_pack as bp  # noqa: E402
 import fetch_pack  # noqa: E402
@@ -772,6 +772,40 @@ class ReplaceSession:
 
     def method(self, name: str) -> list[tuple[str, dict, dict]]:
         return [c for c in self.calls if c[0] == name]
+
+
+class LogoReviewDistance(unittest.TestCase):
+    """The review sweep must flag a different COIN, not a different palette.
+
+    This project's emoji are drawn light-on-transparent so they read on
+    Telegram's dark background; the reference art is dark-on-light. dHash is
+    inversion-sensitive, so a plain comparison scored the SAME mark as maximally
+    different -- a sweep of the top 1000 coins flagged 237, and every one of the
+    twelve worst collapsed from ~50 to ~12 once inversion was accounted for
+    (xrp 52 -> 12, bora 50 -> 10, xdai 47 -> 9). A review list that is mostly
+    styling is a list nobody can act on.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_standalone(ROOT / "coins" / "verify_logos.py",
+                                   "coins_verify_logos_distance")
+
+    def test_the_same_mark_inverted_is_not_reported_as_different(self):
+        theirs = Image.open(io.BytesIO(_noise_png_bytes("some-coin")))
+        ours = ImageOps.invert(theirs.convert("RGB"))
+        plain = self.mod.hamming(self.mod.dh(ours), self.mod.dh(theirs))
+        self.assertGreater(plain, 20,
+                           "fixture is wrong: inversion must look far apart to "
+                           "a plain dHash, or this proves nothing")
+        self.assertLessEqual(self.mod.logo_distance(ours, theirs), 8)
+
+    def test_a_genuinely_different_image_is_still_far(self):
+        ours = Image.open(io.BytesIO(_noise_png_bytes("solana")))
+        theirs = Image.open(io.BytesIO(_noise_png_bytes("solama-the-llama")))
+        self.assertGreater(self.mod.logo_distance(ours, theirs), 20,
+                           "tolerating restyling must not tolerate a different "
+                           "coin -- that is the bug this tool exists to find")
 
 
 class VerifyLogosFix(unittest.TestCase):
