@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Allow running from the repository root.
 ROOT = Path(__file__).resolve().parent.parent
@@ -184,6 +185,105 @@ class TestAnimated(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe not available")
+class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
+    """One decode must produce EXACTLY what two decodes produced.
+
+    Every ingest site needs both the content key and the perceptual hash, and
+    computing them separately decoded each file twice -- for video, two ffmpeg
+    launches over the same clip. Merging them is only safe if the values are
+    bit-identical: the content key is the catalog's primary key, so a drift here
+    would silently split existing entries into duplicates instead of deduping
+    them.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_static_agrees_with_content_key_and_perceptual_hash(self):
+        png = _make_png(self.tmp / "a.png", (200, 40, 60, 255))
+        key, phash = media.fingerprint(png, "static")
+        self.assertEqual(key, media.content_key(png, "static"))
+        self.assertEqual(phash, media.perceptual_hash(png, "static"))
+        self.assertTrue(key.startswith("s:"))
+        self.assertIsNotNone(phash)
+
+    def test_video_agrees_with_content_key_and_perceptual_hash(self):
+        gif = _make_anim_gif(self.tmp / "anim.gif")
+        webm = media.to_video_webm(gif, self.tmp / "anim.webm")
+        key, phash = media.fingerprint(webm, "video")
+        self.assertEqual(key, media.content_key(webm, "video"),
+                         "the merged decode changed the catalog primary key")
+        self.assertEqual(phash, media.perceptual_hash(webm, "video"),
+                         "frame 0 of the digest stream is not the frame the "
+                         "separate call hashed")
+        self.assertTrue(key.startswith("v:"))
+
+    def test_video_runs_ffmpeg_once_not_twice(self):
+        gif = _make_anim_gif(self.tmp / "anim.gif")
+        webm = media.to_video_webm(gif, self.tmp / "anim.webm")
+        real_run, calls = media._run, []
+
+        def counting(cmd, *a, **kw):
+            calls.append(cmd)
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(media, "_run", counting):
+            media.fingerprint(webm, "video")
+        self.assertEqual(len(calls), 1,
+                         "the whole point of fingerprint() is one ffmpeg launch")
+
+    def test_animated_has_no_raster_hash_and_still_keys(self):
+        lottie = {"v": "5.5", "w": 512, "h": 512, "fr": 60, "ip": 0, "op": 60,
+                  "layers": []}
+        tgs = self.tmp / "x.tgs"
+        tgs.write_bytes(gzip.compress(json.dumps(lottie).encode("utf-8")))
+        key, phash = media.fingerprint(tgs, "animated")
+        self.assertEqual(key, media.content_key(tgs, "animated"))
+        self.assertIsNone(phash)
+
+    def test_an_unreadable_source_fails_the_same_way_it_always_did(self):
+        # content_key() has always raised on an undecodable static file, and the
+        # ingest sites treat that as "skip this item". Merging the two decodes
+        # must not quietly turn that into a bogus key.
+        bad = self.tmp / "bad.png"
+        bad.write_bytes(b"not an image at all")
+        with self.assertRaises(Exception) as old:
+            media.content_key(bad, "static")
+        with self.assertRaises(type(old.exception)):
+            media.fingerprint(bad, "static")
+
+
+class TestBlankDetection(unittest.TestCase):
+    """The histogram form must answer exactly what the pixel loop answered."""
+
+    def test_fully_transparent_is_blank(self):
+        self.assertTrue(media.is_blank_image(
+            Image.new("RGBA", (100, 100), (0, 0, 0, 0))))
+
+    def test_a_visible_image_is_not_blank(self):
+        self.assertFalse(media.is_blank_image(
+            Image.new("RGBA", (100, 100), (10, 20, 30, 255))))
+
+    def test_the_visibility_floor_is_exact(self):
+        # alpha == VISIBLE_ALPHA is NOT visible; one step above it is. An
+        # off-by-one in the histogram slice would flip one of these.
+        at_floor = Image.new("RGBA", (100, 100), (5, 5, 5, media.VISIBLE_ALPHA))
+        self.assertTrue(media.is_blank_image(at_floor))
+        above = Image.new("RGBA", (100, 100), (5, 5, 5, media.VISIBLE_ALPHA + 1))
+        self.assertFalse(media.is_blank_image(above))
+
+    def test_a_few_visible_pixels_still_count_as_blank(self):
+        img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        for i in range(media.BLANK_MAX_VISIBLE):
+            img.putpixel((i, 0), (255, 255, 255, 255))
+        self.assertTrue(media.is_blank_image(img))
+        img.putpixel((media.BLANK_MAX_VISIBLE, 0), (255, 255, 255, 255))
+        self.assertFalse(media.is_blank_image(img))
+
+
 class TestVideo(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

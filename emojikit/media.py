@@ -274,8 +274,12 @@ def is_blank_image(img: Image.Image) -> bool:
     alpha = img.convert("RGBA").split()[3]
     if alpha.getbbox() is None:
         return True
-    visible = sum(1 for v in alpha.get_flattened_data() if v > VISIBLE_ALPHA)
-    return visible <= BLANK_MAX_VISIBLE
+    # histogram() counts in C; the per-pixel generator this replaced walked
+    # 10 000 Python iterations per image, and this runs on every conversion AND
+    # on every static item of every publish. Bucket i holds the number of pixels
+    # with alpha == i, so summing from VISIBLE_ALPHA + 1 upwards is exactly
+    # "how many pixels are more opaque than the visibility floor".
+    return sum(alpha.histogram()[VISIBLE_ALPHA + 1:]) <= BLANK_MAX_VISIBLE
 
 
 def to_static_png(src: Path, out: Path) -> Path:
@@ -565,12 +569,72 @@ def perceptual_hash(path: Path, fmt: str) -> int | None:
     return _dhash(img)
 
 
+def fingerprint(path: Path, fmt: str) -> tuple[str, int | None]:
+    """Both identity keys from ONE decode: (content_key, perceptual_hash).
+
+    Every ingest site needs both, and computing them separately decoded the same
+    file twice -- for video that meant launching ffmpeg twice over the same clip,
+    the most expensive step in the whole ingest path, doubled.
+
+    The video case is where the saving lives: ``_video_content_digest`` already
+    renders the clip to ``fps=10,scale=64:64,format=rgba``, and the first frame
+    of that stream is byte-identical to what ``_first_video_frame`` fetches on
+    its own. So hash the whole stream for the content key and slice frame 0 off
+    the front for the dHash. Static decodes once and derives both from the same
+    open image; animated has no raster hash, so nothing changes there.
+
+    Values are identical to calling the two functions separately -- same source
+    pixels, same filter chain.
+    """
+    if fmt == "video":
+        ff = ffmpeg_path()
+        cmd = [ff, "-v", "error", "-t", str(WEBM_MAX_SECONDS), "-i", str(path),
+               "-an", "-vf", "fps=10,scale=64:64,format=rgba",
+               "-f", "rawvideo", "-"]
+        try:
+            res = _run(cmd, capture=True)
+            raw = res.stdout or b""
+        except Exception as exc:  # noqa: BLE001 - fall back to the byte hash
+            log.debug("video fingerprint failed for %s: %s", path.name, exc)
+            raw = b""
+        if not raw:
+            return "v:" + hashlib.sha256(path.read_bytes()).hexdigest()[:32], None
+        key = "v:" + hashlib.sha256(raw).hexdigest()[:32]
+        frame = _VIDEO_FRAME_BYTES
+        phash = None
+        if len(raw) >= frame:
+            try:
+                phash = _dhash(Image.frombytes("RGBA", (64, 64), raw[:frame]))
+            except Exception as exc:  # noqa: BLE001 - a bad frame is not fatal
+                log.debug("phash failed for %s: %s", path.name, exc)
+        return key, phash
+
+    if fmt == "static":
+        try:
+            img = Image.open(path)
+            key = "s:" + hashlib.sha256(_norm_pixels(img)).hexdigest()[:32]
+        except Exception as exc:  # noqa: BLE001 - unreadable: byte-hash it
+            log.debug("static fingerprint failed for %s: %s", path.name, exc)
+            return content_key(path, fmt), None
+        try:
+            return key, _dhash(img)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("phash failed for %s: %s", path.name, exc)
+            return key, None
+
+    return content_key(path, fmt), perceptual_hash(path, fmt)
+
+
+# One 64x64 RGBA frame, the unit both the content digest and the dHash consume.
+_VIDEO_FRAME_BYTES = 64 * 64 * 4
+
+
 def _first_video_frame(path: Path) -> Image.Image:
     ff = ffmpeg_path()
     cmd = [ff, "-v", "error", "-i", str(path), "-frames:v", "1",
            "-vf", "scale=64:64,format=rgba", "-f", "rawvideo", "-"]
     res = _run(cmd, capture=True)
-    return Image.frombytes("RGBA", (64, 64), res.stdout[: 64 * 64 * 4])
+    return Image.frombytes("RGBA", (64, 64), res.stdout[:_VIDEO_FRAME_BYTES])
 
 
 def _dhash(img: Image.Image, hash_size: int = 8) -> int:
@@ -588,5 +652,10 @@ def _dhash(img: Image.Image, hash_size: int = 8) -> int:
 
 
 def hamming(a: int, b: int) -> int:
-    """Hamming distance between two perceptual hashes."""
-    return bin(a ^ b).count("1")
+    """Hamming distance between two perceptual hashes.
+
+    ``int.bit_count()`` rather than ``bin(x).count("1")``: the string form
+    allocated a str per comparison, and the panel's similarity ordering calls
+    this O(n^2) times -- millions of comparisons on a large catalog.
+    """
+    return (a ^ b).bit_count()
