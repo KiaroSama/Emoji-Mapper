@@ -529,6 +529,101 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
             fp._dhash(Image.open(io.BytesIO(mine)).convert("RGBA")),
             "the promoted oracle is the other process's image")
 
+    def test_an_unresolved_upload_keeps_its_source_for_the_next_run(self):
+        """End to end: run A leaves an unresolved upload, run B recovers it.
+
+        Per-run staging removed a shared mutable path, but discarding the whole
+        directory on the way out threw away the one file the NEXT run needs.
+        The chain that produced: run A uploads image A and cannot confirm it;
+        its staging is deleted; run B sees the ticker still unmapped, downloads
+        a DIFFERENT image B for it, recovery correctly identifies live A from
+        the recorded hash -- and then promotes B as the local oracle. The map
+        would name the sticker A produced while coins/logos/emoji/<ticker>.png
+        held B, and every identity-based tool downstream reads that file.
+        """
+        art_a = _png_bytes(_gradient())
+        art_b = _png_bytes(_gradient(reverse=True))
+        published_before = (self.emoji / "aaa.png").read_bytes()
+
+        # --- run A: uploads A, then live state goes dark before confirmation --
+        tg = FakeTelegram(existing=2)
+        fp.to_emoji_png(art_a, fp.incoming_dir() / "aaa.png")
+        self._blind_after_apply(tg)
+        mapping: dict[str, str] = {}
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
+        intent = json.loads(self.state.read_text("utf-8"))["in_flight"]
+        self.assertIsNotNone(intent, "the unresolved upload was not recorded")
+        live_after_a = len(tg.sets[SET])
+
+        # The recovery source must still be there. Everything else may go.
+        staged = Path(intent["source_path"])
+        self.assertTrue(staged.is_file(),
+                        "the only image that can prove what run A uploaded was "
+                        "deleted on the way out")
+        self.assertEqual((self.emoji / "aaa.png").read_bytes(), published_before,
+                         "an unconfirmed upload must not touch the oracle")
+
+        # --- run B: a fresh process, a different image for the same ticker ----
+        fp._RUN_TOKEN = "run-b"                      # a second process's staging
+        self.addCleanup(setattr, fp, "_RUN_TOKEN", fp._RUN_TOKEN)
+        fp.to_emoji_png(art_b, fp.incoming_dir() / "aaa.png")
+        tg.unreadable.clear()
+        # (1, 0): the ticker is accounted for by the recovery, not by a new send.
+        self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (1, 0))
+
+        self.assertEqual(len(tg.sets[SET]), live_after_a,
+                         "the already-live upload was sent a second time")
+        self.assertEqual(len(tg.adds), 1)
+        # The map names run A's sticker...
+        self.assertEqual(mapping["aaa"], tg.sets[SET][-1]["custom_emoji_id"])
+        # ...and the oracle must be run A's image, never run B's.
+        oracle = (self.emoji / "aaa.png").read_bytes()
+        self.assertEqual(fp._dhash(Image.open(io.BytesIO(oracle)).convert("RGBA")),
+                         fp._dhash(Image.open(io.BytesIO(art_a)).convert("RGBA")),
+                         "the local logo is the other run's image, so the map "
+                         "and the oracle now describe different pictures")
+        # Only now may the intent be gone.
+        self.assertIsNone(json.loads(self.state.read_text("utf-8"))["in_flight"])
+
+    def test_recovery_never_promotes_an_image_it_cannot_prove(self):
+        """The retained source can still be lost -- a wiped temp, another machine.
+
+        Recovery then falls back to whatever this run staged for the ticker,
+        which is a DIFFERENT picture. The map is being pointed at the sticker
+        the original image produced, so promoting the fallback would leave
+        ticker_to_id and coins/logos/emoji/<ticker>.png describing different
+        images. Fail closed instead, and say what to do.
+        """
+        art_a = _png_bytes(_gradient())
+        art_b = _png_bytes(_gradient(reverse=True))
+        published_before = (self.emoji / "aaa.png").read_bytes()
+
+        tg = FakeTelegram(existing=2)
+        fp.to_emoji_png(art_a, fp.incoming_dir() / "aaa.png")
+        self._blind_after_apply(tg)
+        mapping: dict[str, str] = {}
+        fp.publish_logos(tg, ["aaa"], mapping)
+        intent = json.loads(self.state.read_text("utf-8"))["in_flight"]
+
+        # The retained source is gone anyway, and run B staged its own art.
+        Path(intent["source_path"]).unlink()
+        fp._RUN_TOKEN = "run-b"
+        self.addCleanup(setattr, fp, "_RUN_TOKEN", fp._RUN_TOKEN)
+        fp.to_emoji_png(art_b, fp.incoming_dir() / "aaa.png")
+        tg.unreadable.clear()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fp.publish_logos(tg, ["aaa"], mapping)
+
+        # The live sticker is still identified from the recorded hash...
+        self.assertEqual(mapping["aaa"], tg.sets[SET][-1]["custom_emoji_id"])
+        # ...but the oracle is untouched rather than replaced by run B's image.
+        self.assertEqual((self.emoji / "aaa.png").read_bytes(), published_before,
+                         "an unprovable image was promoted as the oracle")
+        self.assertIn("was NOT updated", out.getvalue(),
+                      "the operator is not told the local logo is now stale")
+
     def test_an_upload_that_never_landed_is_retried_once(self):
         """The mirror case: a recorded intent must not block a real retry."""
         tg = FakeTelegram(existing=2)

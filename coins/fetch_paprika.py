@@ -305,27 +305,60 @@ def staged_or_published(tk: str) -> Path:
     return staged if staged.is_file() else EMOJI / f"{tk}.png"
 
 
-def publish_source(staged: Path, tk: str) -> None:
-    """Promote THAT EXACT file to the shared oracle. Call under the lock.
+def publish_source(staged: Path, tk: str, want: int) -> bool:
+    """Promote THAT EXACT file to the shared oracle, if it really is the image.
 
     Takes the path the caller actually uploaded rather than re-deriving one:
     re-resolving mid-mutation is how a different image ends up promoted from
     the one whose hash was recorded and whose bytes were sent.
 
+    ``want`` is checked here rather than trusted from the caller, because the
+    recovery path can arrive with a FALLBACK source -- a different run's fresh
+    download of the same ticker -- while the map is being pointed at the sticker
+    the ORIGINAL image produced. Promoting that would leave ticker_to_id naming
+    one image and coins/logos/emoji/<ticker>.png holding another, which is
+    exactly the disagreement the oracle exists to rule out.
+
     Only after the upload is proven and the map is written -- until then the
     file would be claiming an identity for a sticker that may not exist.
     """
-    if staged.is_file() and staged.parent == incoming_dir():
-        EMOJI.mkdir(parents=True, exist_ok=True)
-        os.replace(staged, EMOJI / f"{tk}.png")
+    if not staged.is_file():
+        return False
+    try:
+        if source_dhash(staged) != want:
+            return False
+    except Exception:      # noqa: BLE001 - unreadable is not a match either
+        return False
+    EMOJI.mkdir(parents=True, exist_ok=True)
+    os.replace(staged, EMOJI / f"{tk}.png")
+    return True
 
 
-def discard_staging() -> None:
-    """Remove THIS run's staging directory. Never another run's: theirs may be
-    mid-upload, and deleting it would take the identity oracle out from under
-    a live mutation."""
+def discard_staging(keep: Path | None = None) -> None:
+    """Remove THIS run's staging, except a file an unresolved intent still needs.
+
+    Never another run's directory: theirs may be mid-upload, and deleting it
+    would take the identity oracle out from under a live mutation.
+
+    ``keep`` is the source of an in-flight intent this run could not resolve.
+    Deleting it stranded the next run: it would find the recorded path gone,
+    fall back to its OWN fresh download of the same ticker, and promote that as
+    the oracle for a sticker made from the original image. The file is kept
+    until the intent is settled, and settling it promotes or discards the file.
+    """
+    root = incoming_dir()
+    keep = keep if keep and keep.is_file() and keep.parent == root else None
+    if keep is None:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(root)
+        return
     with contextlib.suppress(OSError):
-        shutil.rmtree(incoming_dir())
+        for entry in root.iterdir():
+            if entry != keep:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
 
 
 def source_dhash(png: Path) -> int:
@@ -450,9 +483,17 @@ def _recover_in_flight(tg: Telegram, state: dict,
                                   "title": intent.get("title", "")})
         ticker_to_id[tk] = cid
         write_json_atomic(TICKER_IDS, ticker_to_id)
-        publish_source(png, tk)
         print(f"  recovered {tk}: {cid} landed before the interruption",
               flush=True)
+        # The map now names the sticker the ORIGINAL image produced, so only
+        # that image may become the oracle. `png` is a fallback whenever the
+        # staged original is gone, and a fallback is this run's own fresh
+        # download -- a different picture for the same ticker.
+        if not publish_source(png, tk, int(want)):
+            print(f"  {tk}: {EMOJI.name}/{tk}.png was NOT updated -- the image "
+                  f"that produced {cid} is no longer on disk, and publishing a "
+                  f"different one would make the map and the local logo "
+                  f"disagree. Re-fetch this ticker to refresh it.", flush=True)
     else:
         print(f"  {tk}: the unresolved upload did not land; retrying it",
               flush=True)
@@ -479,6 +520,9 @@ def publish_logos(tg: Telegram, tickers: list[str],
     """
     keywords = load_keywords(KEYWORDS_CSV)
     added = failed = 0
+    # Bound before the try so the finally can read it even when the lock is busy
+    # and the body never ran.
+    state: dict = {}
     try:
         # Pack lock first, canonical map lock second -- the project-wide order
         # (see PACK_LOCK). The map lock is held for the whole batch because the
@@ -605,7 +649,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                 # Proven and mapped: this art now identifies a LIVE sticker, so
                 # it may become the oracle the other tools trust. The same Path
                 # that was hashed and uploaded, never a freshly resolved one.
-                publish_source(png, tk)
+                publish_source(png, tk, want)
                 state["in_flight"] = None
                 write_json_atomic(STATE, state)
                 added += 1
@@ -614,9 +658,16 @@ def publish_logos(tg: Telegram, tickers: list[str],
         print(f"ERROR: {exc}", flush=True)
         return 0, len(tickers)
     finally:
-        # Only this run's directory. Anything left in it was never published,
-        # so keeping it would leave an unpublished image looking like an oracle.
-        discard_staging()
+        # Only this run's directory, and NOT the source of an intent this run
+        # could not settle. Deleting that one stranded the next run: it would
+        # find the recorded path gone, fall back to its OWN fresh download of
+        # the same ticker, and promote that as the oracle for a sticker made
+        # from the original image -- leaving the map naming one picture and the
+        # local logo holding another. Everything else here was never published,
+        # so keeping it would leave an unpublished image looking like a live one.
+        pending = (state.get("in_flight") or {}) if isinstance(state, dict) else {}
+        src = pending.get("source_path") if isinstance(pending, dict) else None
+        discard_staging(Path(src) if src else None)
     return added, failed
 
 
