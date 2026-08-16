@@ -271,6 +271,37 @@ class ResumeAfterSkippedImage(unittest.TestCase):
                                 "the recorded size came from our own arithmetic, "
                                 "not from the set")
 
+    def test_a_removal_masking_our_add_does_not_re_upload_a_live_image(self):
+        """live_n == expected is NOT proof that nothing landed.
+
+        A sticker was removed from the set and ours was added, so the size did
+        not move. The reconciler used to read arrivals by POSITION -- the slice
+        past `expected` -- which is empty here, so the content oracle was never
+        consulted at all: the run announced "did not land", left the item
+        pending and uploaded a SECOND copy of an image that was already live,
+        then exited 0.
+        """
+        bp.write_json_atomic(self.state, {
+            "base": "t", "per_set": 200, "done": [], "sent": [],
+            "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 2, "index": 1}],
+            "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
+                          "set_index": 1, "expected_before": 2},
+        })
+        # Still two stickers: one of the originals is gone and OURS took its
+        # place, so the only sticker that answers True sits INSIDE `expected`.
+        tg = self._fake_tg(live_count=2, matches=[False, True])
+        self.assertNotEqual(self._run(tg), bp.EXIT_FAILED)
+
+        uploaded = [c.args[2].stem for c in tg.add_sticker.call_args_list]
+        uploaded += [c.args[3].stem for c in tg.create_set.call_args_list]
+        self.assertNotIn("b", uploaded,
+                         "b.png is live in the set; uploading it again is the "
+                         "duplicate this reconciler exists to prevent")
+
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertIn("b", saved["done"], "our live sticker was left off the books")
+        self.assertIsNone(saved["in_flight"])
+
     def test_unexplained_drift_refuses_to_guess(self):
         # Two extra live stickers and no in-flight record: the old code silently
         # marked the first two pending images done, which is a coin-flip.
@@ -1222,6 +1253,31 @@ class _ForeignWriterServer:
         raise AssertionError(f"unexpected method {method}")
 
 
+class _LaggingReadServer(_ForeignWriterServer):
+    """The same foreign writer, but the read AFTER the retry has not caught up.
+
+    Telegram acknowledged our add; the getStickerSet that follows is served
+    before our own write is visible in it. The only identity that is new since
+    the snapshot is therefore the STRANGER's -- which is exactly what the size
+    guard has to refuse, because a foreign sticker landing during the failed
+    attempt is the situation this whole path exists for.
+    """
+
+    def __init__(self, live: int = 1, stale_from: int = 3):
+        # Probe 1 is the pre-add snapshot, 2 the applied-check, 3 the size read.
+        super().__init__(live=live)
+        self.stale_from = stale_from
+
+    def post(self, url, data=None, files=None, timeout=None):
+        if (url.rsplit("/", 1)[-1] == "getStickerSet"
+                and self.probes + 1 >= self.stale_from):
+            self.probes += 1
+            visible = [s for s in self.stickers
+                       if not s["file_unique_id"].startswith("ours")]
+            return _Resp({"ok": True, "result": {"stickers": visible}})
+        return super().post(url, data=data, files=files, timeout=timeout)
+
+
 class BookkeepingFollowsLiveState(unittest.TestCase):
     """A retried add can move the set by TWO, not one.
 
@@ -1290,6 +1346,27 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
             tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
                            bp.DEFAULT_EMOJI, "kw", expected_before=1)
         self.assertEqual(srv.adds, 2, "the add landed; it must not be re-sent")
+
+    def test_a_foreign_sticker_alone_does_not_certify_the_size(self):
+        """The guard must prove OURS is there, not that SOMETHING is.
+
+        It only ever required an identity the snapshot did not have -- which a
+        stranger's sticker satisfies, and a stranger's sticker landing during
+        the failed attempt is the very case this path exists for. So the guard
+        passed in precisely the situation it was written to catch, and a size
+        read off a set that does not contain our sticker was booked as the
+        result of our upload; every later expected_before came from it.
+        """
+        srv = _LaggingReadServer(live=1)
+        tg = self._tg(srv)
+        with mock.patch.object(bp.time, "sleep", lambda s: None):
+            with self.assertRaises(bp.AmbiguousUploadError):
+                tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
+                               bp.DEFAULT_EMOJI, "kw", expected_before=1)
+        self.assertEqual(srv.adds, 2, "the add landed; it must not be re-sent")
+        self.assertEqual(len(srv.stickers), 3,
+                         "ours really is live -- only the read back lagged, "
+                         "which is why a guessed size must not be booked")
 
     def test_an_undisturbed_add_costs_no_extra_probe(self):
         """The fix must not add a round trip per sticker."""
