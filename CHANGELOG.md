@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — eighth audit pass (1 critical)
+
+- **An unresolved upload keeps the image that can prove it.** Per-run staging
+  fixed a shared mutable path, and then discarded the whole directory on the way
+  out — including the one file the *next* run needed. A run whose upload reached
+  Telegram unconfirmed left a recorded source path pointing at nothing, so the
+  next run fell back to its own fresh download of the same ticker, correctly
+  identified the live sticker from the recorded hash, and then published that
+  fallback as the local logo: the map naming one image while
+  `coins/logos/emoji/<ticker>.png` held another. The source is now kept until
+  the upload is settled, and promotion verifies the recorded hash itself rather
+  than trusting its caller. When the original cannot be produced, nothing is
+  published and the run says the local logo is stale and how to refresh it.
+
 ### Fixed — seventh audit pass (1 critical, 1 high)
 
 - **Provider staging is private per run.** Sharing it by ticker name still meant
