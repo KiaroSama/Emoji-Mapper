@@ -478,6 +478,8 @@ class Catalog:
         but are pushed after the listed ones (their position is offset). Returns
         the number of items whose position was set.
         """
+        if not ordered_keys:
+            return 0        # otherwise the offset below rewrites every row by 0
         # Push EVERY item back first, then overwrite the listed ones. The old
         # form excluded the listed keys with a ``NOT IN (?,?,...)`` holding one
         # SQL parameter per key, which raises "too many SQL variables" past
@@ -538,35 +540,6 @@ class Catalog:
                 (base, content_key, set_name, custom_emoji_id, _now()),
             )
         self.db.commit()
-
-    def record_publications(self, rows) -> int:
-        """Batch form of :meth:`mark_uploaded`: one commit for the whole set.
-
-        ``rows`` is an iterable of ``(content_key, custom_emoji_id, base,
-        set_name)`` -- :meth:`mark_uploaded`'s own argument order, so a caller
-        looping over it can swap in this call unchanged. That loop pays a commit
-        (and its fsyncs) per emoji; a full pack is thousands of them.
-        """
-        rows = [tuple(r) for r in rows]
-        if not rows:
-            return 0
-        self.db.executemany(
-            "UPDATE items SET uploaded=1, custom_emoji_id=? WHERE content_key=?",
-            [(cid, key) for key, cid, _base, _set in rows])
-        now = _now()
-        self.db.executemany(
-            "INSERT INTO publications"
-            "(base, content_key, set_name, custom_emoji_id, uploaded_utc) "
-            "VALUES(?,?,?,?,?) "
-            "ON CONFLICT(base, content_key) DO UPDATE SET "
-            "  set_name=COALESCE(excluded.set_name, set_name),"
-            "  custom_emoji_id=COALESCE(excluded.custom_emoji_id, custom_emoji_id)",
-            # A row with no base only updates the legacy per-item columns,
-            # exactly as mark_uploaded(base=None) does.
-            [(base, key, set_name, cid, now)
-             for key, cid, base, set_name in rows if base])
-        self.db.commit()
-        return len(rows)
 
     def get(self, content_key: str) -> Item | None:
         row = self.db.execute(

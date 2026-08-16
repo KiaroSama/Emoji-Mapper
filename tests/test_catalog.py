@@ -188,49 +188,15 @@ class TestCatalogDurabilityAndScale(unittest.TestCase):
                          ["s:k2", "s:k0", "s:k1"],
                          "unlisted items keep their relative order, after")
 
-    def _publications(self, cat: Catalog) -> list[tuple]:
-        return [tuple(r)[:4] for r in cat.db.execute(
-            "SELECT base, content_key, set_name, custom_emoji_id FROM "
-            "publications ORDER BY base, content_key")]
-
-    def test_record_publications_matches_a_mark_uploaded_loop(self):
-        """It has to be a drop-in for the per-row loop, minus the per-row
-        commit (and its fsyncs) -- a full pack is thousands of rows."""
-        rows = [(f"s:k{i}", f"cid{i}", "one", "one1") for i in range(4)]
-        other = Catalog(self.tmp / "other.db", phash_threshold=-1)
-        try:
-            for cat in (self.cat, other):
-                for i in range(4):
-                    cat.add(content_key=f"s:k{i}", fmt="static",
-                            file_path=self._media(f"m{i}.png", bytes([i])))
-            for key, cid, base, set_name in rows:
-                other.mark_uploaded(key, cid, base=base, set_name=set_name)
-            self.assertEqual(self.cat.record_publications(rows), 4)
-
-            self.assertEqual(self._publications(self.cat), self._publications(other))
-            self.assertEqual([(it.content_key, it.custom_emoji_id, it.uploaded)
-                              for it in self.cat.all_items()],
-                             [(it.content_key, it.custom_emoji_id, it.uploaded)
-                              for it in other.all_items()])
-            self.assertEqual(self.cat.pending(base="one"), [])
-        finally:
-            other.close()
-
-    def test_record_publications_upserts_and_tolerates_an_empty_batch(self):
-        self.cat.add(content_key="s:k", fmt="static", file_path=self._media("m.png"))
-        self.cat.record_publications([("s:k", "cid1", "one", "one1")])
-        # A re-record must not duplicate the row nor drop the known set_name.
-        self.cat.record_publications([("s:k", "cid2", "one", None)])
-        self.assertEqual(self._publications(self.cat),
-                         [("one", "s:k", "one1", "cid2")])
-        self.assertEqual(self.cat.record_publications([]), 0)
-
-    def test_record_publications_without_a_base_only_marks_the_item(self):
-        """Mirrors mark_uploaded(base=None), used by the ingest commands."""
-        self.cat.add(content_key="s:k", fmt="static", file_path=self._media("m.png"))
-        self.cat.record_publications([("s:k", "cid", None, None)])
-        self.assertTrue(self.cat.get("s:k").uploaded)
-        self.assertEqual(self.cat.publication_bases(), [])
+    def test_empty_order_writes_nothing(self):
+        """The offset-everything form would rewrite every row by zero."""
+        for i in range(3):
+            self.cat.add(content_key=f"s:k{i}", fmt="static",
+                         file_path=self._media(f"m{i}.png", bytes([i])))
+        before = self.cat.db.total_changes
+        self.assertEqual(self.cat.set_order([]), 0)
+        self.assertEqual(self.cat.db.total_changes, before,
+                         "an empty order must not touch a single row")
 
 
 class TestCatalog(unittest.TestCase):
