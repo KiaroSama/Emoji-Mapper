@@ -30,13 +30,16 @@ import os as _bootstrap_os, sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
+import contextlib
 import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -269,31 +272,60 @@ def live_stickers(tg: Telegram, name: str) -> list[dict]:
     return tg.get_sticker_set(name).get("stickers", [])
 
 
+# Unique to THIS process, fixed for its whole life. Two fetchers running at once
+# resolve different staging paths for the same ticker, which is the point.
+_RUN_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
 def incoming_dir() -> Path:
-    """Staging directory, derived from EMOJI so one patch relocates both."""
-    return EMOJI.parent / ".incoming"
+    """This RUN's private staging directory.
+
+    A staging path shared by ticker name is still a shared MUTABLE path: the
+    download happens before any lock is held, so while this process is inside
+    publish_logos() -- hashing the file, sending its bytes, comparing the live
+    sticker against it, promoting it -- another process can replace it between
+    any two of those steps. The recorded hash, the uploaded bytes, the retry
+    proof and the published identity oracle would then describe different
+    images, and an ambiguous request could be misclassified or duplicated.
+    Per-run isolation removes the shared name entirely.
+
+    Derived from EMOJI rather than being its own constant, so relocating EMOJI
+    relocates staging with it and a test cannot write into the real tree.
+    """
+    return EMOJI.parent / ".incoming" / _RUN_TOKEN
 
 
 def staged_or_published(tk: str) -> Path:
-    """The image to send for ``tk``: this run's download if it made one.
+    """The image to send for ``tk``: THIS run's download if it made one.
 
     Falls back to the published file so a resumed run, whose staging directory
-    is long gone, still has a source.
+    belonged to a process that is gone, still has a source.
     """
     staged = incoming_dir() / f"{tk}.png"
     return staged if staged.is_file() else EMOJI / f"{tk}.png"
 
 
-def publish_source(tk: str) -> None:
-    """Promote this run's download to the shared oracle. Call under the lock.
+def publish_source(staged: Path, tk: str) -> None:
+    """Promote THAT EXACT file to the shared oracle. Call under the lock.
 
-    Only after the upload is proven and the map is written: until then the file
-    would be claiming an identity for a sticker that may not exist.
+    Takes the path the caller actually uploaded rather than re-deriving one:
+    re-resolving mid-mutation is how a different image ends up promoted from
+    the one whose hash was recorded and whose bytes were sent.
+
+    Only after the upload is proven and the map is written -- until then the
+    file would be claiming an identity for a sticker that may not exist.
     """
-    staged = incoming_dir() / f"{tk}.png"
-    if staged.is_file():
+    if staged.is_file() and staged.parent == incoming_dir():
         EMOJI.mkdir(parents=True, exist_ok=True)
         os.replace(staged, EMOJI / f"{tk}.png")
+
+
+def discard_staging() -> None:
+    """Remove THIS run's staging directory. Never another run's: theirs may be
+    mid-upload, and deleting it would take the identity oracle out from under
+    a live mutation."""
+    with contextlib.suppress(OSError):
+        shutil.rmtree(incoming_dir())
 
 
 def source_dhash(png: Path) -> int:
@@ -383,7 +415,12 @@ def _recover_in_flight(tg: Telegram, state: dict,
     if not intent:
         return None
     tk, name = intent.get("key"), intent.get("set_name")
-    png = staged_or_published(tk)
+    # The file THAT run staged, if it is still there. Its staging directory is
+    # private to that process, so nothing else can have replaced its contents;
+    # a name-based lookup would instead find whatever this run just downloaded.
+    recorded = intent.get("source_path")
+    png = Path(recorded) if recorded and Path(recorded).is_file() else \
+        staged_or_published(tk)
     # The identity recorded WITH the mutation, not re-derived from the file now.
     # Between that run and this one, main() may have re-downloaded the ticker --
     # it does so whenever the map has no entry, which is exactly the state an
@@ -413,7 +450,7 @@ def _recover_in_flight(tg: Telegram, state: dict,
                                   "title": intent.get("title", "")})
         ticker_to_id[tk] = cid
         write_json_atomic(TICKER_IDS, ticker_to_id)
-        publish_source(tk)
+        publish_source(png, tk)
         print(f"  recovered {tk}: {cid} landed before the interruption",
               flush=True)
     else:
@@ -504,9 +541,10 @@ def publish_logos(tg: Telegram, tickers: list[str],
                 # Durable record of the mutation ABOUT to run. An outcome that
                 # cannot be verified afterwards is only recoverable if the next
                 # run knows which image was sent to which set -- and WHICH IMAGE
-                # that was, not merely which path it came from. The path is
-                # shared and unlocked; the hash taken here is what still
-                # identifies this upload after another run overwrites the file.
+                # that was. `png` is this run's private staging path, resolved
+                # once here and used unchanged for the hash, the upload, the
+                # applied-check and the promotion, so no step can see a
+                # different image from the one the step before it saw.
                 try:
                     want = source_dhash(png)
                 except Exception as exc:  # noqa: BLE001 - unusable source image
@@ -518,6 +556,9 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     key=tk, operation=op, set_name=name, set_index=index,
                     expected_before=before, title=title)
                 intent["source_dhash"] = want
+                # The exact file, so a recovery run reads what was sent rather
+                # than re-resolving a name that now points somewhere else.
+                intent["source_path"] = str(png)
                 state["in_flight"] = intent
                 write_json_atomic(STATE, state)
                 try:
@@ -561,9 +602,10 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     state["sets"].append(dict(last))
                 ticker_to_id[tk] = cid
                 write_json_atomic(TICKER_IDS, ticker_to_id)
-                # Proven and mapped: this art now identifies a LIVE sticker,
-                # so it may become the oracle the other tools trust.
-                publish_source(tk)
+                # Proven and mapped: this art now identifies a LIVE sticker, so
+                # it may become the oracle the other tools trust. The same Path
+                # that was hashed and uploaded, never a freshly resolved one.
+                publish_source(png, tk)
                 state["in_flight"] = None
                 write_json_atomic(STATE, state)
                 added += 1
@@ -571,6 +613,10 @@ def publish_logos(tg: Telegram, tickers: list[str],
     except LockBusy as exc:
         print(f"ERROR: {exc}", flush=True)
         return 0, len(tickers)
+    finally:
+        # Only this run's directory. Anything left in it was never published,
+        # so keeping it would leave an unpublished image looking like an oracle.
+        discard_staging()
     return added, failed
 
 
