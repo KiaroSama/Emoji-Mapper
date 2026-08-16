@@ -39,7 +39,11 @@ source folder and the selected bot token differ.
 - Python 3.11+
 - A Telegram bot (create one with [@BotFather](https://t.me/BotFather))
 - Your numeric Telegram user id (the pack owner) — press **Start** on the bot once
-- Dependencies in `requirements.txt` (`pip install -r requirements.txt`)
+- Dependencies in `requirements.txt` (`pip install -r requirements.txt`) — this
+  is the **core** set (requests, Pillow, resvg-py) and is all the general
+  workflow needs. The coin tool `coins/remap_ids.py` additionally needs numpy,
+  which lives in `requirements-coins.txt` (a ~20 MB wheel nobody building
+  ordinary packs has to install)
 - **ffmpeg + ffprobe** on `PATH` — only required for **video** emoji (`.webm`).
   Install on Windows with `winget install Gyan.FFmpeg`. Static and animated
   workflows do not need it.
@@ -50,6 +54,8 @@ source folder and the selected bot token differ.
 # 1. Create a virtual environment and install deps
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+# working on the crypto-coin component too? add the coin extra:
+# .venv\Scripts\python.exe -m pip install -r requirements-coins.txt
 
 # 2. Configure secrets
 copy .env.example .env
@@ -94,7 +100,7 @@ to attach searchable keywords to each emoji. Without it, the file name is used.
 | `--keywords` | `auto` | keywords CSV; `auto` = coin list only for the default source |
 | `--emoji` | 🪙 | associated standard emoji |
 | `--user-id` | `PACK_OWNER_USER_ID` | numeric owner id |
-| `--per-set` | 400 | emojis per set (Telegram hard cap is 200) |
+| `--per-set` | 200 | emojis per set; 1–200 only (Telegram's cap), higher is a usage error |
 | `--limit` / `--start` | 0 / 0 | process a slice of the source |
 | `--state` | `state_<base>.json` | resume file (per pack, never clobbered) |
 | `--dry-run` | off | validate inputs without calling Telegram |
@@ -182,22 +188,24 @@ premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
   from new posts. (Bots cannot read past channel history, only new posts.)
 
 ```powershell
-.venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> option 7
+.venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> C1
 ```
 
 ## Curate panel (pick which emoji go into the pack)
 
 `panel.py` opens a local dark neon-blue web panel showing every emoji in the
-catalog as a large labelled card — static as images, video as autoplaying
-`<video>`, and **animated `.tgs` rendered and looped with Lottie** (lazy: only
-on-screen animations play, freed when scrolled away). All are selected by
-default; click a card to toggle it (deselected = excluded from the next
-publish), Shift+click for a range. Visually similar emoji are placed next to
-each other so look-alikes are quick to deselect. Click **Save**, then
+catalog as a large labelled card — static as images, video as `<video>`, and
+**animated `.tgs` rendered with Lottie**. Nothing animates until you **hover** a
+card: a grid of simultaneously looping videos and Lottie players was the main
+CPU sink, so each card paints its first frame and stays still. Off-screen Lottie
+players are destroyed entirely. All cards are selected by default; click one to
+toggle it (deselected = excluded from the next publish), Shift+click for a
+range, **drag** to set the publish order. Visually similar emoji start out next
+to each other so look-alikes are quick to deselect. Click **Save**, then
 `build_collection.py` only publishes the included items.
 
 ```powershell
-.venv\Scripts\python.exe panel.py        # or run.ps1 -> option 8
+.venv\Scripts\python.exe panel.py        # or run.ps1 -> B4
 ```
 
 ## Crypto-coin workflow (one component: `coins/`)
@@ -210,8 +218,16 @@ the shared engine at the project root (`build_pack.py`) and the coin bot
 - `coins/fetch_paprika.py` / `coins/fetch_cmc.py` — fill remaining coins from CoinPaprika / CoinMarketCap
 - `coins/build_keywords.py` — (re)build `coins/keywords.csv` from logos on disk
 - `coins/rebuild_dedup.py` — duplicate-proof full rebuild + inventory fill
+- `coins/remap_ids.py` — rebuild `ticker_to_id.json` from image content, never positions
+- `coins/enhance_map.py` / `coins/alias_map.py` — point chain-variant tickers at the base coin's id
+- `coins/verify_logos.py` — review logos against official art; fix only the tickers you name
+- `coins/write_manifests.py` — write a per-pack manifest (ticker + emoji id)
 - `coins/check_all_packs.py` — audit every pack for blank/duplicate stickers
 - `coins/run_convert.ps1` / `coins/run_rebuild_loop.ps1` — watchdog drivers for long runs
+
+Extra dependency: `coins/remap_ids.py` imports numpy —
+`pip install -r requirements-coins.txt`. Every other coin script runs on the core
+manifest alone.
 
 Convert coin logos to 100×100 PNGs (images live in `coins/logos/{svg,png}` →
 `coins/logos/emoji`):
@@ -224,7 +240,9 @@ Convert coin logos to 100×100 PNGs (images live in `coins/logos/{svg,png}` →
 Then build/rebuild with the coin bot:
 
 ```powershell
-.venv\Scripts\python.exe coins\rebuild_packs.py
+# build + rebuild the id map + send the links (DESTRUCTIVE: deletes the old packs
+# first). Subcommands: build = upload only, map = rebuild the id map, links = resend.
+.venv\Scripts\python.exe coins\rebuild_dedup.py
 ```
 
 ## Project layout
@@ -234,17 +252,21 @@ Emoji Mapper/                  # the whole project
   build_pack.py                # core engine: upload any source dir with any bot
   make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
   fetch_pack.py                # collector: download Telegram packs -> catalog
+  fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
   add_media.py                 # collector: build emoji from scratch -> catalog
   build_collection.py          # collector: publish catalog -> new per-format packs
+  panel.py                     # curate panel: pick & order what gets published
+  emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
   emojikit/                    # shared core toolkit
     logsetup.py                # UTC file logging
     media.py                   # format detect + hashing + static/video/tgs convert
     catalog.py                 # content-addressed SQLite catalog (dedup)
   run.ps1                      # launcher (single-pack + collection workflows)
+  scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   requirements.txt
   .env.example                 # configuration template
   README.md  SECURITY.md  LICENSE
-  tests/                       # unit tests + fixtures (run: python -m unittest)
+  tests/                       # unit tests + fixtures (see tests/README.md)
   coins/                       # ONE component: the crypto-coin emoji tool
     fetch_*.py                 # coin logo fetchers (CoinGecko/Paprika/CMC)
     build_keywords.py
@@ -258,6 +280,37 @@ Emoji Mapper/                  # the whole project
 
 Generated/local-only (gitignored): `logos/` (and `coins/logos/`), `build/`,
 `input/`, `collection/`, `*_state.json`, `*.filled.md`, `.env`, `secrets.md`.
+
+## Checks
+
+One command byte-compiles every source file, lints it, and runs the whole unit
+suite — the same one CI runs, so local and CI results cannot drift:
+
+```powershell
+python -m pip install ruff   # once; ruff is not in the runtime manifests
+.\scripts\check.ps1
+.\run.ps1 -Check      # separate: environment doctor (venv/deps/ffmpeg/.env)
+```
+
+Lint is `ruff check .` with **no** arguments: `ruff.toml` at the repo root owns
+the rule set, so nothing can diverge between CI and a local run. That set is
+deliberately narrow — ruff's default rules plus `E402`, `BLE001`, `B` and
+`RUF100` — because the source already carried ~120 `# noqa: E402` /
+`# noqa: BLE001` comments written against a linter that was never configured.
+Enabling exactly the codes those comments name is what makes them mean
+something, and `RUF100` fails a `# noqa` that no longer suppresses anything, so
+they cannot rot again.
+
+Running the suite by hand? Use exactly this form:
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"
+```
+
+`-t .` is not cosmetic. Without it the tests directory becomes the top level,
+modules load as `test_x` instead of `tests.test_x`, and `tests/__init__.py` —
+which scrubs credentials out of the environment and refuses non-loopback sockets
+— never runs. See [`tests/README.md`](tests/README.md).
 
 ## Security
 
