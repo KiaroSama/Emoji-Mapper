@@ -857,6 +857,18 @@ class CliContract(_CatalogFixture):
             EXIT_USAGE)
 
 
+class OccupiedNameTG(FakeTG):
+    """The set name is already taken by a LIVE set, so the publisher adopts it.
+
+    Adoption is the only route to the reconcile that runs inside the upload
+    try-block -- the one place a drift refusal used to be caught as an upload
+    that merely failed.
+    """
+
+    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+        raise RuntimeError("BAD_REQUEST: sticker set name is already occupied")
+
+
 class PublishThroughMain(_CatalogFixture):
     """The real entry point: publish, then resume without re-uploading."""
 
@@ -952,6 +964,37 @@ class PublishThroughMain(_CatalogFixture):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(self._run(tg), EXIT_PARTIAL)
         self.assertEqual(tg.uploaded, ["item0"])
+
+    # ----- OI-1: a drift REFUSAL is never a retryable upload failure ------ #
+    def test_drift_while_adopting_a_set_stops_the_run_instead_of_retrying(self):
+        """The reconcile of an adopted set runs INSIDE the upload try-block, so
+        its refusal used to arrive at the generic "upload failed (will retry)"
+        handler. Carrying on rolled ``set_index`` back over the set record just
+        appended, adopted the same name again and wrote TWO sets under one name
+        -- state the next run's ``load_state`` refuses outright, so the pack
+        family could never be published again.
+        """
+        # A live set already holds the name, and its one sticker cannot be
+        # fetched: adoption succeeds, then the reconcile must refuse rather than
+        # guess whether that position is ours.
+        tg = OccupiedNameTG(sets={SET: [_sticker("GHOST", "ghost-cid")]})
+        tg.undownloadable = {"GHOST"}
+        out = io.StringIO()
+        with self.assertLogs("build_collection", "WARNING") as logs, \
+                redirect_stdout(out):
+            self.assertEqual(self._run(tg), EXIT_FAILED)
+
+        logged = "\n".join(logs.output)
+        # Pins the branch under test: only reconcile_set's unreadable-position
+        # refusal words it this way, and it is reached from the adopt path.
+        self.assertIn("Refusing to decide whether it is ours", logged)
+        self.assertNotIn("will retry", logged)
+        self.assertNotIn("DONE", out.getvalue())    # stopped, not "finished"
+
+        state = json.loads(
+            bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual([s["name"] for s in state["sets"]], [SET])
+        bc.load_state(self.data, "pk")              # a later run can still start
 
     def test_skipped_blank_media_is_not_counted_as_a_failure(self):
         # A permanent, recorded exclusion is not retryable work: the run that

@@ -122,8 +122,20 @@ class StateError(RuntimeError):
     """A publish plan/state file exists but cannot be used as it stands."""
 
 
-class SetDrift(RuntimeError):
-    """A live set no longer matches the manifest this publisher recorded."""
+class SetDrift(Exception):
+    """A live set no longer matches the manifest this publisher recorded.
+
+    Deliberately NOT a ``RuntimeError``, unlike every failure a Telegram call
+    raises: this is a REFUSAL, not a call that failed. As a RuntimeError it was
+    swallowed by the generic upload handler in :func:`publish_format` -- logged
+    as "upload failed (will retry)" and counted as retryable work -- so a
+    refusal to publish into a drifted set became a carry-on: the loop rolled
+    ``set_index`` back over a set record it had already appended and adopted the
+    same name again, leaving two sets under one name in the state file. The next
+    run's :func:`load_state` then refused that file and the whole pack family
+    could no longer be published at all. Only :func:`main` catches this, which
+    is the one place that can turn it into a non-retryable stop.
+    """
 
 
 def _state_path(data_dir: Path, base: str) -> Path:
