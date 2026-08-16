@@ -188,10 +188,15 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         tg.add_sticker.return_value = None
         tg.create_set.return_value = None
         tg.send_message.return_value = None
-        if isinstance(matches, list):
-            # Per-sticker verdicts, in the order the reconciler examines them:
-            # "which of the arrivals is ours" is the question, so a fake that
-            # can only answer one way for all of them cannot pose it.
+        if isinstance(matches, dict):
+            # Keyed by file_unique_id: the ONLY form that can prove WHICH
+            # sticker was compared against the source. `return_value` is
+            # argument-insensitive and the list form is merely call-order
+            # sensitive, so both answer "did it ask?" rather than "did it ask
+            # about the right one?" -- which is the whole question here.
+            tg._sticker_matches.side_effect = (
+                lambda st, src: matches.get(str(st.get("file_unique_id"))))
+        elif isinstance(matches, list):
             tg._sticker_matches.side_effect = list(matches)
         else:
             tg._sticker_matches.return_value = matches
@@ -260,8 +265,9 @@ class ResumeAfterSkippedImage(unittest.TestCase):
             "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
                           "set_index": 1, "expected_before": 0},
         })
-        # Two stickers arrived; only the SECOND is ours.
-        tg = self._fake_tg(live_count=2, matches=[False, True])
+        # Two stickers arrived; only the SECOND is ours -- keyed by identity, so
+        # the assertion is about WHICH sticker matched, not merely that one did.
+        tg = self._fake_tg(live_count=2, matches={"f0": False, "f1": True})
         self.assertNotEqual(self._run(tg), bp.EXIT_FAILED)
         saved = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertIn("b", saved["done"], "our live sticker was left off the books")
@@ -532,6 +538,46 @@ class PublisherLock(unittest.TestCase):
         self.assertIn("other", self.lock.read_text(encoding="utf-8"),
                       "the other run's claim was deleted")
 
+    def test_a_claim_overwritten_the_instant_it_lands_is_not_ours(self):
+        """The last reclaim guard: read your own token back.
+
+        The compare-and-delete and the O_EXCL loser check each close one
+        ordering, but neither is atomic with respect to the OTHER process's
+        whole sequence — a run can create the lock and have it replaced before
+        it ever uses it. Reading the token back is what catches that, and a
+        mutation test showed nothing covered it: deleting the check left the
+        entire suite green.
+        """
+        self._make_stale()
+        real_open, real_close = bp.os.open, bp.os.close
+        state = {"opens": 0, "claim_fd": None}
+
+        def counting_open(path, flags, *a, **kw):
+            state["opens"] += 1
+            fd = real_open(path, flags, *a, **kw)
+            # Open 1 is the initial attempt (fails: the stale lock is there);
+            # open 2 is the reclaim's successful create.
+            if state["opens"] == 2 and Path(path) == self.lock:
+                state["claim_fd"] = fd
+            return fd
+
+        def replace_once_our_claim_is_written(fd):
+            real_close(fd)
+            # Only now is our record on disk and the handle gone: the other run
+            # replaces it before we ever look at it again.
+            if fd == state["claim_fd"]:
+                state["claim_fd"] = None
+                self.lock.write_text('{"token": "someone-else", "pid": 1}',
+                                     encoding="utf-8")
+
+        with mock.patch.object(bp.os, "open", counting_open), \
+                mock.patch.object(bp.os, "close", replace_once_our_claim_is_written):
+            with self.assertRaises(bp.LockBusy):
+                with bp.exclusive_lock(self.lock, stale_after=3600):
+                    self.fail("proceeded holding a lock another run had taken")
+        self.assertIn("someone-else", self.lock.read_text(encoding="utf-8"),
+                      "the other run's record was clobbered on the way out")
+
     def test_the_loser_of_a_reclaim_race_gets_the_ordinary_busy_answer(self):
         """Both delete before either creates: O_EXCL decides, the loser backs off.
 
@@ -556,6 +602,61 @@ class PublisherLock(unittest.TestCase):
             with self.assertRaises(bp.LockBusy):
                 with bp.exclusive_lock(self.lock, stale_after=3600):
                     self.fail("claimed a lock another run had just taken")
+
+
+class PostAddSizeIsMeasured(unittest.TestCase):
+    """`_live_after_add` books a size only if the read-back holds OUR sticker.
+
+    It runs when a retried add succeeded, so the set may have grown by two: the
+    failed attempt let a foreign sticker in, then our retry landed. Booking a
+    bare `len()` there is what put every later `expected_before` out by one, and
+    a MISSING set read as ZERO made the run invent a second pack and exit 0.
+    A mutation test showed nothing covered the requirement.
+    """
+
+    TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def _tg(self, stickers, *, matches):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (True, {"stickers": stickers})
+        tg._sticker_matches = lambda st, src: matches.get(
+            str(st.get("file_unique_id")))
+        return tg
+
+    def _fired_check(self, tg, known_before):
+        check = tg._added_check("s1", 1, known_before=known_before,
+                                source=Path("whatever.png"))
+        check.fired = True          # a live probe was needed: the retry path
+        return check
+
+    def test_a_foreign_arrival_alone_does_not_book_a_size(self):
+        live = [{"file_unique_id": "old"}, {"file_unique_id": "THEIRS"}]
+        tg = self._tg(live, matches={"THEIRS": False})
+        with self.assertRaises(bp.AmbiguousUploadError):
+            tg._live_after_add("s1", self._fired_check(tg, {"old"}))
+
+    def test_an_unverifiable_arrival_does_not_book_a_size(self):
+        live = [{"file_unique_id": "old"}, {"file_unique_id": "UNREADABLE"}]
+        tg = self._tg(live, matches={"UNREADABLE": None})
+        with self.assertRaises(bp.AmbiguousUploadError):
+            tg._live_after_add("s1", self._fired_check(tg, {"old"}))
+
+    def test_our_sticker_present_books_the_true_size(self):
+        """Positive control, and the case the whole path exists for: the set
+        grew by TWO -- a stranger's sticker, then our retry."""
+        live = [{"file_unique_id": "old"}, {"file_unique_id": "THEIRS"},
+                {"file_unique_id": "OURS"}]
+        tg = self._tg(live, matches={"THEIRS": False, "OURS": True})
+        self.assertEqual(tg._live_after_add("s1", self._fired_check(tg, {"old"})), 3)
+
+    def test_a_missing_set_is_never_booked_as_zero(self):
+        tg = bp.Telegram(self.TOKEN)
+        tg.probe_sticker_set = lambda name: (True, None)      # MISSING
+        check = tg._added_check("s1", 1, known_before={"old"},
+                                source=Path("whatever.png"))
+        check.fired = True
+        with self.assertRaises(bp.AmbiguousUploadError):
+            tg._live_after_add("s1", check)
 
 
 class TriStateLiveReads(unittest.TestCase):
@@ -619,6 +720,59 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
         tg.probe_set_state.return_value = (bp.SetState.MISSING, None)
         tg.send_message.return_value = None
         return tg
+
+    def test_a_strangers_set_is_not_adopted_after_an_ambiguous_create(self):
+        """The IN-RUN twin of the restart adoption, and it had no test at all.
+
+        A set of the right name holding one sticker is a SHAPE, not an identity:
+        it may be a stranger's. Adopting on the count records a foreign pack as
+        ours, marks the item done though it was never uploaded, publishes the
+        link, and every later add writes our stickers into someone else's set.
+        A mutation test proved the content check here was uncovered — removing
+        it left the whole 530-test suite green.
+        """
+        tg = self._tg()
+        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        # A set of that name exists with exactly one sticker -- but it is not ours.
+        tg.probe_set_state.return_value = (
+            bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "STRANGER"}]})
+        tg._sticker_matches.return_value = False
+
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(saved["sets"], [], "a stranger's pack was recorded as ours")
+        self.assertEqual(saved["done"], [], "an item was marked done unuploaded")
+        self.assertIsNotNone(saved["in_flight"],
+                             "the unresolved create must stay on the books")
+        tg.send_message.assert_not_called()      # no link for a pack we do not own
+
+    def test_an_unverifiable_set_is_not_adopted_after_an_ambiguous_create(self):
+        """`_sticker_matches` returning None is "could not look", not "it is ours"."""
+        tg = self._tg()
+        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.probe_set_state.return_value = (
+            bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "UNREADABLE"}]})
+        tg._sticker_matches.return_value = None
+
+        self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(saved["sets"], [])
+        self.assertIsNotNone(saved["in_flight"])
+
+    def test_our_own_set_is_still_adopted_after_an_ambiguous_create(self):
+        """The positive control: proving identity must not block the real case."""
+        tg = self._tg()
+        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        sset = {"stickers": [{"file_unique_id": "OURS"}]}
+        tg.probe_set_state.return_value = (bp.SetState.EXISTS, sset)
+        tg.probe_sticker_set.return_value = (True, sset)
+        tg.add_sticker.return_value = None
+        tg._sticker_matches.return_value = True
+
+        self._run(tg)
+        saved = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual([s["name"] for s in saved["sets"]], ["t1_by_bot"])
+        self.assertIsNone(saved["in_flight"], "a proven create stays unresolved")
 
     def test_ambiguous_add_stops_before_the_next_item(self):
         tg = self._tg()
