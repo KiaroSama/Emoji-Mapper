@@ -48,7 +48,8 @@ Emoji Mapper/
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
   coins/                   the crypto-coin component (see §7)
   assets/vendor/           vendored Lottie player for the panel (offline)
-  tests/                   unit tests + fixtures (python -m unittest)
+  scripts/check.ps1        byte-compile + full unit suite (CI runs this too)
+  tests/                   unit tests + fixtures (see tests/README.md and §10)
   docs/GUIDE.md            this file
   .env.example             config template
   collection/              (gitignored) catalog.db + media/ + manifests/ + state
@@ -66,7 +67,12 @@ Generated/local-only (gitignored): `collection/`, `logs/`, `build/`, `input/`,
 ```powershell
 # 1. Create the virtual environment (Python 3.11 is the supported runtime)
 py -3.11 -m venv .venv
+# Core manifest: requests + Pillow + resvg-py. Everything except one coin tool
+# runs on this alone.
 .venv\Scripts\python.exe -m pip install -r requirements.txt
+# Coin extra: numpy, imported only by coins/remap_ids.py (~20 MB wheel + BLAS,
+# so it is not in the core set). Skip it unless you work on coins/.
+.venv\Scripts\python.exe -m pip install -r requirements-coins.txt
 
 # 2. Configure secrets
 copy .env.example .env
@@ -79,10 +85,21 @@ copy .env.example .env
 PACK_OWNER_USER_ID=<your numeric Telegram id>   # owns every created set; press Start on each bot once
 TELEGRAM_BOT_TOKEN=<coin bot token>
 GENERAL_BOT_TOKEN=<general bot token>
-GENERAL_BOT_USERNAME=GodVerifyEmojiMapperbot
-GENERAL_BOT_NAME=GodVerify Emoji Mapper
+BOT_ALLOWED_USER_IDS=<optional: extra ids allowed to use emoji_bot.py>
+PACK_LINKS_CHAT_ID=<optional: channel that receives finished-pack links>
+EMOJI_LOG_RETENTION_DAYS=30    # optional: prune logs/ older than N days (0 = keep all)
+EMOJI_FFMPEG_TIMEOUT=300       # optional: seconds per ffmpeg/ffprobe child
 CMC_API_KEY=<optional CoinMarketCap key, only for coins/fetch_cmc.py>
 ```
+
+That is the complete set of variables any code reads, plus two environment-only
+switches used for testing: `TELEGRAM_API_BASE` (Bot API endpoint override,
+default `https://api.telegram.org`) and `EMOJI_MAPPER_NO_DOTENV=1` (makes
+`build_pack.load_env()` a no-op; it is read *before* `.env`, so it only works
+from the real environment — the test suite sets it there). There is no
+`GENERAL_BOT_USERNAME` / `GENERAL_BOT_NAME`: every tool takes the bot's username
+from `getMe` at runtime, so a stale copy can never name the wrong bot in a set
+name.
 
 External tool: **ffmpeg + ffprobe** on `PATH` are required **only** for video
 emoji. Install on Windows: `winget install Gyan.FFmpeg`.
@@ -100,8 +117,8 @@ Right-click → *Run with PowerShell*, or `.\run.ps1`. It shows a centered banne
 (pink title + full-width rule + yellow `Logging to: ...`), quietly prepares
 `.venv` (env/Python/ffmpeg OK lines go to the **log only**, keeping the console
 clean), then shows a **colored, sectioned** menu. Sections are lettered in order
-(**A** = Build, **B** = Collection, **C** = Bot) and each has its own numbering,
-so keys stay unique — type e.g. `A1`, `B3`, `C1`:
+(**A** = Build, **B** = Collection, **C** = Bot, **D** = Maintenance) and each
+has its own numbering, so keys stay unique — type e.g. `A1`, `B3`, `D1`:
 
 ```
                               Emoji Mapper
@@ -117,10 +134,13 @@ Collection (multi-format, duplicate-proof)
   B1) Collect emoji from existing packs (download)
   B2) Add media from a folder (build from scratch)
   B3) Publish the collection into new packs
-  B4) Curate panel - pick which emoji to include (web)
+  B4) Open web panel to pick & reorder emoji (browser)
 
 Bot
   C1) Run the Emoji Mapper bot (premium-emoji ID extractor)
+
+Maintenance
+  D1) Run the project checks (byte-compile + unit tests)
 
 Select {quit=exit}:
 ```
@@ -262,8 +282,14 @@ This is the lookup table consumers use. **Always derive it from image content,
 not from positions** (a historical position-based bug scrambled it):
 
 ```powershell
-# Rebuild the map by matching every LIVE sticker image to its source logo:
-.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "PATH\to\emoji" --apply [--max-distance 200]
+# 1) Calibrate: run WITHOUT --apply and pick a cutoff from the reported distances.
+.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "PATH\to\emoji"
+# 2) Apply. --max-distance is REQUIRED with --apply (must be > 0): an uncalibrated
+#    run would accept a nearest-but-wrong match and overwrite the map with it.
+#    --min-margin (default: --max-distance) additionally rejects a match whose
+#    runner-up is nearly as close. A refused --apply writes ticker_to_id.candidate.json
+#    instead, for review.
+.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "PATH\to\emoji" --max-distance 200 --apply
 
 # Fill chain-variant / alias tickers (etharb->eth, bnbbsc->bnb, usdc.e, ...):
 .venv\Scripts\python.exe coins\enhance_map.py          # strip chain suffixes -> base id
@@ -335,13 +361,44 @@ split across multiple messages (each under 4096 chars).
 ## 10. Testing, CI, and Git
 
 ```powershell
-.venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"   # unit tests
-.\run.ps1 -Check                                                        # env doctor
+.venv\Scripts\python.exe -m pip install ruff                       # once: linter, not a runtime dep
+.\scripts\check.ps1                                                # compile + lint + full suite
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"   # the suite alone
+.\run.ps1 -Check                                                   # env doctor (venv/deps/ffmpeg/.env)
 ```
 
-CI (`.github/workflows/ci.yml`, Python 3.11): installs deps + ffmpeg,
-byte-compiles, import smoke test, unit tests, and an offline `build_pack`
-dry-run. Run these locally before pushing.
+`scripts\check.ps1` is the single command CI and a developer both run, so the two
+cannot drift into different invocations. Three stages, in order: `compileall`,
+`ruff check .`, then the suite — the cheap gates first, so a syntax or lint
+error fails in seconds instead of after ~75 s of tests. It resolves the repo
+root from its own location (any cwd, spaces in the path are fine), prefers the
+repo `.venv` for both Python and ruff, bounds each step with a wall-clock
+ceiling (`-TimeoutSeconds`, default 1800; a step that exceeds it is killed and
+reported as exit 124), and returns a real exit code. `-Python <path>` overrides
+the interpreter. It is also `run.ps1` menu entry **D1**.
+
+**Lint.** `ruff check .` takes no arguments on purpose: `ruff.toml` at the repo
+root owns the rule set and the exclusions, so a `--select` on one command line
+is all it takes for CI and a local run to start linting different things. The
+set is deliberately narrow — ruff's default rules plus `E402`, `BLE001`, `B` and
+`RUF100`. The reason is historical: the source already carried ~120
+`# noqa: E402` / `# noqa: BLE001` comments written against a linter that was
+never configured, so they suppressed nothing and were never checked. Enabling
+exactly the codes they name is what makes them meaningful, and `RUF100` (unused
+`noqa`) is what stops them rotting back into decoration. Never make the stage
+green with `--exit-zero` or `continue-on-error`.
+
+**`-t .` is required, not cosmetic.** Without it the tests directory becomes the
+top level, modules load as `test_x` instead of `tests.test_x`, and
+`tests/__init__.py` — which scrubs every credential-shaped variable out of the
+environment and refuses non-loopback sockets — never runs.
+`tests.test_entry_points.SuiteIsHermetic` fails loudly when the suite is started
+without it. Details in [`tests/README.md`](../tests/README.md).
+
+CI (`.github/workflows/ci.yml`, Python 3.11 **and** 3.12): installs both
+dependency manifests + ruff + ffmpeg, runs `ruff check .`, the import smoke
+test, then `scripts/check.ps1` (compile + lint + suite, `shell: pwsh`), then an
+offline `build_pack` dry-run. Run `scripts\check.ps1` locally before pushing.
 
 Git: work is committed in small logical commits and pushed to `main` on
 `KiaroSama/Emoji-Mapper`. Never commit `.env`, `secrets.md`, `collection/`,
@@ -369,9 +426,9 @@ Git: work is committed in small logical commits and pushed to `main` on
    catalogs stay fast. Verify in a real browser before claiming done.
 7. **External libs/APIs**: check current docs before coding (the Telegram Bot
    API and any JS player evolve).
-8. **Always**: add/maintain tests, run the unit suite + a real run, then commit
-   and **push to keep GitHub in sync**, and **update this guide** with any new
-   command 0 → 100.
+8. **Always**: add/maintain tests, run `.\scripts\check.ps1` (never a hand-rolled
+   `unittest` invocation — see §10) plus a real run, then commit and **push to
+   keep GitHub in sync**, and **update this guide** with any new command 0 → 100.
 
 ---
 
@@ -444,7 +501,7 @@ Examples:
 | `--keywords` | `auto` | keywords CSV; `auto` = coin `keywords.csv` only for the default source. |
 | `--emoji` | `🪙` | Associated standard emoji. |
 | `--user-id` | `PACK_OWNER_USER_ID` | Numeric owner id. |
-| `--per-set` | `400` | Emojis per set (Telegram hard cap is **200**; keep ≤200). |
+| `--per-set` | `200` | Emojis per set. Accepted range is **1–200** (Telegram's cap); anything larger exits 2 with a usage error. |
 | `--limit` / `--start` | `0` / `0` | Process a slice of the source. |
 | `--state` | `state_<base>.json` | Resume file (per pack, never clobbered). |
 | `--dry-run` | off | Validate inputs without calling Telegram. |
@@ -540,7 +597,7 @@ emoji.
 | `--formats` | `static,video,animated` | Which formats to publish, in order. |
 | `--per-set` | `200` | Emojis per set. |
 | `--data-dir` | `collection` | Catalog/media directory. |
-| `--brand-logo` | God Verify logo PNG | First-emoji brand logo (Emoji Mapper bot only). |
+| `--brand-logo` | `assets/emoji-mapper-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
 | `--dry-run` | off | Show the plan without uploading. |
 
@@ -549,8 +606,9 @@ published. Per-format sets, drift-proof resume, per-pack manifests.
 
 **Brand logo (first emoji of every set).** When publishing with the
 `@GodVerifyEmojiMapperbot` bot, the God Verify logo is inserted as the **first
-emoji of every set** (`--brand-logo`, default
-`F:\documents\My Logo\God Verify\God Verify Emoji Logo.png`). Since Bot API 7.2
+emoji of every set** (`--brand-logo`, default `BRAND_LOGO_DEFAULT` in
+`build_collection.py` = the repo's own `assets/emoji-mapper-logo.png`, so a
+fresh clone works with no machine-specific path). Since Bot API 7.2
 (March 2024) a single custom-emoji set may contain **mixed formats**, so the
 logo is always a **static** 100x100 PNG and leads a static, video *or* animated
 set alike (verified live). The `@GodVerifyCoinEmojiMapperbot` coin bot is exempt.
@@ -596,8 +654,9 @@ logo file is missing, the card is simply not shown.
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One
-instance at a time (two pollers cause Telegram 409 Conflict). Replies with two
-collapsed quotes (emoji+ID, and IDs-only) using tap-to-copy `<code>` (see §8/§19).
+instance at a time (two pollers cause Telegram 409 Conflict). Each reply is a
+**single** collapsed quote of `emoji + ID` (per-ID tap-to-copy via `<code>`)
+plus `copy_text` “Copy” button(s) underneath — not two quotes (see §8/§19).
 
 ### 12.8 `coins/` commands
 
@@ -607,8 +666,8 @@ collapsed quotes (emoji+ID, and IDs-only) using tap-to-copy `<code>` (see §8/§
 | `coins\fetch_paprika.py` | Fill remaining coins from CoinPaprika. |
 | `coins\fetch_cmc.py` | Fill remaining coins from CoinMarketCap (needs `CMC_API_KEY`). |
 | `coins\build_keywords.py` | (Re)build `keywords.csv` from logos on disk. |
-| `coins\rebuild_dedup.py [map\|links\|build]` | Duplicate-proof rebuild; `map` re-derives the id map; `links` resends links; `build` uploads only. |
-| `coins\remap_ids.py --emoji-dir DIR [--apply] [--max-distance N]` | Rebuild `ticker_to_id.json` by image content (drift-proof). |
+| `coins\rebuild_dedup.py [all\|build\|map\|links]` | Default `all` = **delete the old packs** + build + map + links (DESTRUCTIVE); `build` uploads only; `map` re-derives the id map; `links` resends links. |
+| `coins\remap_ids.py --emoji-dir DIR [--max-distance N --apply]` | Rebuild `ticker_to_id.json` by image content (drift-proof). `--apply` requires `--max-distance > 0`; needs numpy (`requirements-coins.txt`). |
 | `coins\verify_logos.py --emoji-dir DIR [--fix --only a,b]` | Review logos vs official; fix only listed tickers. |
 | `coins\check_all_packs.py` | Audit all packs for blank/duplicate stickers. |
 | `coins\write_manifests.py --out-dir DIR` | Write per-pack manifest `.md` files. |
@@ -1001,6 +1060,11 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 | `GET /lottie/<key>` | The `.tgs` gunzipped to Lottie **JSON** (for the player). |
 | `GET /static/<file>` | Vendored assets (the Lottie player), traversal-guarded. |
 | `POST /api/save` | Body `{"excluded":[keys]}` → `catalog.set_inclusion(...)`. |
+| `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
+
+Both POST routes are mutation endpoints and are guarded: loopback-only `Host`/
+`Origin`, a per-run token sent as `X-Panel-Token`, an exact-permutation check on
+the order, a content-type check and a body cap (`tests/test_panel.py`).
 
 Ordering: `order_by_similarity` groups items by format (static, then video, then
 animated) and within each runs a greedy nearest-neighbour walk on the perceptual
@@ -1017,12 +1081,17 @@ Front-end:
   in `localStorage`) to inspect tricky emoji on any background.
 - All selected by default. Click toggles; **Shift+click** toggles a range.
   Header buttons: Select all / Deselect all / Invert / Save.
-- Static → `<img loading="lazy">`; video → `<video autoplay muted loop>`;
-  animated → a Lottie container loaded **lazily** by an `IntersectionObserver`
-  (250-px root margin) and **destroyed** when scrolled off-screen, so a catalog
-  with hundreds of animations stays fast (verified: ~60 active near view, 0 when
-  off-screen).
-- `prefers-reduced-motion` is respected (animated shows the first frame stopped).
+- **Nothing plays until you hover it.** A grid of simultaneously playing videos
+  and Lottie players was the main CPU sink, so every card paints a still first
+  frame instead: static → `<img loading="lazy">`; video → `<video>` with
+  `preload="metadata"` and `#t=0.001` (muted, looping, but **not** autoplaying),
+  playback starting on hover; animated → a Lottie SVG player created
+  `autoplay:false` + `goToAndStop(0)`.
+- Only `.tgs` needs an observer: its player is built by an `IntersectionObserver`
+  (200-px root margin) when the card nears the viewport and **destroyed** when it
+  leaves, so a catalog with hundreds of animations stays fast. Images and video
+  are handled natively (`loading="lazy"` / `preload="metadata"`).
+- `prefers-reduced-motion` is respected (hover never starts playback).
 
 The Lottie player is **vendored** at `assets/vendor/lottie_svg.min.js` (no
 runtime CDN), so the panel works offline.
@@ -1050,7 +1119,9 @@ runtime CDN), so the panel works offline.
 | `the pending replacement … was recorded against map A, not this run's map B` | A `verify_logos --fix` was interrupted; its intent is bound to the exact `--map`/`--state` it started against. | Re-run with the **original** `--map`/`--state` so it can be resolved, or review the pack and delete `coins\verify_logos_intent.json` deliberately. |
 | `… exists but its first sticker is not <x>.png; refusing to adopt` | A set of that name exists but this run did not create it (leftover family, or someone else's). Existence is not identity. | Rename the family, or delete the stale set, then re-run. |
 | `position N could not be examined …` from `build_collection` | A live sticker could not be downloaded or hashed, so the publisher cannot tell whether it is one of ours. Guessing "not ours" is what publishes a second copy. | Usually transient — re-run. If it repeats on **video or animated** sets, ffmpeg is off PATH: content hashing needs it, and without it every such sticker is unexaminable. Install ffmpeg (see Prerequisites). |
-| CI red on push | A check failed (install/compile/import/test/dry-run). | `gh run view <id> --log-failed`; fix; the matrix is Python 3.11 only. |
+| CI red on push | A check failed (install/import/checks/dry-run). | `gh run view <id> --log-failed`; reproduce locally with `.\scripts\check.ps1`; the matrix is Python 3.11 **and** 3.12, so check which one failed. |
+| `ModuleNotFoundError: No module named 'numpy'` from `coins\remap_ids.py` | numpy is the coin extra, not part of the core manifest. | `pip install -r requirements-coins.txt`. |
+| `SuiteIsHermetic ... the hermetic guard was NOT active` | The suite was started without `-t .`, so `tests/__init__.py` never ran. | Use `.\scripts\check.ps1`, or the exact form the failure message prints. |
 
 ---
 
@@ -1213,10 +1284,12 @@ or `.venv/bin/python` (macOS/Linux).
 ```powershell
 # --- setup ---
 py -3.11 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt         # core
+.venv\Scripts\python.exe -m pip install -r requirements-coins.txt   # only for coins/remap_ids.py
 copy .env.example .env            # then edit tokens + owner id
 .\run.ps1                         # launcher menu
 .\run.ps1 -Check                  # env doctor (CI-style)
+.\scripts\check.ps1               # byte-compile + full unit suite
 
 # --- single pack (general) ---
 $PY make_emoji_pngs.py --in input\set --out build\set
@@ -1248,7 +1321,8 @@ $PY coins\verify_logos.py --emoji-dir "F:\...\emoji" --fix --only sol,xrp
 $PY coins\write_manifests.py --out-dir "F:\...\@GodVerify Crypto Emoji"
 
 # --- tests / CI-locally ---
-$PY -m unittest discover -s tests -t . -p "test_*.py"
+.\scripts\check.ps1                                     # what CI runs (compile + suite)
+$PY -m unittest discover -s tests -t . -p "test_*.py"   # -t . is REQUIRED (see §10)
 $PY -m compileall -q .
 $PY -c "import build_pack, make_emoji_pngs, fetch_pack, fetch_emoji_ids, add_media, build_collection, emoji_bot, panel"
 
@@ -1313,8 +1387,8 @@ DUPLICATE image groups: 0 (extra duplicate stickers: 0)
 - **Never** commit `.env`, `secrets.md`, `collection/`, `logs/`, tokens.
 - **Logging** is mandatory for executable scripts via `emojikit.logsetup`
   (UTC file logs; secrets redacted).
-- **Verify before claiming done:** unit tests + a real run; for UI, a real
-  browser (Playwright) at the relevant breakpoints.
+- **Verify before claiming done:** `.\scripts\check.ps1` + a real run; for UI, a
+  real browser (Playwright) at the relevant breakpoints.
 - **Sync:** push to `main` and keep this guide + `README.md` current.
 
 *This guide is the single source of truth for how Emoji Mapper works. If code

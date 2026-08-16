@@ -25,16 +25,24 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Both manifests: the core one, plus the coin extra (numpy). Not optional
+      # here -- tests/test_entry_points.py imports EVERY discovered entry point,
+      # and coins/remap_ids.py imports numpy at module level.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-coins.txt
+          pip install ruff
 
       - name: Install ffmpeg (for video emoji tests)
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Byte-compile all sources
-        run: python -m compileall -q .
+      # Before the suite: a syntax-level finding should fail in seconds, not
+      # after 70 s of tests. No arguments -- ruff.toml owns the rule set, and a
+      # --select here is how CI and a developer's local run start linting two
+      # different things. scripts/check.ps1 runs the identical command.
+      - name: Lint (ruff)
+        run: ruff check .
 
       # The hand-written module list this replaced could not go stale loudly:
       # coins/verify_logos.py imported a name build_pack no longer exported and
@@ -44,13 +52,18 @@ jobs:
       - name: Import smoke test (all entry points, discovered)
         run: python -m unittest tests.test_entry_points -v
 
-      # -t . is REQUIRED, not cosmetic: without it the tests directory becomes
-      # the top-level, modules load as `test_x` instead of `tests.test_x`, and
-      # tests/__init__.py -- which scrubs credentials and blocks the network --
-      # never runs. tests.test_entry_points.SuiteIsHermetic fails loudly if the
-      # suite is ever started without it.
-      - name: Unit tests
-        run: python -m unittest discover -s tests -t . -p "test_*.py"
+      # Byte-compile + the full suite, through the same script a developer runs,
+      # so CI and local runs cannot drift into different invocations. The script
+      # owns the `-t .` form, which is REQUIRED, not cosmetic: without it the
+      # tests directory becomes the top level, modules load as `test_x` instead
+      # of `tests.test_x`, and tests/__init__.py -- which scrubs credentials and
+      # blocks the network -- never runs. tests.test_entry_points.SuiteIsHermetic
+      # fails loudly if the suite is ever started without it.
+      - name: Project checks (compile + unit tests)
+        shell: pwsh
+        run: |
+          ./scripts/check.ps1
+          exit $LASTEXITCODE
 
       - name: build_pack dry-run (no network)
         run: |
