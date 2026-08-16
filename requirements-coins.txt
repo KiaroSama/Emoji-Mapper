@@ -1,0 +1,11 @@
+# Extra dependencies for the crypto-coin component under coins/.
+#
+# Install alongside the core manifest, only if you use the coin workflow:
+#   pip install -r requirements.txt -r requirements-coins.txt
+#
+# Kept separate because numpy is a ~20 MB wheel plus a BLAS payload, and it is
+# imported by exactly one optional tool -- coins/remap_ids.py, which rebuilds the
+# ticker -> custom-emoji-id map from live sticker images. Everyone building
+# ordinary emoji packs was installing it for a tool they never run.
+
+numpy>=1.26             # blocked-matrix image signature matching (coins/remap_ids.py)

@@ -26,6 +26,44 @@ from emojikit import logsetup as L  # noqa: E402
 TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 
+class TestRetentionIsReadWhenItIsUsed(unittest.TestCase):
+    """A documented .env setting must not be decided at import time.
+
+    load_env() runs inside main(), which is AFTER this module is imported, so a
+    value set only in .env was read strictly too late and every run silently
+    used the built-in default -- while .env.example advertised the setting as
+    supported. build_pack.api_base() documents and solves the same hazard.
+    """
+
+    def setUp(self):
+        self._had = os.environ.pop("EMOJI_LOG_RETENTION_DAYS", None)
+
+    def tearDown(self):
+        os.environ.pop("EMOJI_LOG_RETENTION_DAYS", None)
+        if self._had is not None:
+            os.environ["EMOJI_LOG_RETENTION_DAYS"] = self._had
+
+    def test_a_value_set_after_import_is_honoured(self):
+        self.assertEqual(L.log_retention_days(), L.LOG_RETENTION_DEFAULT_DAYS)
+        os.environ["EMOJI_LOG_RETENTION_DAYS"] = "7"
+        self.assertEqual(L.log_retention_days(), 7,
+                         "the retention window was frozen at import time")
+
+    def test_prune_takes_its_default_at_call_time(self):
+        os.environ["EMOJI_LOG_RETENTION_DAYS"] = "0"
+        # 0 disables pruning; if the default were bound at import this would
+        # still be the built-in 30 and the call would go looking for old files.
+        self.assertEqual(L.prune_old_logs(), 0)
+
+    def test_a_malformed_value_falls_back_instead_of_raising(self):
+        os.environ["EMOJI_LOG_RETENTION_DAYS"] = "not-a-number"
+        self.assertEqual(L.log_retention_days(), L.LOG_RETENTION_DEFAULT_DAYS)
+
+    def test_a_negative_value_cannot_mean_prune_everything(self):
+        os.environ["EMOJI_LOG_RETENTION_DAYS"] = "-1"
+        self.assertEqual(L.log_retention_days(), 0)
+
+
 class TestRedaction(unittest.TestCase):
     def test_token_shaped_is_masked(self):
         out = L.redact(f"using {TOKEN} now")

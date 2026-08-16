@@ -21,12 +21,19 @@ import html
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
 from build_pack import (BotApiError, Telegram, load_env, safe_int_env,
                         write_json_atomic)
 from emojikit.logsetup import record_exit_code, redact, setup_logging
+
+# A custom_emoji_id as Telegram issues it: decimal digits, nothing else. The
+# property that matters here is "carries no character an HTML parser reacts to",
+# not a length floor -- fetch_emoji_ids.py's stricter \d{5,25} exists to avoid
+# false positives when scraping ids out of prose, which is a different problem.
+_CUSTOM_EMOJI_ID = re.compile(r"\d{1,25}")
 
 log = logging.getLogger("emoji_bot")
 
@@ -61,7 +68,19 @@ def extract_custom_emoji_ids(message: dict) -> list[str]:
         for ent in ents or []:
             if ent.get("type") == "custom_emoji":
                 cid = str(ent.get("custom_emoji_id", ""))
-                if cid and cid not in seen:
+                # Shape-check at the boundary. This value is inbound message
+                # data, and it is interpolated into HTML that Telegram parses
+                # (an emoji-id attribute and a <code> block) -- the one
+                # externally-supplied string in this module that was not
+                # escaped, while group and channel titles beside it are. A
+                # custom_emoji_id is a decimal id; anything else is not one, so
+                # drop it rather than render it. Same shape fetch_emoji_ids.py
+                # already enforces when it parses ids back out of text.
+                if not _CUSTOM_EMOJI_ID.fullmatch(cid):
+                    if cid:
+                        log.debug("ignoring a custom_emoji_id of unexpected shape")
+                    continue
+                if cid not in seen:
                     seen.add(cid)
                     ids.append(cid)
 
@@ -109,7 +128,9 @@ def _emoji_span(labels: dict[str, str] | None, cid: str, rich: bool) -> str:
     """
     fb = html.escape(_fallback_char(labels, cid))
     if rich:
-        return f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
+        # Escaped as well as shape-checked at the boundary: belt and braces on
+        # the one sink whose input does not originate here.
+        return f'<tg-emoji emoji-id="{html.escape(cid)}">{fb}</tg-emoji>'
     return fb
 
 
@@ -137,7 +158,8 @@ def _render_message(ids: list[str], labels: dict[str, str] | None,
     head = f"Found <b>{grand_total}</b> premium emoji"
     if parts > 1:
         head += f" — part {part}/{parts}"
-    fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{c}</code>" for c in ids)
+    fmt1 = "\n".join(f"{_emoji_span(labels, c, rich)} <code>{html.escape(c)}</code>"
+                     for c in ids)
     # A single COLLAPSED (expandable) quote of emoji + ID. Tap an ID to copy just
     # it (mobile); use the "Copy ..." button(s) below to copy this message's IDs
     # in one or a few taps on any platform (see _copy_keyboard).

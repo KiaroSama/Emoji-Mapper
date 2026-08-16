@@ -21,6 +21,35 @@ def _msg(*cids):
             "text": "x" * (2 * len(cids))}
 
 
+class TestIdsReachingTheHtmlSinkAreDecimalOnly(unittest.TestCase):
+    """The one externally-supplied string this module did not escape.
+
+    custom_emoji_id is inbound message data, and it is interpolated into HTML
+    that Telegram parses -- an emoji-id attribute and a <code> block -- while
+    the group and channel titles beside it are html.escape'd. A value carrying
+    markup would put formatting the bot never wrote into a message delivered to
+    the owner's own DM, attributed to the owner's trusted bot.
+    """
+
+    def test_an_id_with_markup_is_dropped_at_the_boundary(self):
+        m = {"text": "x", "entities": [
+            {"type": "custom_emoji", "custom_emoji_id": '1"><b>x</b>'},
+            {"type": "custom_emoji", "custom_emoji_id": "222"}]}
+        self.assertEqual(b.extract_custom_emoji_ids(m), ["222"],
+                         "a non-decimal id reached the HTML sink")
+
+    def test_the_rendered_message_contains_no_injected_markup(self):
+        # Belt and braces: even handed a bad id directly, the sinks escape it.
+        span = b._emoji_span({}, '1"><b>x</b>', True)
+        self.assertNotIn("<b>", span)
+        self.assertIn("&lt;b&gt;", span)
+
+    def test_ordinary_ids_are_untouched(self):
+        m = {"text": "x", "entities": [
+            {"type": "custom_emoji", "custom_emoji_id": "5789012345678901234"}]}
+        self.assertEqual(b.extract_custom_emoji_ids(m), ["5789012345678901234"])
+
+
 class TestExtract(unittest.TestCase):
     def test_none(self):
         self.assertEqual(b.extract_custom_emoji_ids({"text": "hi"}), [])
