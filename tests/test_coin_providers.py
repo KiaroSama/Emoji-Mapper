@@ -564,8 +564,11 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
                          "an unconfirmed upload must not touch the oracle")
 
         # --- run B: a fresh process, a different image for the same ticker ----
-        fp._RUN_TOKEN = "run-b"                      # a second process's staging
+        # Capture BEFORE overwriting: registering the cleanup afterwards restores
+        # "run-b" onto itself, so every later test in the process keeps this
+        # ticker's staging path and per-run isolation is silently switched off.
         self.addCleanup(setattr, fp, "_RUN_TOKEN", fp._RUN_TOKEN)
+        fp._RUN_TOKEN = "run-b"                      # a second process's staging
         fp.to_emoji_png(art_b, fp.incoming_dir() / "aaa.png")
         tg.unreadable.clear()
         # (1, 0): the ticker is accounted for by the recovery, not by a new send.
@@ -607,8 +610,8 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
 
         # The retained source is gone anyway, and run B staged its own art.
         Path(intent["source_path"]).unlink()
+        self.addCleanup(setattr, fp, "_RUN_TOKEN", fp._RUN_TOKEN)  # before, not after
         fp._RUN_TOKEN = "run-b"
-        self.addCleanup(setattr, fp, "_RUN_TOKEN", fp._RUN_TOKEN)
         fp.to_emoji_png(art_b, fp.incoming_dir() / "aaa.png")
         tg.unreadable.clear()
 
