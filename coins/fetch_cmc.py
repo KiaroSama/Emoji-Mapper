@@ -20,7 +20,8 @@ from __future__ import annotations
 
 # This script lives in coins/; allow importing the shared engine (build_pack.py)
 # from the project root.
-import os as _bootstrap_os, sys as _bootstrap_sys
+import os as _bootstrap_os
+import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
@@ -28,18 +29,17 @@ import json
 import os
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
 from build_pack import Telegram, ingest_exit_code, load_env
+from coins import _http
+from coins._inventory import base_ticker
 # Reuse proven helpers from the CoinPaprika fetcher -- including the ONE
 # verified publisher, so this fetcher cannot drift back into its own copy.
 # Package-qualified so the module also imports as ``coins.fetch_cmc``.
 from coins.fetch_paprika import (
-    EMOJI, TICKER_IDS, incoming_dir,
-    base_ticker, classify, http_bytes, parse_missing, publish_logos,
-    refill_inventory, to_emoji_png,
+    TICKER_IDS, classify, http_bytes, incoming_dir, parse_missing,
+    publish_logos, refill_inventory, to_emoji_png,
 )
 
 MAP = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map?symbol="
@@ -55,20 +55,10 @@ def cmc_headers() -> dict:
 
 
 def cmc_json(url: str, headers: dict, retries: int = 4):
-    for a in range(1, retries + 1):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=40) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code in (400, 404):
-                return None  # symbol not found / bad request -> no match
-            print(f"  http retry {a}: HTTP {exc.code}", flush=True)
-            time.sleep(min(4 * a, 20))
-        except Exception as exc:  # noqa: BLE001
-            print(f"  http retry {a}: {exc}", flush=True)
-            time.sleep(min(4 * a, 20))
-    return None
+    r = _http.get(url, headers=headers, retries=retries, stop_on=(400, 404))
+    if r is None or r.status_code in (400, 404):
+        return None  # symbol not found / bad request -> no match
+    return r.json()
 
 
 def map_candidates(headers: dict, name: str, ticker: str):

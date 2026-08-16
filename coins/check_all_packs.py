@@ -21,7 +21,8 @@ from __future__ import annotations
 
 # This script lives in coins/; allow importing the shared engine (build_pack.py)
 # from the project root.
-import os as _bootstrap_os, sys as _bootstrap_sys
+import os as _bootstrap_os
+import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
@@ -36,16 +37,16 @@ from pathlib import Path
 import requests
 from PIL import Image
 
-from build_pack import (EXIT_USAGE, Telegram, api_base, ingest_exit_code, load_env,
-                        write_json_atomic)
+from build_pack import (EXIT_FAILED, EXIT_USAGE, Telegram, api_base,
+                        ingest_exit_code, load_env, write_json_atomic)
+# The pipeline's single definition of "this image is effectively empty" -- this
+# module used to carry its own copy of the rule and its two constants.
+from emojikit.media import is_blank_image
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "rebuild_dedup_state.json"
 AUDIT = ROOT / "pack_audit4.json"          # resume cache {cid: {hash, blank} | {error}}
 REPORT = ROOT / "pack_audit4_report.txt"
-
-VISIBLE_ALPHA = 10   # alpha above this counts as a visible pixel
-BLANK_MAX_PX = 8     # <= this many visible pixels => effectively blank
 
 
 def load_audit() -> dict:
@@ -63,12 +64,7 @@ def analyze(data: bytes) -> tuple[str, bool]:
     im = Image.open(io.BytesIO(data)).convert("RGBA")
     norm = im.resize((64, 64), Image.LANCZOS)
     h = hashlib.sha256(norm.tobytes()).hexdigest()[:24]
-    alpha = im.split()[3]
-    bbox = alpha.getbbox()
-    if bbox is None:
-        return h, True
-    visible = sum(1 for p in alpha.get_flattened_data() if p > VISIBLE_ALPHA)
-    return h, visible <= BLANK_MAX_PX
+    return h, is_blank_image(im)
 
 
 def main() -> int:
@@ -87,7 +83,28 @@ def main() -> int:
     processed = 0
     for s in sets:
         name = s["name"]
-        sticks = tg.get_sticker_set(name).get("stickers", [])
+        # The set LISTING is the call most likely to be throttled when walking
+        # many sets, and it had no retry at all while the download below had
+        # four: one 429 here killed the run and threw away every sticker
+        # analysed since the last 100-sticker checkpoint.
+        sticks = None
+        for attempt in range(1, 5):
+            try:
+                sticks = tg.get_sticker_set(name).get("stickers", [])
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(f"  retry {attempt} set{s['index']} listing: {tg._safe(exc)}",
+                      flush=True)
+                time.sleep(2 * attempt)
+        if sticks is None:
+            # Stopping is the only honest option: `live` would be missing this
+            # whole set, so the reconcile below would drop every cached analysis
+            # in it and the report would call its coins deleted.
+            save_audit(audit)
+            print(f"ABORT: set {s['index']} ({name}) could not be listed; "
+                  f"{len(audit)} analysed stickers kept for the next run.",
+                  flush=True)
+            return EXIT_FAILED
         for pos, st in enumerate(sticks):
             cid = str(st.get("custom_emoji_id"))
             # Positions shift whenever a sticker is added or removed, so the
@@ -128,6 +145,10 @@ def main() -> int:
                 save_audit(audit)
                 print(f"  progress: {processed} new / {len(audit)} total", flush=True)
             time.sleep(0.03)
+        # Checkpoint at the set boundary too: the 100-sticker counter can leave
+        # up to 99 analysed stickers unsaved, and re-downloading them is exactly
+        # what makes the next rate-limit likelier.
+        save_audit(audit)
         print(f"set {s['index']} ({name}) done; audited so far: {len(audit)}", flush=True)
 
     # Reconcile: keep only stickers that are still live, so deleted ones drop out

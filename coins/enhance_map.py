@@ -8,7 +8,8 @@ network suffixes and reuse the base ticker's custom_emoji_id, then re-fill.
 from __future__ import annotations
 
 # This script lives in coins/; allow importing the shared engine from the root.
-import os as _bootstrap_os, sys as _bootstrap_sys
+import os as _bootstrap_os
+import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
@@ -17,25 +18,14 @@ import re
 from pathlib import Path
 
 from build_pack import EXIT_FAILED, LockBusy, canonical_map_lock, write_json_atomic
+# The suffix list and the explicit aliases used to live here while the fetchers
+# carried their own copy without the aliases, so "which asset is avaxc" had two
+# answers. One resolver now, shared.
+from coins._inventory import base_ticker, refill_inventory
 
 ROOT = Path(__file__).resolve().parent
 INV = ROOT / "currency-emoji-inventory.md"
 OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
-
-# Network suffixes (longest first to strip greedily and safely).
-#
-# A single-character suffix is NOT identity evidence: stripping "c" made "ghc"
-# (Galaxy Heroes Coin) inherit the logo of "gh" (Greyhound), and "zbc" (Zebec)
-# that of "zb" (ZeroByte). The only genuine one-character cases are named
-# below instead of guessed.
-SUFFIXES = ["mainnet", "erc20", "bep20", "trc20", "polygon", "base", "matic",
-            "avax", "bsc", "arb", "ton", "sol", "trx", "eth", "op"]
-
-# Verified same-asset aliases that no suffix rule can derive safely.
-EXPLICIT_ALIASES = {
-    "avaxc": "avax",   # Avalanche C-Chain
-    "bttc": "btt",     # BitTorrent Chain
-}
 
 
 def main() -> int:
@@ -56,13 +46,10 @@ def main() -> int:
             for t in sorted(inv_tickers):
                 if t in have:
                     continue
-                base = EXPLICIT_ALIASES.get(t)
-                if base is None:
-                    for suf in SUFFIXES:
-                        if t.endswith(suf) and len(t) > len(suf) + 1:
-                            base = t[: -len(suf)]
-                            break
-                if base and base in have:
+                # base_ticker returns t unchanged when no rule applies, and t is
+                # known not to be in `have`, so that case maps nothing.
+                base = base_ticker(t)
+                if base in have:
                     ticker_to_id[t] = ticker_to_id[base]
                     added += 1
 
@@ -72,26 +59,7 @@ def main() -> int:
         return EXIT_FAILED
     print(f"added {added} chain-variant mappings", flush=True)
 
-    # Re-fill inventory.
-    lines = inv_text.split("\n")
-    t_re = re.compile(r"^\s*ticker:\s*(?P<v>.+?)\s*$")
-    p_re = re.compile(r"^(?P<prefix>\s*)premium-id:\s*.*$")
-    cur = None
-    filled = total = 0
-    for i, ln in enumerate(lines):
-        m = t_re.match(ln)
-        if m:
-            cur = m.group("v").strip().lower()
-            total += 1
-            continue
-        pm = p_re.match(ln)
-        if pm and cur is not None:
-            eid = ticker_to_id.get(cur, "")
-            lines[i] = (f"{pm.group('prefix')}premium-id: {eid}").rstrip()
-            if eid:
-                filled += 1
-            cur = None
-    OUT_INV.write_text("\n".join(lines), encoding="utf-8")
+    filled, total = refill_inventory(ticker_to_id, INV, OUT_INV)
     print(f"inventory filled: {filled}/{total}", flush=True)
     return 0
 

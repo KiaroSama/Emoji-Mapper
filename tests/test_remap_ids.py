@@ -21,9 +21,11 @@ Everything here uses fakes: no network, no Telegram, no real sleeping.
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -41,6 +43,8 @@ from PIL import Image  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
                         LockBusy, canonical_map_lock, exclusive_lock,
                         pack_family_lock_path, write_json_atomic)
+
+from emojikit import media  # noqa: E402
 
 import check_all_packs as cap  # noqa: E402
 import rebuild_dedup  # noqa: E402  - imported for its BASE, see PackFamilyLockTest
@@ -112,6 +116,33 @@ class FakeTelegram:
 
     def _safe(self, exc):
         return str(exc).replace("TOKEN123", "[REDACTED]")
+
+
+class ThrottledTelegram(FakeTelegram):
+    """Telegram that rate-limits the set LISTING, or dies during one.
+
+    ``fail_times`` is how many listings of a set answer 429 before it succeeds;
+    ``kill_on`` names a set whose listing kills the process outright, which is
+    what an interrupted run looks like from inside main().
+    """
+
+    def __init__(self, sets: dict[str, list[dict]], fail_times: dict | None = None,
+                 kill_on: str | None = None):
+        super().__init__(sets)
+        self.fail_times = dict(fail_times or {})
+        self.kill_on = kill_on
+        self.listings = 0
+
+    def get_sticker_set(self, name):
+        self.listings += 1
+        if name == self.kill_on:
+            raise KeyboardInterrupt("killed mid-run")
+        left = self.fail_times.get(name, 0)
+        if left:
+            self.fail_times[name] = left - 1
+            # The real message embeds the API URL, and therefore the bot token.
+            raise RuntimeError("429 Too Many Requests for TOKEN123")
+        return super().get_sticker_set(name)
 
 
 def _sticker(cid: str, fuid: str | None = None) -> dict:
@@ -327,6 +358,28 @@ class MainApplyTest(unittest.TestCase):
         rc = self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}))
         self.assertEqual(rc, EXIT_FAILED)
 
+    def test_a_short_result_from_nearest_raises_instead_of_mapping_fewer(self):
+        """nearest() returns four arrays that MUST line up with `tickers`.
+
+        zip() truncating to the shortest of them would drop every ticker past
+        the gap, and --apply would then replace the canonical map with fewer
+        coins than the run examined -- reporting success either way.
+        """
+        self._local("btc", _png((200, 20, 20, 255)))
+        self._local("eth", _png((20, 200, 20, 255)))
+        tg = FakeTelegram({"s1": [_sticker("a"), _sticker("b")]})
+        blobs = {"a": _png((200, 20, 20, 255)), "b": _png((20, 200, 20, 255))}
+        real = remap_ids.nearest
+
+        def truncated(local, live):
+            idx, d2, second = real(local, live)
+            return idx[:1], d2[:1], second[:1]
+
+        with mock.patch.object(remap_ids, "nearest", truncated), \
+                self.assertRaises(ValueError):
+            self._main(tg, FakeSession(blobs), "--max-distance", "100", "--apply")
+        self.assertFalse(self.out.exists(), "a short map must not be written")
+
 
 class ApplyIsSerialisedAgainstThePackFamily(unittest.TestCase):
     """5: the VALUE written has to come from a pack that cannot move.
@@ -490,6 +543,135 @@ class CheckAllPacksTest(unittest.TestCase):
         blobs = {"a": _png((200, 20, 20, 255)), "b": _blank_png()}
         self.assertEqual(self._main(tg, FakeSession(blobs)), EXIT_OK)
         self.assertIn("blank cid=b set=1 pos=1", self.report.read_text("utf-8"))
+
+    def test_blank_is_the_pipeline_wide_rule_not_a_local_copy(self):
+        """A second definition of "empty" is how a coin gets called blank here
+        and usable by the converter (or the reverse).
+
+        The substitution is the proof: importing the shared rule while still
+        answering from an inlined copy would satisfy an identity check.
+        """
+        self.assertIs(cap.is_blank_image, media.is_blank_image)
+        verdict = object()
+        with mock.patch.object(cap, "is_blank_image", lambda im: verdict):
+            self.assertIs(cap.analyze(_png((200, 20, 20, 255)))[1], verdict,
+                          "analyze answered from its own copy of the rule")
+
+
+class CheckAllPacksListingRetry(unittest.TestCase):
+    """The per-set LISTING had no retry while the per-sticker download had four.
+
+    That listing is the call most likely to be throttled when walking many sets,
+    and ``save_audit`` only fires every 100 stickers -- so one 429 there killed
+    the run and discarded up to 99 analysed stickers, which then had to be
+    downloaded again, making the next throttle likelier.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.audit = self.dir / "audit.json"
+        self.report = self.dir / "report.txt"
+
+    def _state(self, *names):
+        path = self.dir / "state.json"
+        path.write_text(json.dumps({"sets": [
+            {"index": i, "name": n} for i, n in enumerate(names, start=1)]}),
+            encoding="utf-8")
+        return path
+
+    def _main(self, tg, session, state):
+        self.out = io.StringIO()
+        with mock.patch.object(cap, "STATE", state), \
+                mock.patch.object(cap, "AUDIT", self.audit), \
+                mock.patch.object(cap, "REPORT", self.report), \
+                mock.patch.object(cap, "Telegram", lambda token: tg), \
+                mock.patch.object(cap.requests, "Session", lambda: session), \
+                mock.patch.object(cap, "load_env", lambda: None), \
+                mock.patch.object(cap.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "TOKEN123"}), \
+                contextlib.redirect_stdout(self.out):
+            return cap.main()
+
+    def test_a_throttled_listing_is_retried_instead_of_ending_the_run(self):
+        tg = ThrottledTelegram({"s1": [_sticker("a")]}, fail_times={"s1": 2})
+        rc = self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}),
+                        self._state("s1"))
+        self.assertEqual(rc, EXIT_OK)
+        self.assertEqual(tg.listings, 3, "the first two 429s must not be fatal")
+        self.assertIn("live stickers: 1", self.report.read_text("utf-8"))
+        self.assertNotIn("TOKEN123", self.out.getvalue(),
+                         "the retry line printed the raw error, token and all")
+
+    def test_work_already_analysed_survives_a_set_that_will_not_list(self):
+        """The audit is the resume cache: losing it is what causes the re-download.
+
+        Reporting is refused too -- ``live`` would be missing a whole set, so the
+        reconcile step would prune its cached analyses and call healthy coins
+        deleted.
+        """
+        tg = ThrottledTelegram({"s1": [_sticker("a")], "s2": [_sticker("b")]},
+                               fail_times={"s2": 99})
+        rc = self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}),
+                        self._state("s1", "s2"))
+
+        self.assertEqual(rc, EXIT_FAILED)
+        self.assertEqual(list(json.loads(self.audit.read_text("utf-8"))), ["a"],
+                         "set 1's analysis was thrown away with the run")
+        self.assertFalse(self.report.exists(),
+                         "a report built from a partial live read is wrong")
+
+    def test_each_set_boundary_checkpoints_the_audit(self):
+        """A run killed during set 2 must not lose set 1.
+
+        save_audit fired only every 100 stickers, so any set smaller than that
+        was analysed and then thrown away by an interruption -- and had to be
+        downloaded all over again, which is what makes the next throttle likelier.
+        Killing the listing outright leaves the boundary checkpoint as the only
+        thing that can have written the file.
+        """
+        tg = ThrottledTelegram({"s1": [_sticker("a")], "s2": [_sticker("b")]},
+                               kill_on="s2")
+        with self.assertRaises(KeyboardInterrupt):
+            self._main(tg, FakeSession({"a": _png((200, 20, 20, 255))}),
+                       self._state("s1", "s2"))
+        self.assertTrue(self.audit.is_file(), "set 1 was never checkpointed")
+        self.assertEqual(list(json.loads(self.audit.read_text("utf-8"))), ["a"])
+
+
+class NumpyIsAnExtra(unittest.TestCase):
+    """numpy is imported by exactly one first-party file: this one.
+
+    Making it a hard requirement of the whole project meant every user of the
+    emoji-pack builder installed a ~20 MB wheel for a coin-reconciliation tool
+    they may never run.
+    """
+
+    def _reload_without(self, missing: str):
+        spec = importlib.util.spec_from_file_location(
+            f"remap_ids_no_{missing}", ROOT / "coins" / "remap_ids.py")
+        mod = importlib.util.module_from_spec(spec)
+        # None in sys.modules is the documented way to make `import x` fail.
+        with mock.patch.dict(sys.modules, {missing: None}), \
+                mock.patch.object(sys, "argv", ["remap_ids.py"]):
+            spec.loader.exec_module(mod)
+
+    def test_a_missing_numpy_says_which_file_to_install(self):
+        with self.assertRaises(SystemExit) as caught:
+            self._reload_without("numpy")
+        self.assertIn("requirements-coins.txt", str(caught.exception))
+
+    def test_nothing_else_first_party_imports_numpy(self):
+        """The premise of the split: if it spreads, the extra has to come back."""
+        roots = [ROOT / "coins", ROOT / "emojikit"]
+        users = sorted(p.name for d in roots for p in d.glob("*.py")
+                       if re.search(r"^\s*import numpy", p.read_text(encoding="utf-8"),
+                                    re.MULTILINE))
+        users += sorted(p.name for p in ROOT.glob("*.py")
+                        if re.search(r"^\s*import numpy", p.read_text(encoding="utf-8"),
+                                     re.MULTILINE))
+        self.assertEqual(users, ["remap_ids.py"])
 
 
 if __name__ == "__main__":
