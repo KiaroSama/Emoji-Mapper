@@ -598,7 +598,7 @@ emoji.
 | `--formats` | `static,video,animated` | Which formats to publish, in order. |
 | `--per-set` | `200` | Emojis per set. |
 | `--data-dir` | `collection` | Catalog/media directory. |
-| `--brand-logo` | `assets/emoji-mapper-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
+| `--brand-logo` | `assets/yourbrand-emoji-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
 | `--dry-run` | off | Show the plan without uploading. |
 
@@ -608,7 +608,7 @@ published. Per-format sets, drift-proof resume, per-pack manifests.
 **Brand logo (first emoji of every set).** When publishing with the
 `@YourEmojiBot` bot, the YourBrand logo is inserted as the **first
 emoji of every set** (`--brand-logo`, default `BRAND_LOGO_DEFAULT` in
-`build_collection.py` = the repo's own `assets/emoji-mapper-logo.png`, so a
+`build_collection.py` = the repo's own `assets/yourbrand-emoji-logo.png`, so a
 fresh clone works with no machine-specific path). Since Bot API 7.2
 (March 2024) a single custom-emoji set may contain **mixed formats**, so the
 logo is always a **static** 100x100 PNG and leads a static, video *or* animated
