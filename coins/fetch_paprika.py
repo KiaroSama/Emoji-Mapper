@@ -72,7 +72,26 @@ EMOJI = ROOT / "logos" / "emoji"
 # oracle matching what was actually published.
 INV = ROOT / "currency-emoji-inventory.md"
 OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
-STATE = ROOT / "rebuild_state.json"
+# The canonical publication state: which cryptoemoji* sets exist and how the
+# family grows. Shared with rebuild_dedup, check_all_packs, remap_ids,
+# verify_logos and write_manifests, which all already read this file.
+#
+# This used to be rebuild_state.json -- the file rebuild_dedup calls OLD_STATE,
+# "the current 30 packs, to delete". Nothing has written it since the rebuild,
+# so it is not merely stale, it is ABSENT: a live provider run died on the
+# unguarded read below, and back when it did exist the providers appended coins
+# to the packs the rebuild was about to delete. The tests never caught either,
+# because they point STATE at a temp file.
+STATE = ROOT / "rebuild_dedup_state.json"
+
+# The providers' in-flight intent lives under its OWN key in that shared file.
+# It cannot use "in_flight": rebuild_dedup validates that key against its frozen
+# plan (`in_flight["key"]` must equal the plan entry its cursor just passed), so
+# a ticker-keyed provider intent parked there makes the rebuild refuse to start
+# with an error about a plan entry that has nothing to do with it. Both tools
+# hold PACK_LOCK across their whole read-modify-write, and both round-trip the
+# entire dict, so two keys in one file stay consistent.
+INTENT_KEY = "provider_in_flight"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 CACHE = ROOT / "paprika_matches.json"  # resumable {ticker: {id, conf, name}}
 KEYWORDS_CSV = ROOT / "keywords.csv"
@@ -399,7 +418,7 @@ def _recover_in_flight(tg: Telegram, state: dict,
     The intent on disk is that record; it is reconciled here, before this run is
     allowed to mutate anything.
     """
-    intent = state.get("in_flight")
+    intent = state.get(INTENT_KEY)
     if not intent:
         return None
     tk, name = intent.get("key"), intent.get("set_name")
@@ -436,6 +455,14 @@ def _recover_in_flight(tg: Telegram, state: dict,
             # add targets the previous, already-full set.
             state["sets"].append({"index": intent.get("set_index"), "name": name,
                                   "title": intent.get("title", "")})
+        # Every live sticker in this family must be accounted for by SOME
+        # record: that is the invariant rebuild_dedup's consistency gate
+        # enforces before it will touch the packs. Its own `order` cannot hold
+        # this ticker -- `order` must be a subsequence of the frozen plan, and a
+        # provider exists precisely to add coins the plan never had. So the
+        # providers keep their own tally in the same file, and the gate counts
+        # both.
+        _record_provider_add(state, tk)
         ticker_to_id[tk] = cid
         write_json_atomic(TICKER_IDS, ticker_to_id)
         print(f"  recovered {tk}: {cid} landed before the interruption",
@@ -452,9 +479,22 @@ def _recover_in_flight(tg: Telegram, state: dict,
     else:
         print(f"  {tk}: the unresolved upload did not land; retrying it",
               flush=True)
-    state["in_flight"] = None
+    state[INTENT_KEY] = None
     write_json_atomic(STATE, state)
     return tk if cid else None
+
+
+
+def _record_provider_add(state: dict, ticker: str) -> None:
+    """Tally one provider upload against the shared publication state.
+
+    Idempotent: a recovery run that re-confirms an already-recorded upload must
+    not count it twice, or the very gate this feeds would then reject a state
+    that is perfectly sound.
+    """
+    added = state.setdefault("provider_added", [])
+    if ticker not in added:
+        added.append(ticker)
 
 
 def publish_logos(tg: Telegram, tickers: list[str],
@@ -492,12 +532,31 @@ def publish_logos(tg: Telegram, tickers: list[str],
                 ticker_to_id.clear()
                 ticker_to_id.update(json.loads(TICKER_IDS.read_text("utf-8")))
             bot = tg.get_me()["username"]
+            # Both halves fail CLOSED and say which file is wrong. The read was
+            # unguarded and the sets list was indexed blind, so pointing at a
+            # file that no longer existed surfaced as a bare FileNotFoundError
+            # -- and an empty one would have surfaced as IndexError -- from
+            # inside a locked mutation path, which reads as a crash rather than
+            # as "this tool is looking in the wrong place".
+            if not STATE.is_file():
+                print(f"STOP: {STATE.name} does not exist, so there is no "
+                      f"record of which packs this family already has. "
+                      f"Publishing now would start a second family beside the "
+                      f"live one. Run coins/rebuild_dedup.py first, or restore "
+                      f"the state file.", flush=True)
+                return 0, len(tickers)
             state = json.loads(STATE.read_text("utf-8"))
             try:
                 recovered = _recover_in_flight(tg, state, ticker_to_id)
             except LiveStateUnknown as exc:
                 print(f"STOP: {exc}; refusing to add anything on top of an "
                       f"upload that may be live", flush=True)
+                return 0, len(tickers)
+            if not state.get("sets"):
+                print(f"STOP: {STATE.name} records no sets. The providers top "
+                      f"up an existing pack family; they do not create the "
+                      f"first pack. Run coins/rebuild_dedup.py first.",
+                      flush=True)
                 return 0, len(tickers)
             last = sorted(state["sets"], key=lambda x: x["index"])[-1]
             set_index, set_name = last["index"], last["name"]
@@ -558,7 +617,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                 # The exact file, so a recovery run reads what was sent rather
                 # than re-resolving a name that now points somewhere else.
                 intent["source_path"] = str(png)
-                state["in_flight"] = intent
+                state[INTENT_KEY] = intent
                 write_json_atomic(STATE, state)
                 try:
                     if op == "create":
@@ -573,7 +632,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     # A Bot API rejection is definitive: _call raises only once
                     # the change is verified NOT applied.
                     print(f"  add failed {tk}: {exc}", flush=True)
-                    state["in_flight"] = None
+                    state[INTENT_KEY] = None
                     write_json_atomic(STATE, state)
                     failed += 1
                     continue
@@ -589,7 +648,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
                 if cid is None:
                     print(f"  add failed {tk}: nothing of ours is live in {name}",
                           flush=True)
-                    state["in_flight"] = None
+                    state[INTENT_KEY] = None
                     write_json_atomic(STATE, state)
                     failed += 1
                     continue
@@ -599,13 +658,14 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     set_index, set_name = index, name
                     last = {"index": index, "name": name, "title": title}
                     state["sets"].append(dict(last))
+                _record_provider_add(state, tk)
                 ticker_to_id[tk] = cid
                 write_json_atomic(TICKER_IDS, ticker_to_id)
                 # Proven and mapped: this art now identifies a LIVE sticker, so
                 # it may become the oracle the other tools trust. The same Path
                 # that was hashed and uploaded, never a freshly resolved one.
                 publish_source(png, tk, want)
-                state["in_flight"] = None
+                state[INTENT_KEY] = None
                 write_json_atomic(STATE, state)
                 added += 1
                 time.sleep(0.3)
@@ -620,7 +680,7 @@ def publish_logos(tg: Telegram, tickers: list[str],
         # from the original image -- leaving the map naming one picture and the
         # local logo holding another. Everything else here was never published,
         # so keeping it would leave an unpublished image looking like a live one.
-        pending = (state.get("in_flight") or {}) if isinstance(state, dict) else {}
+        pending = (state.get(INTENT_KEY) or {}) if isinstance(state, dict) else {}
         src = pending.get("source_path") if isinstance(pending, dict) else None
         discard_staging(Path(src) if src else None)
     return added, failed
