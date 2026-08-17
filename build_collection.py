@@ -59,7 +59,7 @@ DEFAULT_EMOJI = "\U0001F600"
 BRAND_LOGO_BOTS = {"godverifyemojimapperbot"}
 # Ships with the repository. This used to be an absolute F:\ path, so on any
 # other machine the "mandatory" logo silently vanished from every pack.
-BRAND_LOGO_DEFAULT = str(ROOT / "assets" / "emoji-mapper-logo.png")
+BRAND_LOGO_DEFAULT = str(ROOT / "assets" / "god-verify-emoji-logo.png")
 BRAND_LOGO_EMOJI = "\u2705"          # ✅ associated standard emoji for the logo
 BRAND_LOGO_KW = ["godverify", "logo"]
 
