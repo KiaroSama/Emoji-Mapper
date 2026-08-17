@@ -27,9 +27,9 @@ import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
+import argparse
 import csv
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -44,7 +44,12 @@ KEYWORDS_CSV = ROOT / "keywords.csv"
 
 API = "https://api.coingecko.com/api/v3/coins/markets"
 PER_PAGE = 250
-MAX_PAGES = int(sys.argv[1]) if len(sys.argv) > 1 else 40  # 40 * 250 = up to 10,000 coins
+# 40 * 250 = up to 10,000 coins. A plain constant, resolved at import: this used
+# to be int(sys.argv[1]), which made the module unimportable under any runner
+# whose first argument is not a number -- `python coins/fetch_logos.py --help`
+# raised ValueError before argparse could print anything. main() parses the
+# override now, so the module can be imported without owning the command line.
+MAX_PAGES = 40
 PAGE_DELAY = _http.page_delay()   # COIN_PAGE_DELAY overrides; see coins/_http.py
 IMG_DELAY = 0.05
 HEADERS = {"User-Agent": "Mozilla/5.0 (logo-fetcher; local tool)"}
@@ -103,7 +108,22 @@ def existing_svg_tickers() -> set[str]:
     return {p.stem.lower() for p in SVG_DIR.glob("*.svg")} if SVG_DIR.is_dir() else set()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Download coin logos from CoinGecko and write keywords.csv.")
+    # nargs="?" keeps the old positional form (`fetch_logos.py 5`) working, and
+    # argparse rejects a non-numeric value with a usage error instead of the
+    # ValueError the import-time int() used to raise.
+    ap.add_argument("pages", nargs="?", type=int, default=None,
+                    help=f"market-data pages of {PER_PAGE} coins "
+                         f"(default {MAX_PAGES}).")
+    args = ap.parse_args(argv)
+    if args.pages is not None and args.pages < 1:
+        ap.error("pages must be at least 1")
+    # MAX_PAGES stays the default rather than the value: the tests patch it, and
+    # a caller who passes nothing must get the module's documented default.
+    pages = MAX_PAGES if args.pages is None else args.pages
+
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     svg_tickers = existing_svg_tickers()
     print(f"SVG logos already present: {len(svg_tickers)}", flush=True)
@@ -113,10 +133,10 @@ def main() -> int:
     png_resumed = 0
     coins_seen = 0
 
-    for page in range(1, MAX_PAGES + 1):
+    for page in range(1, pages + 1):
         url = (f"{API}?vs_currency=usd&order=market_cap_desc&per_page={PER_PAGE}"
                f"&page={page}&sparkline=false")
-        print(f"[page {page}/{MAX_PAGES}] fetching market data...", flush=True)
+        print(f"[page {page}/{pages}] fetching market data...", flush=True)
         try:
             data = _get(url)
         except RuntimeError as exc:
