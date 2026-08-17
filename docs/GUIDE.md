@@ -925,7 +925,22 @@ matches above `--max-distance` (coins never uploaded). This rebuilt 4,121 of
 ```
 
 A resumable cache (`coins/remap_live_cache.json`, gitignored) avoids
-re-downloading. The previous map is backed up to `ticker_to_id.prebroken.json`.
+re-downloading.
+
+Two things `remap_ids.py` does **not** do for you, both learned the hard way:
+
+* It writes only tickers that have a `<ticker>.png`, so letting it replace the
+  map outright **deletes every alias** that has no file of its own (`1inchbsc`,
+  `avaxc`, …). Each alias shares its old id with a sibling that does have a PNG,
+  so its new target is that sibling's new id — re-derive them from the old map
+  and merge before writing.
+* It cannot tell a legitimate shared logo from corrupt source art. If many
+  tickers collapse onto one sticker, that is `SHARED_GROUP_LIMIT` doing its job:
+  check whether those logo *files* are actually the same picture before
+  believing the map. See `coins/unresolved_logos.json`.
+
+Take your own dated backup first. `ticker_to_id.prebroken.json` is **not** one —
+it is drifted too, and scores the same as the map it was meant to repair.
 
 ### 17.3 Preventing drift in new builds
 
@@ -1215,7 +1230,9 @@ added, counts as the first of those 200).
 | `coins/rebuild_dedup_state.json` | **yes** | Live coin pack set names/order. Written by `rebuild_dedup.py` **and** by the providers when they top the family up — they add their own `provider_in_flight` intent and `provider_added` tally beside the rebuild's keys, under the same pack-family lock. |
 | `coins/rebuild_dedup_plan.json` | no | Frozen coin upload plan. |
 | `coins/remap_live_cache.json` | no | remap signature cache. |
-| `coins/ticker_to_id.prebroken.json` | no | Backup of the pre-fix map. |
+| `coins/ticker_to_id.<date>.bak.json` | **yes** | Dated snapshot taken before a remap. **This is the revert target.** |
+| `coins/unresolved_logos.json` | **yes** | Tickers deliberately left unmapped because their source PNG is not their own logo. |
+| `coins/ticker_to_id.prebroken.json` | no | Historic, and **not** a usable restore point despite the name — measured against the live stickers it scores the same as the map it was supposed to repair. |
 | `logs/*.log` | no | Per-run UTC logs. |
 | `state_<base>.json` | no | `build_pack` resume state. |
 | `assets/vendor/lottie_svg.min.js` | **yes** | Vendored Lottie player (offline). |
