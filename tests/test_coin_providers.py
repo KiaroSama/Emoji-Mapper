@@ -408,7 +408,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
 
         self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
         self.assertNotIn("aaa", mapping, "the id was never verified")
-        intent = json.loads(self.state.read_text("utf-8")).get("in_flight")
+        intent = json.loads(self.state.read_text("utf-8")).get(fp.INTENT_KEY)
 
         tg.unreadable.clear()                  # the next run, Telegram is back
         self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (1, 0))
@@ -419,7 +419,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self.assertEqual(mapping["aaa"], tg.sets[SET][-1]["custom_emoji_id"])
         self.assertEqual(json.loads(self.ids.read_text("utf-8"))["aaa"],
                          mapping["aaa"])
-        self.assertIsNone(json.loads(self.state.read_text("utf-8"))["in_flight"])
+        self.assertIsNone(json.loads(self.state.read_text("utf-8"))[fp.INTENT_KEY])
         # ...and the record that made the recovery possible.
         self.assertEqual((intent or {}).get("key"), "aaa")
         self.assertEqual((intent or {}).get("operation"), "add")
@@ -551,7 +551,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self._blind_after_apply(tg)
         mapping: dict[str, str] = {}
         self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
-        intent = json.loads(self.state.read_text("utf-8"))["in_flight"]
+        intent = json.loads(self.state.read_text("utf-8"))[fp.INTENT_KEY]
         self.assertIsNotNone(intent, "the unresolved upload was not recorded")
         live_after_a = len(tg.sets[SET])
 
@@ -586,7 +586,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
                          "the local logo is the other run's image, so the map "
                          "and the oracle now describe different pictures")
         # Only now may the intent be gone.
-        self.assertIsNone(json.loads(self.state.read_text("utf-8"))["in_flight"])
+        self.assertIsNone(json.loads(self.state.read_text("utf-8"))[fp.INTENT_KEY])
 
     def test_recovery_never_promotes_an_image_it_cannot_prove(self):
         """The retained source can still be lost -- a wiped temp, another machine.
@@ -606,7 +606,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self._blind_after_apply(tg)
         mapping: dict[str, str] = {}
         fp.publish_logos(tg, ["aaa"], mapping)
-        intent = json.loads(self.state.read_text("utf-8"))["in_flight"]
+        intent = json.loads(self.state.read_text("utf-8"))[fp.INTENT_KEY]
 
         # The retained source is gone anyway, and run B staged its own art.
         Path(intent["source_path"]).unlink()
@@ -661,7 +661,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self.assertEqual([a[1] for a in tg.adds], ["aaa"],
                          "a later add would overwrite the unresolved intent")
         self.assertEqual(
-            json.loads(self.state.read_text("utf-8"))["in_flight"]["key"], "aaa")
+            json.loads(self.state.read_text("utf-8"))[fp.INTENT_KEY]["key"], "aaa")
 
 
 class OnePackFamilyOneLock(unittest.TestCase):
@@ -748,6 +748,81 @@ class CommandExitCodes(unittest.TestCase):
     def test_both_fetchers_publish_through_the_same_helper(self):
         """Two copies of the add loop is how they drifted apart in the first place."""
         self.assertIs(fetch_cmc.publish_logos, fp.publish_logos)
+
+
+class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
+    """The providers must read the state that names the LIVE packs.
+
+    fetch_paprika pointed STATE at ``rebuild_state.json`` -- the file
+    rebuild_dedup calls OLD_STATE, "the current 30 packs, to delete". Nothing
+    has written it since the rebuild, so it is not merely stale, it is absent:
+    a live run died on an unguarded read. When it did exist, the providers were
+    appending coins to packs that were about to be deleted. The tests missed
+    both because every one of them points STATE at a temp file.
+    """
+
+    def test_both_tools_name_the_same_state_file(self):
+        self.assertEqual(fp.STATE, rd.STATE)
+        self.assertNotEqual(fp.STATE, rd.OLD_STATE,
+                            "the providers must not use the pack list the "
+                            "rebuild deletes")
+        # fetch_cmc publishes through fetch_paprika's publisher, so it inherits
+        # this rather than carrying a second copy to drift.
+        self.assertIs(fetch_cmc.publish_logos, fp.publish_logos)
+
+    def test_the_provider_intent_cannot_collide_with_the_rebuild_s(self):
+        """One file, two writers, two intents -- so two distinct keys.
+
+        rebuild_dedup validates ``in_flight["key"]`` against the plan entry its
+        cursor just walked past. A ticker-keyed provider intent parked under
+        that key makes the rebuild refuse to start, citing a plan entry that has
+        nothing to do with it.
+        """
+        self.assertNotEqual(fp.INTENT_KEY, "in_flight")
+        intent = {"key": "aaa", "operation": "add", "set_name": "s1",
+                  "set_index": 1, "expected_before": 0}
+        shared = {"sets": [{"index": 1, "name": "s1", "title": "T"}],
+                  "order": [], "cursor": 0, "in_flight": None,
+                  fp.INTENT_KEY: intent}
+        # The rebuild must accept a state carrying the provider's intent...
+        self.assertEqual(rd._state_problem(shared, None), "")
+        # ...and must reject it if it were put under its own key instead.
+        collided = dict(shared)
+        collided.pop(fp.INTENT_KEY)
+        collided["in_flight"] = intent
+        self.assertNotEqual(
+            rd._state_problem(collided, [{"rep": "zzz"}]), "",
+            "this is why the provider needs its own key")
+
+    def test_a_provider_top_up_does_not_brick_the_next_rebuild(self):
+        """The consistency gate counts live stickers against RECORDED uploads.
+
+        `order` cannot hold a provider ticker -- it must be a subsequence of the
+        frozen plan, and a provider exists to add coins the plan never had. So a
+        top-up used to make live exceed recorded, and the next rebuild hard-
+        stopped, offering only remap_ids or a destructive rebuild.
+        """
+        state = {"sets": [{"index": 1, "name": "s1", "title": "T"}],
+                 "order": ["plan-a", "plan-b"], "cursor": 2, "in_flight": None}
+        fp._record_provider_add(state, "newcoin")
+        self.assertEqual(state["provider_added"], ["newcoin"])
+        # 3 live = 2 recorded by the rebuild + 1 topped up by a provider.
+        self.assertEqual(
+            len(state["order"]) + len(state["provider_added"]), 3)
+        self.assertEqual(rd._state_problem(state, None), "")
+
+    def test_the_tally_never_counts_one_upload_twice(self):
+        """A recovery re-confirming a recorded upload must not inflate it.
+
+        The count is compared against live stickers, so a double entry hides
+        exactly the drift it exists to catch.
+        """
+        state = {"provider_added": ["aaa"]}
+        fp._record_provider_add(state, "aaa")
+        self.assertEqual(state["provider_added"], ["aaa"])
+        self.assertIn("repeats", rd._state_problem(
+            {"sets": [], "order": [], "cursor": 0,
+             "provider_added": ["aaa", "aaa"]}, None))
 
 
 if __name__ == "__main__":
