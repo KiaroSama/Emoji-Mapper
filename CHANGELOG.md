@@ -21,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `# noqa: BLE001` comments already in the source mean something, and `RUF100`
   keeps them honest.
 
+### Fixed — the coin providers were reading a state file that does not exist
+
+- **`coins\fetch_paprika.py` (and `fetch_cmc.py`, which publishes through it) now
+  read `coins\rebuild_dedup_state.json`** — the file that names the live packs,
+  and the one every other coin tool already used. They were reading
+  `rebuild_state.json`, which the rebuild calls "the current 30 packs, to
+  delete" and which nothing has written since; a live run died on an unguarded
+  read of a missing file. Missing state and an empty set list now both stop with
+  a message naming the file instead of a traceback.
+- Because both tools now share that file, the providers keep their in-flight
+  intent under `provider_in_flight` and tally their uploads in `provider_added`,
+  and the rebuild's live-versus-recorded consistency check counts both writers.
+  Its `order` list cannot hold a provider's coin — that list must mirror the
+  frozen plan — so without this a top-up made the next rebuild refuse to start.
+
 ### Fixed — a typo could publish
 
 - **`coins\fetch_paprika.py` and `coins\fetch_cmc.py` now parse their arguments.**
