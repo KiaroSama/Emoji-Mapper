@@ -20,6 +20,7 @@ Everything here uses fakes: no network, no Telegram, no real sleeping.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import importlib.util
 import io
@@ -237,8 +238,17 @@ class DownloadLiveTest(unittest.TestCase):
         self.assertEqual(sorted(cache["sigs"]), ["a", "b"])
 
     def test_legacy_cache_keeps_signatures_but_re_verifies_sets(self):
+        """Old LAYOUT migrates; the signatures themselves are still good.
+
+        The placeholder has to be a real-length signature. A short stand-in used
+        to pass here, but load_cache now also drops signatures written by an
+        older signature() -- a separate rule, covered by
+        ACacheFromAnOlderSignatureIsDiscarded -- and a 4-byte stub would trip
+        that one instead, testing the wrong thing.
+        """
         # Old layout: {"done_sets": [1], "sigs": {...}} keyed by set index.
-        self.cache_path.write_text(json.dumps({"done_sets": [1], "sigs": {"a": "AAAA"}}),
+        sig = base64.b64encode(bytes(remap_ids.SIG_LEN)).decode()
+        self.cache_path.write_text(json.dumps({"done_sets": [1], "sigs": {"a": sig}}),
                                    encoding="utf-8")
         cache = remap_ids.load_cache(self.cache_path)
         self.assertEqual(cache["sets"], {})
@@ -672,6 +682,89 @@ class NumpyIsAnExtra(unittest.TestCase):
                         if re.search(r"^\s*import numpy", p.read_text(encoding="utf-8"),
                                      re.MULTILINE))
         self.assertEqual(users, ["remap_ids.py"])
+
+
+class TheSignatureMustNotBeBlindToBlackOnTransparent(unittest.TestCase):
+    """A black mark on transparency must not collapse onto every other one.
+
+    signature() composited on black and kept only RGB, so any logo drawn in
+    black on a transparent background flattened to a uniformly black square:
+    all-zero signature, pairwise distance 0.0, every such coin indistinguishable
+    from every other. 135 of the 5875 real coin logos are exactly that shape --
+    Aptos, Arkham, NEAR, Worldcoin, Bittensor all ship a black wordmark.
+
+    It cost an entire wrong diagnosis: 129 tickers "provably shared one picture"
+    and were written up as corrupt source art, when the files were fine and the
+    METRIC was blind. A distance of 0.0 between two files is a claim about the
+    measure before it is a claim about the files.
+    """
+
+    @staticmethod
+    def _black_on_transparent(shape) -> Image.Image:
+        im = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        px = im.load()
+        for x, y in shape:
+            px[x, y] = (0, 0, 0, 255)          # pure black, fully opaque
+        return im
+
+    def _two_distinct_marks(self):
+        left = [(x, y) for x in range(10, 45) for y in range(10, 90)]
+        ring = [(x, y) for x in range(20, 80) for y in range(20, 80)
+                if 22 <= ((x - 50) ** 2 + (y - 50) ** 2) ** 0.5 <= 29]
+        return (self._black_on_transparent(left),
+                self._black_on_transparent(ring))
+
+    def test_two_different_black_marks_are_not_identical(self):
+        a, b = self._two_distinct_marks()
+        d = float(np.linalg.norm(remap_ids.signature(a) - remap_ids.signature(b)))
+        self.assertGreater(
+            d, 0.0,
+            "two visibly different black-on-transparent marks measured as the "
+            "same image; the signature cannot see shape")
+
+    def test_a_black_mark_carries_information_at_all(self):
+        a, _ = self._two_distinct_marks()
+        sig = remap_ids.signature(a)
+        self.assertEqual(len(sig), remap_ids.SIG_LEN)
+        self.assertGreater(
+            float(sig.max()), 0.0,
+            "an all-zero signature says 'I cannot see this image', and the "
+            "matcher would read it as 'this image equals that one'")
+
+    def test_colour_still_separates_two_marks_of_the_same_shape(self):
+        """The silhouette must not swamp colour: same shape, different colour."""
+        shape = [(x, y) for x in range(20, 80) for y in range(20, 80)]
+        red, blue = Image.new("RGBA", (100, 100), (0, 0, 0, 0)), \
+            Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        for im, colour in ((red, (220, 30, 30, 255)), (blue, (30, 30, 220, 255))):
+            px = im.load()
+            for x, y in shape:
+                px[x, y] = colour
+        d = float(np.linalg.norm(remap_ids.signature(red) - remap_ids.signature(blue)))
+        self.assertGreater(d, 0.0, "colour information was lost")
+
+
+class ACacheFromAnOlderSignatureIsDiscarded(unittest.TestCase):
+    """Mixing two signature formats matches coins against noise, silently.
+
+    The cached vectors are raw bytes with no format marker, so a shorter one
+    from a previous definition does not raise -- it just compares wrongly.
+    """
+
+    def test_signatures_of_the_wrong_length_are_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            old = base64.b64encode(bytes(remap_ids.SIG_LEN // 2)).decode()
+            new = base64.b64encode(bytes(remap_ids.SIG_LEN)).decode()
+            write_json_atomic(path, {"sets": {"s1": "digest"},
+                                     "sigs": {"old": old, "new": new},
+                                     "errors": {}})
+            cache = remap_ids.load_cache(path)
+            self.assertNotIn("old", cache["sigs"], "a stale-format signature survived")
+            self.assertIn("new", cache["sigs"])
+            self.assertEqual(cache["sets"], {},
+                             "completeness marks must be cleared too, or the "
+                             "dropped sets are never re-read")
 
 
 if __name__ == "__main__":
