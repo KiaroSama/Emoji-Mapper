@@ -791,6 +791,30 @@ class TruncatedPlanFailsClosed(RebuildCase):
         self.assertEqual(sorted(p.name for p in self.dir.glob("*.tmp")), [])
 
 
+class _LockWatchingTelegram(FakeTelegram):
+    """Records whether the pack-family lock was held at the first mutation.
+
+    Without this, both release tests below assert only that the lock file is
+    ABSENT when the run ends -- which an implementation that never takes the
+    lock at all satisfies perfectly. Sampling at the mutation is what makes them
+    prove acquire-and-release rather than merely "no leak".
+    """
+
+    held_at_mutation: bool | None = None
+
+    def _sample(self) -> None:
+        if self.held_at_mutation is None:
+            self.held_at_mutation = rd.LOCK.exists()
+
+    def create_set(self, *a, **kw):
+        self._sample()
+        return super().create_set(*a, **kw)
+
+    def add_sticker(self, *a, **kw):
+        self._sample()
+        return super().add_sticker(*a, **kw)
+
+
 class ConcurrentRunsAreLockedOut(RebuildCase):
     """H-05: two publishers on one state file upload the same entries twice."""
 
@@ -806,16 +830,21 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
     def test_the_lock_is_released_after_a_run(self):
         self.write_plan(["aaa"])
         self.write_state()
-        rd.build(FakeTelegram(), "bot")
+        tg = _LockWatchingTelegram()
+        rd.build(tg, "bot")
+        self.assertTrue(tg.held_at_mutation,
+                        "the lock must be HELD while the packs are mutated")
         self.assertFalse(rd.LOCK.exists())
 
     def test_the_lock_is_released_after_a_stop(self):
         self.write_plan(["aaa"])
         self.write_state()
-        tg = FakeTelegram()
+        tg = _LockWatchingTelegram()
         tg.create_error = bp.AmbiguousUploadError("createNewStickerSet: unknown")
         with self.assertRaises(SystemExit):
             rd.build(tg, "bot")
+        self.assertTrue(tg.held_at_mutation,
+                        "the lock must be HELD while the packs are mutated")
         self.assertFalse(rd.LOCK.exists(),
                          "a stopped run must not block the retry")
 
@@ -1044,10 +1073,17 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
                          in_flight="aaa",
                          sets=[{"index": 1, "name": "s1", "title": "T 1"}])
         tg = FakeTelegram(live={"s1": 2})       # seed AND aaa are both live
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as caught:
             rd.build(tg, "bot")                 # refused, as it must be
 
-        # Apply exactly what the message prescribes for the IS-live branch.
+        # Read the repair OUT of the message before performing it. Hard-coding
+        # the two edits proved that THIS repair works, not that the prescribed
+        # one does -- so the message could drift into prescribing something else
+        # and the test would still pass while the instructions went wrong.
+        prescribed = str(caught.exception)
+        self.assertIn("'in_flight' to null", prescribed)
+        self.assertIn("append 'aaa' to 'order'", prescribed)
+
         state = json.loads(self.state.read_text("utf-8"))
         state["in_flight"] = None
         state["order"].append("aaa")
