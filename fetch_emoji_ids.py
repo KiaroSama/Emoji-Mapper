@@ -170,6 +170,10 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
         tmp = tmp_dir / f"emoji_{cid}.dl"
         try:
             tg.download_file(st["file_id"], tmp)
+            # Same rule as fetch_pack: republish our own encoding, never a
+            # byte-identical clone of the source sticker. Before the
+            # fingerprint, so the key describes what is actually on disk.
+            media.reencode_in_place(tmp, fmt)
             # One decode for both keys -- see media.fingerprint.
             key, phash = media.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)

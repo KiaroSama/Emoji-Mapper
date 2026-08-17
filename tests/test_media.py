@@ -359,5 +359,129 @@ class TestVideo(unittest.TestCase):
             media.validate_video(out)
 
 
+class TestReencodeGivesUsOurOwnBytes(unittest.TestCase):
+    """Owner rule: never republish another pack's file byte-for-byte.
+
+    Both halves matter and they pull against each other, so both are asserted:
+    the BYTES must change (or we published a clone) and the PICTURE must not
+    (or we degraded someone's logo to win a hash).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _webp_with_transparency(path: Path) -> Path:
+        """A sticker-shaped source: a coloured blob on transparency.
+
+        The transparent region is the point. libwebp's lossless mode rewrites
+        the RGB *under* fully transparent pixels unless exact=True, so a
+        fully-opaque fixture cannot catch that -- a real .webp sticker did.
+        """
+        im = Image.new("RGBA", (80, 60), (0, 0, 0, 0))
+        for x in range(20, 60):
+            for y in range(15, 45):
+                im.putpixel((x, y), (200, 40, 90, 255))
+        im.putpixel((2, 2), (7, 9, 11, 0))     # colour hiding under alpha=0
+        im.save(path, format="WEBP", lossless=True, exact=True)
+        return path
+
+    def test_static_bytes_change_and_pixels_do_not(self):
+        src = self._webp_with_transparency(self.dir / "t.webp")
+        before_bytes = src.read_bytes()
+        before_px = Image.open(src).convert("RGBA").get_flattened_data()
+
+        self.assertTrue(media.reencode_in_place(src, "static"))
+        self.assertNotEqual(src.read_bytes(), before_bytes,
+                            "the republished file is a byte-clone of the source")
+        self.assertEqual(Image.open(src).convert("RGBA").get_flattened_data(),
+                         before_px,
+                         "re-encoding changed the picture, including the RGB "
+                         "under transparent pixels; it must be pixel-exact")
+
+    def test_static_opaque_bytes_change_and_pixels_do_not(self):
+        src = _make_png(self.dir / "a.webp", (200, 40, 90, 255), fmt="WEBP")
+        before_bytes = src.read_bytes()
+        # get_flattened_data, not getdata: the latter is removed in Pillow 14.
+        before_px = Image.open(src).convert("RGBA").get_flattened_data()
+
+        self.assertTrue(media.reencode_in_place(src, "static"))
+        self.assertNotEqual(src.read_bytes(), before_bytes,
+                            "the republished file is a byte-clone of the source")
+        self.assertEqual(Image.open(src).convert("RGBA").get_flattened_data(),
+                         before_px,
+                         "re-encoding changed the picture; it must be pixel-exact")
+
+    def test_the_content_key_survives_so_dedup_still_works(self):
+        """content_key hashes normalized pixels, not container bytes."""
+        src = _make_png(self.dir / "b.webp", (10, 180, 60, 255), fmt="WEBP")
+        before = media.content_key(src, "static")
+        media.reencode_in_place(src, "static")
+        self.assertEqual(media.content_key(src, "static"), before,
+                         "re-encoding moved the catalog's dedup key")
+
+    def test_animated_tgs_regzips_to_the_same_animation(self):
+        lottie = {"v": "5.5", "fr": 60, "ip": 0, "op": 60, "w": 512, "h": 512,
+                  "layers": []}
+        src = self.dir / "c.tgs"
+        src.write_bytes(gzip.compress(json.dumps(lottie).encode("utf-8")))
+        # A different gzip level, so the source is not already our own output.
+        before_bytes = src.read_bytes()
+
+        media.reencode_in_place(src, "animated")
+        self.assertEqual(media._load_lottie(src), lottie,
+                         "the animation itself changed")
+        self.assertNotEqual(src.read_bytes(), before_bytes)
+
+    def test_regzip_is_deterministic(self):
+        """Two runs must agree, or ingest would see a new file every time."""
+        lottie = {"v": "5.5", "fr": 60, "ip": 0, "op": 60, "w": 512, "h": 512,
+                  "layers": []}
+        outs = []
+        for n in ("d1.tgs", "d2.tgs"):
+            p = self.dir / n
+            p.write_bytes(gzip.compress(json.dumps(lottie).encode("utf-8"), 1))
+            media.reencode_in_place(p, "animated")
+            outs.append(p.read_bytes())
+        self.assertEqual(outs[0], outs[1],
+                         "a timestamp in the gzip header would make every "
+                         "re-run look like a different file")
+
+    def test_an_unreadable_file_is_reported_not_raised(self):
+        """One bad sticker must not stop a whole pack ingest."""
+        bad = self.dir / "e.webp"
+        bad.write_bytes(b"not an image at all")
+        self.assertFalse(media.reencode_in_place(bad, "static"))
+        self.assertEqual(bad.read_bytes(), b"not an image at all",
+                         "a failed re-encode must leave the file alone")
+
+    def test_growing_past_a_format_cap_keeps_the_original(self):
+        """Lossless can grow a file, and Telegram's caps are hard.
+
+        A real .tgs measured 64 139 bytes after re-encoding against a 65 536
+        cap, so a source already near the limit can cross it. A byte-clone is a
+        lesser failure than an upload Telegram rejects.
+        """
+        lottie = {"v": "5.5", "fr": 60, "ip": 0, "op": 60, "w": 512, "h": 512,
+                  "layers": []}
+        src = self.dir / "big.tgs"
+        src.write_bytes(gzip.compress(json.dumps(lottie).encode("utf-8"), 1))
+        before = src.read_bytes()
+        with mock.patch.object(media, "TGS_MAX_BYTES", 1):   # cap below any output
+            self.assertFalse(media.reencode_in_place(src, "animated"))
+        self.assertEqual(src.read_bytes(), before,
+                         "the file was rewritten past its own format cap")
+
+    def test_an_unknown_format_is_left_alone(self):
+        p = self.dir / "f.bin"
+        p.write_bytes(b"\x00\x01\x02")
+        self.assertFalse(media.reencode_in_place(p, "sticker-shaped-thing"))
+        self.assertEqual(p.read_bytes(), b"\x00\x01\x02")
+
+
 if __name__ == "__main__":
     unittest.main()
