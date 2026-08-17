@@ -79,11 +79,36 @@ PACK_LOCK = pack_family_lock_path(SET_BASE)
 
 
 def signature(img: Image.Image) -> np.ndarray:
-    """Small RGB thumbnail signature, alpha composited on black for consistency."""
+    """Small thumbnail signature: RGB on black, PLUS the alpha silhouette.
+
+    The alpha plane is not decoration. Compositing on black and keeping only RGB
+    made this function BLIND to any mark drawn in black on transparency: it
+    flattens to a uniformly black square, so its signature is all zeros and
+    every such logo lands on the same point. 135 of the 5875 coin logos are
+    exactly that -- Aptos, Arkham, NEAR, Worldcoin, Bittensor and friends all
+    ship a black wordmark -- and they measured pairwise distance 0.0 while being
+    six visibly different pictures.
+
+    Carrying the silhouette makes the shape survive whatever the colour does.
+    `verify_logos.logo_distance` learned the same lesson from the other
+    direction (it also tries inverted and flattened-on-white); this is the
+    matcher's half of it.
+    """
     im = img.convert("RGBA")
     bg = Image.new("RGBA", im.size, (0, 0, 0, 255))
-    im = Image.alpha_composite(bg, im).convert("RGB").resize((SIG_PX, SIG_PX), Image.LANCZOS)
-    return np.frombuffer(im.tobytes(), dtype=np.uint8).astype(np.float32)
+    flat = Image.alpha_composite(bg, im).convert("RGB").resize(
+        (SIG_PX, SIG_PX), Image.LANCZOS)
+    alpha = im.getchannel("A").resize((SIG_PX, SIG_PX), Image.LANCZOS)
+    return np.concatenate((
+        np.frombuffer(flat.tobytes(), dtype=np.uint8),
+        np.frombuffer(alpha.tobytes(), dtype=np.uint8),
+    )).astype(np.float32)
+
+
+# Length of one signature; also the cache's compatibility key. A cache written
+# by an older, shorter signature cannot be compared with a new one -- and
+# silently mixing the two would match coins against noise.
+SIG_LEN = SIG_PX * SIG_PX * 4
 
 
 def manifest_digest(stickers: list[dict]) -> str:
@@ -109,8 +134,22 @@ def load_cache(path: Path) -> dict:
     raw = {}
     if path.is_file():
         raw = json.loads(path.read_text(encoding="utf-8"))
-    return {"sets": raw.get("sets", {}), "sigs": raw.get("sigs", {}),
-            "errors": raw.get("errors", {})}
+    sigs = raw.get("sigs", {})
+    sets = raw.get("sets", {})
+    # Signatures of a different length came from a different signature()
+    # definition, so they describe the images by a different rule. Comparing
+    # them against current ones is not "slightly stale", it is meaningless --
+    # and it would fail as a silent mismatch, not an error. Drop them, and drop
+    # the completeness marks with them so every set is re-read.
+    stale = [c for c, b in sigs.items()
+             if len(base64.b64decode(b)) != SIG_LEN]
+    if stale:
+        log.info("discarding %d cached signature(s) written by an older "
+                 "signature format; those sets will be re-read", len(stale))
+        for c in stale:
+            sigs.pop(c, None)
+        sets = {}
+    return {"sets": sets, "sigs": sigs, "errors": raw.get("errors", {})}
 
 
 def save_cache(path: Path, cache: dict) -> None:
