@@ -51,6 +51,12 @@ rather than adding an opt-out.
 | `test_rebuild_dedup_state.py` | the `coins/rebuild_dedup.py` mutation walk: plan → validate → delete the old packs → upload, plus its in-flight reconcile and run lock |
 | `test_rebuild_dedup_map.py` | the second phase of the same module: `map_and_fill` resolving `ticker_to_id.json` by image identity under the map lock, and the shared-logo-group guard |
 | `test_publish_dedup.py` | verified retries for non-idempotent Bot API calls, live-set reconcile, adopt-on-occupied, recorded fuids |
+| `test_entry_point_contracts.py` | exit codes and argument validation at the CLI boundary of `fetch_pack`, `make_emoji_pngs`, `panel` and `logsetup` |
+| `test_coin_cli_args.py` | the coin tools refuse an unrecognised argument instead of falling through to the live branch — a typo must not publish |
+| `test_coin_logo_cache.py` | `fetch_logos` resume: a cached file is re-validated before it is trusted as a logo |
+| `test_coin_http.py` | the one pooled `coins/_http.py` client: retry ladder, `Retry-After`, and the paging delay |
+| `test_coin_ticker_map.py` | every writer of `ticker_to_id.json` — alias/enhance/provider — serialised so none loses another's update, and one inventory implementation |
+| `test_verify_logos.py` | `verify_logos`: the inversion-aware distance, the durable replacement intent bound to its own `--map`, and the fix path's exit codes |
 | `test_panel.py` | brand-logo preview, inert item JSON (no script breakout), and the mutation guard (token, loopback Host/Origin, content type, body cap, exact-permutation order) |
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
 
