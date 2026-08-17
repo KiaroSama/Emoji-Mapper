@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `# noqa: BLE001` comments already in the source mean something, and `RUF100`
   keeps them honest.
 
+### Fixed — a typo could publish
+
+- **`coins\fetch_paprika.py` and `coins\fetch_cmc.py` now parse their arguments.**
+  Both decided their one destructive switch with `"--dry" in sys.argv`, so any
+  spelling that was not exactly `--dry` — `--dryy`, `--dr`, a stray positional,
+  an unknown flag — silently selected the live branch, which spends the API
+  quota, uploads to Telegram and rewrites the canonical ticker map. Unrecognised
+  arguments are now a usage error (exit 2), and prefix matching is off so `--dr`
+  is not guessed at either. Both gained `--help`.
+- **`coins\fetch_logos.py` no longer reads the command line at import.** The page
+  count was `int(sys.argv[1])` at module scope, so `fetch_logos.py --help` raised
+  `ValueError` before argparse could answer. It is an optional argument now; the
+  old positional form still works.
+
 ### Removed
 
 - Four pieces of internal surface with no callers: a format-keyed MIME table
