@@ -1212,7 +1212,7 @@ added, counts as the first of those 200).
 | `coins/keywords.csv` | **yes** | ticker → name/keywords. |
 | `coins/currency-emoji-inventory.md` | **yes** | Inventory source. |
 | `coins/currency-emoji-inventory.filled.md` | no | Generated, id-filled inventory. |
-| `coins/rebuild_dedup_state.json` | **yes** | Live coin pack set names/order. |
+| `coins/rebuild_dedup_state.json` | **yes** | Live coin pack set names/order. Written by `rebuild_dedup.py` **and** by the providers when they top the family up — they add their own `provider_in_flight` intent and `provider_added` tally beside the rebuild's keys, under the same pack-family lock. |
 | `coins/rebuild_dedup_plan.json` | no | Frozen coin upload plan. |
 | `coins/remap_live_cache.json` | no | remap signature cache. |
 | `coins/ticker_to_id.prebroken.json` | no | Backup of the pre-fix map. |
