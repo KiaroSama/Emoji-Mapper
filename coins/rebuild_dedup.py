@@ -242,15 +242,23 @@ def _state_problem(s, plan: list[dict] | None) -> str:
     """
     if not isinstance(s, dict):
         return "state is not an object"
-    for field in ("sets", "sent", "order", "deleted_old_packs"):
+    for field in ("sets", "sent", "order", "deleted_old_packs",
+                  "provider_added"):
         if not isinstance(s.get(field, []), list):
             return f"{field!r} must be a list"
     for field in ("deleted_old", "final_sent"):
         if not isinstance(s.get(field, False), bool):
             return f"{field!r} must be true or false"
-    for field in ("sent", "order", "deleted_old_packs"):
+    for field in ("sent", "order", "deleted_old_packs", "provider_added"):
         if not all(isinstance(x, str) and x for x in s.get(field, [])):
             return f"{field!r} must hold non-empty names"
+
+    topped = s.get("provider_added", [])
+    dup_top = sorted({t for t in topped if topped.count(t) > 1})
+    if dup_top:
+        # The tally is counted against live stickers, so a repeat inflates
+        # the total and hides exactly the drift the count exists to catch.
+        return f"'provider_added' repeats {dup_top}"
 
     order = s.get("order", [])
     repeated = sorted({rep for rep in order if order.count(rep) > 1})
@@ -670,10 +678,21 @@ def _build(tg: Telegram, bot: str) -> None:
     if state["in_flight"]:
         cum = _reconcile_in_flight(tg, state, cum)
 
-    if cum != len(state["order"]):
+    # This rebuild is not the only writer to the family. The providers
+    # (fetch_paprika / fetch_cmc) top it up with coins the frozen plan never
+    # had, and their uploads CANNOT be recorded in `order` -- `order` must be a
+    # subsequence of the plan prefix the cursor walked, which a new coin is not.
+    # They keep their own tally in the same state file instead, so the invariant
+    # is unchanged -- every live sticker is accounted for by some record -- and
+    # only the arithmetic learns about the second writer.
+    topped_up = state.get("provider_added") or []
+    recorded = len(state["order"]) + len(topped_up)
+    if cum != recorded:
+        extra = (f" ({len(state['order'])} by this rebuild + {len(topped_up)} "
+                 f"topped up by the providers)") if topped_up else ""
         raise SystemExit(
-            f"ERROR: {cum} stickers are live but only {len(state['order'])} "
-            f"uploads are recorded.\n"
+            f"ERROR: {cum} stickers are live but {recorded} "
+            f"uploads are recorded{extra}.\n"
             f"       Refusing to continue: the recorded order is what maps "
             f"stickers to tickers, and continuing from a disagreeing state is "
             f"what corrupts ticker_to_id.json.\n"
