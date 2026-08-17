@@ -36,6 +36,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -507,6 +508,80 @@ def validate_tgs(path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Deduplication keys
 # --------------------------------------------------------------------------- #
+def reencode_in_place(path: Path, fmt: str) -> bool:
+    """Rewrite ``path`` so its BYTES differ but its picture does not.
+
+    Media pulled from someone else's pack used to be stored and re-uploaded
+    byte-for-byte, so the sticker we published was a bit-identical clone of
+    theirs. Owner rule: republish our own encoding of the same picture.
+
+    Every branch is pixel-exact, never a lossy re-compress:
+
+    * static  -- decode and re-save WEBP **lossless**. The decoded pixels are
+      whatever the source decoded to, lossy or not; encoding them losslessly
+      cannot move them.
+    * animated -- a .tgs is gzipped Lottie JSON. Re-serialise and re-gzip: the
+      animation is the JSON, and the JSON is unchanged.
+    * video   -- remux with ``-c copy``. The encoded stream is copied through
+      untouched; only the container framing is rewritten.
+
+    Returns True when the file was rewritten. Failure is not fatal to the
+    caller: a sticker we could not re-encode is still better ingested as-is
+    than dropped, so this reports rather than raises -- but the caller must
+    compute the content key AFTERWARDS either way, since the bytes moved.
+    """
+    before = path.read_bytes()
+    try:
+        if fmt == "static":
+            with Image.open(io.BytesIO(before)) as im:
+                rgba = im.convert("RGBA")
+            buf = io.BytesIO()
+            # exact=True or libwebp rewrites the RGB under fully transparent
+            # pixels to compress better. "Lossless" only promises the VISIBLE
+            # result; without this the file round-trips to different pixel
+            # values, which a real .webp sticker showed and a synthetic
+            # fully-opaque fixture never would.
+            rgba.save(buf, format="WEBP", lossless=True, quality=100,
+                      method=6, exact=True)
+            out = buf.getvalue()
+        elif fmt == "animated":
+            data = _load_lottie(path)
+            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+            buf = io.BytesIO()
+            # mtime=0 so the same animation always re-gzips to the same bytes:
+            # a timestamp in the header would make ingest non-deterministic and
+            # every re-run would look like a different file.
+            with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+                gz.write(raw)
+            out = buf.getvalue()
+        elif fmt == "video":
+            with tempfile.TemporaryDirectory() as td:
+                dst = Path(td) / "remux.webm"
+                _run([ffmpeg_path(), "-v", "error", "-y", "-i", str(path),
+                      "-c", "copy", str(dst)])
+                out = dst.read_bytes()
+        else:
+            return False
+    except Exception as exc:  # noqa: BLE001 - ingest must survive one bad file
+        log.warning("re-encode skipped for %s (%s): %s", path.name, fmt, exc)
+        return False
+
+    if out == before:
+        # Nothing gained, and rewriting would only churn the file.
+        return False
+    # Lossless can GROW a file, and Telegram's per-format caps are hard: a .tgs
+    # measured 64 139 bytes after re-encoding against a 65 536 cap, so a source
+    # already near the limit can cross it. Publishing a byte-clone is a lesser
+    # failure than an upload Telegram rejects, so the original wins here.
+    cap = {"animated": TGS_MAX_BYTES, "video": WEBM_MAX_BYTES}.get(fmt)
+    if cap is not None and len(out) > cap:
+        log.warning("re-encode of %s would be %d bytes, over the %s cap of %d; "
+                    "keeping the original", path.name, len(out), fmt, cap)
+        return False
+    path.write_bytes(out)
+    return True
+
+
 def _norm_pixels(img: Image.Image, n: int = 64) -> bytes:
     return img.convert("RGBA").resize((n, n), Image.LANCZOS).tobytes()
 

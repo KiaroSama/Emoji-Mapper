@@ -201,5 +201,33 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 self.assertEqual(cat.get(keys[0]).custom_emoji_id, f"{set_name}-0")
 
 
+class TheDefaultBrandLogoActuallyShips(unittest.TestCase):
+    """Owner rule: every pack the main bot builds leads with the YourBrand logo.
+
+    Every other test in this module passes its own synthetic logo, so none of
+    them notices if the DEFAULT one is missing. That is not hypothetical: the
+    default used to be an absolute F:\\ path, so on any machine but one the
+    "mandatory" logo silently vanished from every pack and nothing failed.
+    """
+
+    def test_the_default_logo_is_a_real_file_inside_the_repo(self):
+        p = Path(bc.BRAND_LOGO_DEFAULT)
+        self.assertTrue(p.is_file(), f"the default brand logo is missing: {p}")
+        self.assertTrue(
+            str(p.resolve()).startswith(str(ROOT.resolve())),
+            "the default brand logo must ship in the repo, not point at a "
+            "machine-specific path")
+
+    def test_the_default_logo_is_not_blank(self):
+        """A blank logo would upload as an empty first emoji in every pack."""
+        with Image.open(bc.BRAND_LOGO_DEFAULT) as im:
+            self.assertFalse(media.is_blank_image(im.convert("RGBA")))
+
+    def test_the_main_bot_gets_it_and_the_coin_bot_does_not(self):
+        self.assertIn("youremojibot", bc.BRAND_LOGO_BOTS)
+        self.assertNotIn("yourcoinemojibot", bc.BRAND_LOGO_BOTS,
+                         "the coin bot is exempt by owner decision")
+
+
 if __name__ == "__main__":
     unittest.main()
