@@ -51,10 +51,12 @@ EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"></sv
 def _load_standalone(path: Path, name: str):
     """Import a script as its own module object, with a neutral ``sys.argv``.
 
-    ``coins/`` is not a package and its scripts read ``sys.argv`` at import
-    time, so a plain import under a test runner would parse the runner's own
-    arguments. Loading a private module object also keeps the reload-based
-    tests below from mutating what other test modules already imported.
+    The scripts parse their arguments inside ``main(argv)`` now, so nothing here
+    depends on the command line at import. The neutral argv stays as a cheap
+    guard against that regressing -- an import-time ``sys.argv`` read is exactly
+    what made ``fetch_logos.py --help`` raise ValueError before argparse could
+    answer. Loading a private module object also keeps the reload-based tests
+    below from mutating what other test modules already imported.
     """
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -420,7 +422,7 @@ class FetchLogosCacheValidation(unittest.TestCase):
                                  PNG_DIR=self.png_dir, SVG_DIR=self.tmp / "svg",
                                  KEYWORDS_CSV=self.tmp / "keywords.csv"), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.mod.main(), 0)
+            self.assertEqual(self.mod.main([]), 0)
 
         self.assertIn("http://img.test/btc.png", asked)  # cache was not trusted
         self.assertTrue(self.mod._valid_image(dest))
@@ -442,7 +444,7 @@ class FetchLogosCacheValidation(unittest.TestCase):
                                  PNG_DIR=self.png_dir, SVG_DIR=self.tmp / "svg",
                                  KEYWORDS_CSV=self.tmp / "keywords.csv"), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.mod.main()
+            self.mod.main([])
 
         self.assertNotIn("http://img.test/btc.png", asked)
 
@@ -469,7 +471,7 @@ class FetchLogosCacheValidation(unittest.TestCase):
                                  PNG_DIR=self.png_dir, SVG_DIR=self.tmp / "svg",
                                  KEYWORDS_CSV=self.tmp / "keywords.csv"), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.mod.main(), 0)
+            self.assertEqual(self.mod.main([]), 0)
 
         rows = self._keywords_rows()
         self.assertIn("ok", rows)
@@ -1145,8 +1147,8 @@ class SharedHttpClient(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Standalone: fetch_logos reads sys.argv at import, so a plain import
-        # under the test runner would parse the runner's own arguments.
+        # Standalone so the reload-based tests cannot mutate a module object
+        # another test module already imported.
         cls.logos = _load_standalone(ROOT / "coins" / "fetch_logos.py",
                                      "http_fetch_logos")
 
@@ -1471,6 +1473,88 @@ class VerifyLogosMainContracts(unittest.TestCase):
                               "--fix", "--only", "sol")
         self.assertEqual(code, EXIT_OK)
         self.assertEqual(len(seen), 1)
+
+
+class AnUnrecognisedArgumentCannotSelectTheLiveBranch(unittest.TestCase):
+    """A typo must fail closed, not publish.
+
+    The coin fetchers decided their one destructive switch with
+    ``dry = "--dry" in sys.argv``. Membership testing has no notion of an
+    argument it does not recognise: ``--dryy``, ``--dr``, a stray positional or
+    any unknown flag all left ``dry`` False, and False is the branch that spends
+    the API quota, uploads to Telegram with the owner's credentials and rewrites
+    the canonical ticker map. There is no confirmation prompt behind it.
+
+    These drive ``main`` directly with the argv in question, so nothing here can
+    reach a network: argparse must refuse before ``load_env()`` on line one of
+    the body runs.
+    """
+
+    def _mods(self):
+        import coins.fetch_cmc as cmc
+        import coins.fetch_paprika as paprika
+        logos = _load_standalone(ROOT / "coins" / "fetch_logos.py", "argv_logos")
+        return {"fetch_paprika": paprika, "fetch_cmc": cmc, "fetch_logos": logos}
+
+    def test_a_misspelled_dry_flag_is_refused_by_both_providers(self):
+        for name, mod in self._mods().items():
+            if name == "fetch_logos":
+                continue
+            for typo in ("--dryy", "--dry-run", "--dr", "-dry", "dry"):
+                with self.subTest(module=name, argv=typo):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        with self.assertRaises(SystemExit) as caught:
+                            mod.main([typo])
+                    # 2 is argparse's usage code, and it is what the launcher
+                    # and CI read as "you typed something wrong".
+                    self.assertEqual(caught.exception.code, 2)
+                    self.assertIn("usage:", err.getvalue())
+
+    def test_the_real_dry_flag_still_parses(self):
+        """The guard must not have been bought by breaking the flag itself."""
+        for name, mod in self._mods().items():
+            if name == "fetch_logos":
+                continue
+            with self.subTest(module=name):
+                ap_seen = {}
+
+                def fake_load_env(_seen=ap_seen):
+                    _seen["reached"] = True
+                    raise _StopBeforeNetwork
+
+                with mock.patch.object(mod, "load_env", fake_load_env), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(_StopBeforeNetwork):
+                        mod.main(["--dry"])
+                self.assertTrue(ap_seen.get("reached"),
+                                "--dry must be accepted, not rejected as unknown")
+
+    def test_fetch_logos_page_count_is_not_read_at_import(self):
+        """`fetch_logos.py --help` used to raise ValueError from int(sys.argv[1]).
+
+        The module owned the command line at import, so it could not be
+        imported by anything that had its own arguments -- including the test
+        runner and the entry-point import smoke test.
+        """
+        logos = self._mods()["fetch_logos"]
+        self.assertEqual(logos.MAX_PAGES, 40, "the default must be a constant")
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as caught:
+                logos.main(["--help"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("usage:", out.getvalue())
+
+        for bad in ("notanumber", "0", "-3"):
+            with self.subTest(pages=bad):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        logos.main([bad])
+                self.assertEqual(caught.exception.code, 2)
+
+
+class _StopBeforeNetwork(Exception):
+    """Cuts main() off at its first side effect, so no test can go online."""
 
 
 if __name__ == "__main__":

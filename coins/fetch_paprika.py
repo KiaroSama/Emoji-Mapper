@@ -31,13 +31,13 @@ import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
+import argparse
 import contextlib
 import io
 import json
 import os
 import re
 import shutil
-import sys
 import tempfile
 import time
 import uuid
@@ -650,8 +650,25 @@ def resolve_phase(missing, cache) -> bool:
     return quota_hit
 
 
-def main() -> int:
-    dry = "--dry" in sys.argv
+def main(argv: list[str] | None = None) -> int:
+    # argparse, not `"--dry" in sys.argv`: membership testing means every
+    # spelling that is not exactly "--dry" -- a typo like --dryy, an unknown
+    # flag, a stray positional -- silently selected the LIVE branch, which
+    # uploads to Telegram with the owner's credentials and rewrites the
+    # canonical map. The safe reading of an argument nobody recognises is to
+    # refuse, and argparse refuses with a usage error and exit 2.
+    ap = argparse.ArgumentParser(
+        description="Fill unmapped coins from CoinPaprika and publish their "
+                    "logos to the coin pack family.",
+        # allow_abbrev=False: argparse accepts unambiguous prefixes by
+        # default, so "--dr" silently became "--dry". A near-miss is the
+        # typo class this guard exists for -- it must not be guessed at,
+        # in either direction.
+        allow_abbrev=False)
+    ap.add_argument("--dry", action="store_true",
+                    help="resolve and report only; download nothing and make "
+                         "no pack or map changes.")
+    dry = ap.parse_args(argv).dry
     load_env()
     ticker_to_id: dict[str, str] = json.loads(TICKER_IDS.read_text("utf-8"))
     have = set(ticker_to_id)

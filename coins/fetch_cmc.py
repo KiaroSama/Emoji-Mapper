@@ -25,9 +25,9 @@ import sys as _bootstrap_sys
 _bootstrap_sys.path.insert(0, _bootstrap_os.path.dirname(
     _bootstrap_os.path.dirname(_bootstrap_os.path.abspath(__file__))))
 
+import argparse
 import json
 import os
-import sys
 import time
 import urllib.parse
 
@@ -84,8 +84,22 @@ def get_logo_url(headers: dict, cmc_id: str) -> str | None:
     return logo.replace("/64x64/", "/128x128/")
 
 
-def main() -> int:
-    dry = "--dry" in sys.argv
+def main(argv: list[str] | None = None) -> int:
+    # See fetch_paprika.main(): `"--dry" in sys.argv` let any misspelling fall
+    # through to the live branch, which spends the CMC quota and publishes to
+    # Telegram. argparse refuses an unrecognised argument instead.
+    ap = argparse.ArgumentParser(
+        description="Fill unmapped coins from CoinMarketCap and publish their "
+                    "logos to the coin pack family.",
+        # allow_abbrev=False: argparse accepts unambiguous prefixes by
+        # default, so "--dr" silently became "--dry". A near-miss is the
+        # typo class this guard exists for -- it must not be guessed at,
+        # in either direction.
+        allow_abbrev=False)
+    ap.add_argument("--dry", action="store_true",
+                    help="resolve and report only; download nothing and make "
+                         "no pack or map changes.")
+    dry = ap.parse_args(argv).dry
     load_env()
     headers = cmc_headers()
     ticker_to_id: dict[str, str] = json.loads(TICKER_IDS.read_text("utf-8"))
