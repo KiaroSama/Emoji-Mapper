@@ -45,10 +45,20 @@ rather than adding an opt-out.
 |------|--------|
 | `test_media.py` | format detection, content/perceptual hashing, static→PNG, GIF→WEBM, Lottie→TGS, and the animated contract (512×512 canvas, frame rate, duration, gzip packaging, bounded decompression) |
 | `test_catalog.py` | catalog dedup (exact + perceptual), `file_unique_id` skip, pending/upload tracking, persistence |
-| `test_resume_safety.py` | the duplicate-upload paths: recorded-cursor resume, write-ahead in-flight record, atomic state writes, refusal to guess on unexplained drift, per-set limits, token redaction, and the shared-logo-group guard |
+| `test_resume_safety.py` | the duplicate-upload paths, driven through `build_pack.main()`: recorded-cursor resume, write-ahead in-flight record, atomic state writes, refusal to guess on unexplained drift, per-set limits |
+| `test_telegram_client.py` | `build_pack.Telegram` on its own: token redaction, the STICKERSET_INVALID retry scope, and what the client accepts as evidence that an upload landed |
+| `test_pack_locks.py` | `exclusive_lock` mechanics: refusal, release on error, stale reclaim and its races, ownership, heartbeat, and the lock-path helpers. (`test_lock_order.py` checks the documented ORDER of the same locks, by AST.) |
+| `test_rebuild_dedup_state.py` | the `coins/rebuild_dedup.py` mutation walk: plan → validate → delete the old packs → upload, plus its in-flight reconcile and run lock |
+| `test_rebuild_dedup_map.py` | the second phase of the same module: `map_and_fill` resolving `ticker_to_id.json` by image identity under the map lock, and the shared-logo-group guard |
 | `test_publish_dedup.py` | verified retries for non-idempotent Bot API calls, live-set reconcile, adopt-on-occupied, recorded fuids |
 | `test_panel.py` | brand-logo preview, inert item JSON (no script breakout), and the mutation guard (token, loopback Host/Origin, content type, body cap, exact-permutation order) |
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
+
+`_pack_fixtures.py` and `_rebuild_fixtures.py` hold the fakes shared by the
+modules above them (the PNG builders, `FakeTelegram`, `RebuildCase`). One copy
+each, because a duplicated fake drifts away from the thing it stands in for.
+The leading underscore is load-bearing: `-p "test_*.py"` must not collect them
+as test modules.
 
 ## Fixtures
 

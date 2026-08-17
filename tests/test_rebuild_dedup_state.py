@@ -13,11 +13,14 @@ stopped knowing what was live:
 * a retryable upload failure consuming the plan position forever (12),
 * an in-flight upload judged "landed" by a count any stranger's sticker
   satisfies (13),
-* the canonical map rebuilt from a snapshot read before the locks (A),
 * a legacy in-flight marker accepted at validation and then unresolvable
   forever at recovery (B),
 * a create recovery adopting a set of the wrong SHAPE, after it had already
   written the adoption to disk (C).
+
+This module covers the mutation walk: plan -> validate -> delete the old packs
+-> upload. The canonical map that the walk hands off to is a separate phase of
+the same module and lives in `test_rebuild_dedup_map`.
 
 No network and no real sleeps: Telegram is a fake object.
 """
@@ -25,12 +28,9 @@ No network and no real sleeps: Telegram is a fake object.
 from __future__ import annotations
 
 import importlib
-import io
 import json
 import os
-import random
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -38,208 +38,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PIL import Image  # noqa: E402
-
 import build_pack as bp  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
-
-
-def _image(key: str) -> Image.Image:
-    """Deterministic per-key noise; two different keys never look alike.
-
-    Flat colours are useless for identity: a dHash compares neighbouring
-    pixels, so every solid image hashes to the same value and "is this sticker
-    our upload?" would always answer yes.
-    """
-    rnd = random.Random(key)
-    img = Image.new("RGBA", (100, 100))
-    px = img.load()
-    for x in range(100):
-        for y in range(100):
-            v = rnd.randrange(256)
-            px[x, y] = (v, v, v, 255)
-    return img
-
-
-def _png_bytes(key: str) -> bytes:
-    buf = io.BytesIO()
-    _image(key).save(buf, "PNG")
-    return buf.getvalue()
-
-
-def _png(path: Path, key: str | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _image(key or path.stem).save(path, "PNG")
-
-
-class FakeTelegram:
-    """Records mutations; every live answer is scripted per test.
-
-    Sets carry real image bytes, because resume decides what landed by
-    comparing sticker CONTENT with the PNG that was sent.
-    """
-
-    def __init__(self, live: dict[str, int] | None = None):
-        self.images: dict[str, list[bytes]] = {}   # set name -> sticker images
-        self.live: dict[str, int] = {}             # set name -> live count
-        self.unknown: set[str] = set()        # sets whose live state is unreadable
-        self.missing: set[str] = set()        # sets that are definitively gone
-        self.add_calls: list[tuple] = []
-        self.create_calls: list[tuple] = []
-        self.deleted: list[str] = []
-        self.messages: list[str] = []
-        self.message_retries: list[int | None] = []
-        self.add_error: BaseException | None = None
-        self.create_error: BaseException | None = None
-        self.delete_error: BaseException | None = None
-        for name, count in (live or {}).items():
-            for i in range(count):
-                self.append(name, _png_bytes(f"{name}-seed{i}"))
-
-    # --- fake wire ------------------------------------------------------ #
-    def append(self, name: str, data: bytes) -> None:
-        """Put a sticker into a set outside our add path (a manual edit)."""
-        self.images.setdefault(name, []).append(data)
-        self.live[name] = len(self.images[name])
-
-    # --- live state ---------------------------------------------------- #
-    def probe_set_state(self, name: str):
-        if name in self.unknown:
-            return bp.SetState.UNKNOWN, None
-        if name in self.missing or name not in self.live:
-            return bp.SetState.MISSING, None
-        return bp.SetState.EXISTS, {
-            "stickers": [{"custom_emoji_id": f"{name}-{i}",
-                          "file_id": f"{name}#{i}",
-                          "file_unique_id": f"{name}#{i}"}
-                         for i in range(self.live[name])]}
-
-    def probe_sticker_set(self, name: str):
-        state, sset = self.probe_set_state(name)
-        return state is not bp.SetState.UNKNOWN, sset
-
-    def live_count_strict(self, name: str) -> int:
-        state, sset = self.probe_set_state(name)
-        if state is bp.SetState.UNKNOWN:
-            raise bp.LiveStateUnknown(f"live state of {name} is unknown")
-        return len(sset.get("stickers", [])) if sset else 0
-
-    def download_file(self, file_id: str, dest: Path) -> Path:
-        name, _, index = str(file_id).rpartition("#")
-        Path(dest).write_bytes(self.images[name][int(index)])
-        return Path(dest)
-
-    # The REAL comparator, not a stand-in: identity is the thing under test, so
-    # a fake that answers it would be testing itself. It only needs
-    # download_file, which this class provides, and returns None (unverifiable)
-    # for anything it cannot read -- exactly like it does against Telegram.
-    _sticker_matches = bp.Telegram._sticker_matches
-
-    # --- mutations ------------------------------------------------------ #
-    def add_sticker(self, user_id, name, png, emoji, kw, *, expected_before=None):
-        self.add_calls.append((name, png.stem))
-        if self.add_error:
-            raise self.add_error
-        self.append(name, Path(png).read_bytes())
-
-    def create_set(self, user_id, name, title, png, emoji, kw):
-        self.create_calls.append((name, png.stem))
-        if self.create_error:
-            raise self.create_error
-        self.images[name] = []
-        self.append(name, Path(png).read_bytes())
-
-    def _call(self, method, *, data=None, **kw):
-        if method == "deleteStickerSet":
-            self.deleted.append(data["name"])
-            if self.delete_error:
-                raise self.delete_error
-            self.live.pop(data["name"], None)
-            self.images.pop(data["name"], None)
-            self.missing.add(data["name"])
-            return {}
-        if method == "sendMessage":
-            self.messages.append(data["text"])
-            self.message_retries.append(kw.get("retries"))
-            return {}
-        if method == "getStickerSet":
-            # Same contract as the real client: a missing set is an error here,
-            # not an empty set.
-            _, sset = self.probe_set_state(data["name"])
-            if sset is None:
-                raise RuntimeError("getStickerSet failed: STICKERSET_INVALID")
-            return sset
-        raise AssertionError(f"unexpected API call {method}")
-
-    @property
-    def mutations(self) -> int:
-        return len(self.add_calls) + len(self.create_calls)
-
-
-class RebuildCase(unittest.TestCase):
-    """Redirects every module path at a temp directory."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-        self.emoji = self.dir / "emoji"
-        self.state = self.dir / "state.json"
-        self.plan = self.dir / "plan.json"
-        self.old_state = self.dir / "old_state.json"
-        self.groups = self.dir / "shared_logo_groups.json"
-        self.inv = self.dir / "inventory.md"
-        self.inv.write_text("ticker: aaa\n", encoding="utf-8")
-        # Every path the module writes to must point INSIDE the temp directory:
-        # build_plan() rewrites the plan AND the shared-logo report, and those
-        # are tracked project files.
-        patches = [
-            mock.patch.object(rd, "ROOT", self.dir),   # candidate map file
-            mock.patch.object(rd, "EMOJI", self.emoji),
-            mock.patch.object(rd, "STATE", self.state),
-            mock.patch.object(rd, "PLAN", self.plan),
-            mock.patch.object(rd, "OLD_STATE", self.old_state),
-            mock.patch.object(rd, "GROUPS_REPORT", self.groups),
-            mock.patch.object(rd, "INV", self.inv),
-            mock.patch.object(rd, "OUT_INV", self.dir / "inventory.filled.md"),
-            mock.patch.object(rd, "TICKER_IDS", self.dir / "ticker_to_id.json"),
-            mock.patch.object(rd, "BACKUP_IDS", self.dir / "ticker_to_id.bak.json"),
-            mock.patch.object(rd, "KEYWORDS_CSV", self.dir / "keywords.csv"),
-            mock.patch.object(rd, "LOCK", self.dir / "state.json.lock"),
-            mock.patch.object(rd, "USER_ID", 42),
-            mock.patch.object(rd.time, "sleep", lambda s: None),
-        ]
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
-        self.tmp_cleanup = self.addCleanup(self.tmp.cleanup)
-
-    def write_plan(self, reps: list[str]) -> None:
-        bp.write_json_atomic(self.plan, [
-            {"rep": r, "tickers": [r], "kw": r, "hash": r} for r in reps])
-        for r in reps:
-            _png(self.emoji / f"{r}.png")
-
-    def write_state(self, **kw) -> dict:
-        state = {"sets": [], "sent": [], "deleted_old": True, "final_sent": False,
-                 "order": [], "cursor": 0, "in_flight": None}
-        state.update(kw)
-        bp.write_json_atomic(self.state, state)
-        return state
-
-    def saved(self) -> dict:
-        return json.loads(self.state.read_text(encoding="utf-8"))
-
-    def run_build(self, tg) -> object:
-        """Run build(); return its exit code, or None if it did not stop.
-
-        Asserting on the code last keeps the FIRST failure about what was
-        mutated, which is the defect -- not about the exit code.
-        """
-        try:
-            rd.build(tg, "bot")
-        except SystemExit as exc:
-            return exc.code
-        return None
+from tests._rebuild_fixtures import (  # noqa: E402
+    FakeTelegram, RebuildCase, _png, _png_bytes)
 
 
 class AmbiguousUploadStopsTheRun(RebuildCase):
@@ -847,135 +649,6 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
                         "the lock must be HELD while the packs are mutated")
         self.assertFalse(rd.LOCK.exists(),
                          "a stopped run must not block the retry")
-
-
-class MapIsResolvedByImageIdentity(RebuildCase):
-    """3: the recorded upload order says what we SENT, not what is live now.
-
-    map_and_fill used to zip order[] against the current live cids after
-    checking only that the two were the same length. A same-length reorder or
-    replacement after the upload therefore rewrote ticker_to_id.json with wrong
-    assignments -- this is exactly how the Solama memecoin llama got published
-    as `sol`.
-    """
-
-    REPS = ["aaa", "bbb", "ccc"]
-
-    def setUp(self):
-        super().setUp()
-        self.map = self.dir / "ticker_to_id.json"
-        self.candidate = self.dir / "ticker_to_id.candidate.json"
-        self.write_plan(self.REPS)
-        self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
-                         order=list(self.REPS), cursor=len(self.REPS))
-        self.tg = FakeTelegram()
-        for rep in self.REPS:
-            self.tg.append("s1", (self.emoji / f"{rep}.png").read_bytes())
-
-    def mapping(self) -> dict:
-        return json.loads(self.map.read_text(encoding="utf-8"))
-
-    def test_the_untouched_pack_maps_by_content(self):
-        rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping(),
-                         {"aaa": "s1-0", "bbb": "s1-1", "ccc": "s1-2"})
-
-    def test_a_same_length_reorder_is_never_mapped_by_position(self):
-        # The pack was reordered after the upload: same length, same count, and
-        # position 0 now holds ccc's art.
-        imgs = self.tg.images["s1"]
-        imgs[0], imgs[2] = imgs[2], imgs[0]
-        rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping()["aaa"], "s1-2",
-                         "aaa must follow its IMAGE, not its upload position")
-        self.assertEqual(self.mapping()["ccc"], "s1-0")
-        self.assertNotEqual(self.mapping()["aaa"], "s1-0",
-                            "position 0 holds ccc's logo; that is the Solama bug")
-
-    def test_a_same_length_replacement_does_not_rewrite_the_map(self):
-        """A stranger's image at the same position, same count, same length."""
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
-        self.tg.images["s1"][1] = _png_bytes("someone-elses-logo")
-        with self.assertRaises(SystemExit) as caught:
-            rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping(), {"aaa": "keep-me"},
-                         "unprovable identity must leave the canonical map alone")
-        self.assertIn("s1-1", str(caught.exception.code))
-        self.assertTrue(self.candidate.is_file(),
-                        "a refusal must leave something reviewable behind")
-
-    def test_a_live_sticker_that_cannot_be_read_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
-        self.tg.images["s1"][1] = b"not an image at all"
-        with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
-
-    def test_a_missing_source_image_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
-        (self.emoji / "bbb.png").unlink()
-        with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
-
-    def test_an_extra_live_sticker_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
-        self.tg.append("s1", _png_bytes("appended-by-a-concurrent-tool"))
-        with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
-        self.assertEqual(self.mapping(), {"aaa": "keep-me"})
-
-    def test_the_canonical_map_is_written_under_the_shared_lock(self):
-        # Every writer of ticker_to_id.json takes this lock; holding it here
-        # must block the rebuild's own write rather than let it interleave.
-        with bp.canonical_map_lock():
-            with self.assertRaises(bp.LockBusy):
-                rd.map_and_fill(self.tg)
-        self.assertFalse(self.map.exists())
-        self.assertFalse(rd.LOCK.exists(),
-                         "the pack lock outlived the run that took it")
-
-    def test_a_provider_cannot_change_the_map_during_the_snapshot(self):
-        """A: the live read and the whole-map write are ONE locked span.
-
-        The map is rewritten in full from what is read here. A provider doing
-        its own read-modify-write in between -- it appends a sticker and adds
-        its map entry under the same lock -- has that entry erased by this
-        write, and nothing afterwards can tell that it existed. Only holding
-        the lock from the first live read to the write prevents it.
-        """
-        attempts: list[BaseException | None] = []
-        real_call = self.tg._call
-
-        def a_provider_runs_mid_read(method, *, data=None, **kw):
-            if method == "getStickerSet" and not attempts:
-                try:
-                    with bp.canonical_map_lock():
-                        bp.write_json_atomic(self.map, {"prov": "provider-cid"})
-                    attempts.append(None)
-                except bp.LockBusy as exc:
-                    attempts.append(exc)
-            return real_call(method, data=data, **kw)
-
-        self.tg._call = a_provider_runs_mid_read
-        rd.map_and_fill(self.tg)
-        self.assertIsInstance(
-            attempts[0], bp.LockBusy,
-            "the map was writable while its own replacement was being read; "
-            "an entry added there is erased by the write that follows")
-
-    def test_the_pack_family_lock_is_held_across_the_mapping(self):
-        """The live sets are read here, so a concurrent build must wait.
-
-        Pack-family lock FIRST, canonical map lock SECOND -- the documented
-        order, and the reason this can be taken while a build cannot.
-        """
-        with bp.exclusive_lock(rd.LOCK):
-            with self.assertRaises(bp.LockBusy):
-                rd.map_and_fill(self.tg)
-        self.assertFalse(self.map.exists(),
-                         "the map was rebuilt from live sets a concurrent "
-                         "build was still appending to")
 
 
 class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
