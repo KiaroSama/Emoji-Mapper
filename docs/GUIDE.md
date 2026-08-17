@@ -262,6 +262,7 @@ Self-contained tool that reuses `build_pack.py` and the coin bot.
 ```powershell
 # Logos (data): fetch + keywords
 .venv\Scripts\python.exe coins\fetch_logos.py          # CoinGecko logos + keywords.csv
+.venv\Scripts\python.exe coins\fetch_paprika.py --dry  # resolve + report only, nothing published
 .venv\Scripts\python.exe coins\fetch_paprika.py        # fill from CoinPaprika
 .venv\Scripts\python.exe coins\fetch_cmc.py            # fill from CoinMarketCap (needs CMC_API_KEY)
 .venv\Scripts\python.exe coins\build_keywords.py       # (re)build keywords.csv from logos
@@ -662,9 +663,9 @@ plus `copy_text` “Copy” button(s) underneath — not two quotes (see §8/§1
 
 | Command | Purpose |
 |---------|---------|
-| `coins\fetch_logos.py` | Download coin logos (CoinGecko) + write `keywords.csv`. |
-| `coins\fetch_paprika.py` | Fill remaining coins from CoinPaprika. |
-| `coins\fetch_cmc.py` | Fill remaining coins from CoinMarketCap (needs `CMC_API_KEY`). |
+| `coins\fetch_logos.py [pages]` | Download coin logos (CoinGecko) + write `keywords.csv`. `pages` is how many 250-coin market pages to walk (default 40 = up to 10 000 coins). |
+| `coins\fetch_paprika.py [--dry]` | Fill remaining coins from CoinPaprika. `--dry` resolves and reports only — no downloads, no pack or map changes. |
+| `coins\fetch_cmc.py [--dry]` | Fill remaining coins from CoinMarketCap (needs `CMC_API_KEY`). `--dry` as above. |
 | `coins\build_keywords.py` | (Re)build `keywords.csv` from logos on disk. |
 | `coins\rebuild_dedup.py [all\|build\|map\|links]` | Default `all` = **delete the old packs** + build + map + links (DESTRUCTIVE); `build` uploads only; `map` re-derives the id map; `links` resends links. |
 | `coins\remap_ids.py --emoji-dir DIR [--max-distance N --apply]` | Rebuild `ticker_to_id.json` by image content (drift-proof). `--apply` requires `--max-distance > 0`; needs numpy (`requirements-coins.txt`). |
