@@ -54,11 +54,12 @@ rather than adding an opt-out.
 | `test_panel.py` | brand-logo preview, inert item JSON (no script breakout), and the mutation guard (token, loopback Host/Origin, content type, body cap, exact-permutation order) |
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
 
-`_pack_fixtures.py` and `_rebuild_fixtures.py` hold the fakes shared by the
-modules above them (the PNG builders, `FakeTelegram`, `RebuildCase`). One copy
-each, because a duplicated fake drifts away from the thing it stands in for.
-The leading underscore is load-bearing: `-p "test_*.py"` must not collect them
-as test modules.
+`_pack_fixtures.py`, `_rebuild_fixtures.py` and `_cli_fixtures.py` hold the
+fakes shared by the modules above them (the PNG builders, `FakeTelegram`,
+`RebuildCase`, and the standalone-script loader every entry-point contract
+module imports). One copy each, because a duplicated fake drifts away from the
+thing it stands in for. The leading underscore is load-bearing:
+`-p "test_*.py"` must not collect them as test modules.
 
 ## Fixtures
 
