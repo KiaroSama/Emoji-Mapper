@@ -47,7 +47,6 @@ Emoji Mapper/
     media.py               format detect, hashing, conversions (static/video/tgs)
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
   coins/                   the crypto-coin component (see §7)
-  assets/vendor/           vendored Lottie player for the panel (offline)
   scripts/check.ps1        byte-compile + full unit suite (CI runs this too)
   tests/                   unit tests + fixtures (see tests/README.md and §10)
   docs/GUIDE.md            this file
@@ -67,7 +66,8 @@ Generated/local-only (gitignored): `collection/`, `logs/`, `build/`, `input/`,
 ```powershell
 # 1. Create the virtual environment (Python 3.11 is the supported runtime)
 py -3.11 -m venv .venv
-# Core manifest: requests + Pillow + resvg-py. Everything except one coin tool
+# Core manifest: requests + Pillow + resvg-py + rlottie-python. Everything
+# except one coin tool
 # runs on this alone.
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 # Coin extra: numpy, imported only by coins/remap_ids.py (~20 MB wheel + BLAS,
@@ -232,7 +232,7 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 ```
 
 Dark neon panel: every emoji is a big labelled card (static=image,
-video=`<video>`, animated `.tgs`=played via Lottie, lazily). All selected by
+video=`<video>`, animated `.tgs`=pre-rendered to animated WebP). All selected by
 default. Click to toggle, **Shift+click** for a range. Look-alikes are ordered
 adjacently. Click **Save** → writes the `included` flag to the catalog.
 
@@ -634,10 +634,16 @@ order; after that, drag-and-drop reordering is saved (POST `/api/order` →
 per-format set publishes in this relative order). The brand-logo preview card
 is fixed first and is never reordered/counted/saved.
 
-**Performance.** Animated `.tgs` use the vendored Lottie **SVG** renderer but
-are **not** autoplayed: each is rendered as a static first frame
-(`goToAndStop(0)`) and only the card you hover actually animates. Off-screen
-players are destroyed (IntersectionObserver). This keeps a 200-emoji grid
+**Performance.** Animated `.tgs` are pre-rendered server-side to an **animated
+WebP** (`media.lottie_preview_webp`, rlottie) and served as a plain
+`<img loading=lazy>`, so the browser animates every card at once on the
+compositor. There is no Lottie player, no `IntersectionObserver` and no
+animation JavaScript in the page at all. This replaced a lottie.js SVG player
+per card, which cost ~704 DOM nodes each -- measured on a 146-animation
+catalog, the document went from 1 426 nodes with none mounted to 8 476 with
+ten, and every scroll rebuilt a row's worth. Previews are cached under
+`<data-dir>/preview/` (~18 MB for 146 at 30fps/q60) and keyed by content hash,
+so they are built once. This keeps a 200-emoji grid
 responsive instead of running hundreds of looping animations at once (which
 previously hung the page). Benign browser disconnects while scrolling are
 swallowed server-side (no `ConnectionAbortedError` traceback spam).
@@ -840,8 +846,8 @@ for static/animated/video), and the legacy static `create_set`/`add_sticker`.
   existing Lottie (`.json` or `.tgs`): load → (rescale layers if the canvas
   isn't 100×100) → `json.dumps` minified → gzip with `mtime=0` (deterministic) →
   `validate_tgs` (size + required keys `v, fr, ip, op, layers`).
-- In the panel, `.tgs` is gunzipped server-side (`/lottie/<key>`) and played by
-  the vendored Lottie SVG player (lazily; only on-screen ones run).
+- In the panel, `.tgs` is rendered server-side to an animated WebP
+  (`/preview/<key>`) and played natively by the browser as an `<img>`.
 
 ### 15.3 Video (`video`)
 
@@ -1086,8 +1092,8 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 |-------|----------|
 | `GET /` | The single-page HTML (items embedded as JSON). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
-| `GET /lottie/<key>` | The `.tgs` gunzipped to Lottie **JSON** (for the player). |
-| `GET /static/<file>` | Vendored assets (the Lottie player), traversal-guarded. |
+| `GET /preview/<key>` | A `.tgs` rendered to an **animated WebP**, cached on disk. |
+| `GET /static/<file>` | Static assets (logo, favicon), traversal-guarded. |
 | `POST /api/save` | Body `{"excluded":[keys]}` → `catalog.set_inclusion(...)`. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 
@@ -1122,8 +1128,9 @@ Front-end:
   are handled natively (`loading="lazy"` / `preload="metadata"`).
 - `prefers-reduced-motion` is respected (hover never starts playback).
 
-The Lottie player is **vendored** at `assets/vendor/lottie_svg.min.js` (no
-runtime CDN), so the panel works offline.
+The panel ships no animation library: animated emoji are rasterised to WebP by
+`rlottie-python` on the server, so the page needs nothing from a CDN and works
+offline.
 
 ---
 
@@ -1248,7 +1255,6 @@ added, counts as the first of those 200).
 | `coins/ticker_to_id.prebroken.json` | no | Historic, and **not** a usable restore point despite the name — measured against the live stickers it scores the same as the map it was supposed to repair. |
 | `logs/*.log` | no | Per-run UTC logs. |
 | `state_<base>.json` | no | `build_pack` resume state. |
-| `assets/vendor/lottie_svg.min.js` | **yes** | Vendored Lottie player (offline). |
 
 ---
 

@@ -278,8 +278,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 name = unquote(self.path[len("/static/"):])
                 f = (ASSET_DIR / name).resolve()
                 # Resolve first, then require physical containment: comparing
-                # parents would reject assets/vendor/ and would not stop a
-                # symlink pointing outside the tree.
+                # parents would reject a legitimate subdirectory and would not
+                # stop a symlink pointing outside the tree.
                 if f.is_file() and f.is_relative_to(ASSET_DIR.resolve()):
                     ctype = ("application/javascript" if f.suffix == ".js"
                              else _MIME.get(f.suffix.lower(),
