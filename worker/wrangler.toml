@@ -1,0 +1,9 @@
+name = "emoji-mapper-bots"
+main = "src/index.ts"
+compatibility_date = "2026-08-18"
+
+# Not secret: the channel the announcements go to. Everything else -- both bot
+# tokens, both webhook secrets, the publish bearer and the admin list -- is set
+# with `wrangler secret put` and never appears in this file or in git.
+[vars]
+PACK_LINKS_CHAT_ID = ""

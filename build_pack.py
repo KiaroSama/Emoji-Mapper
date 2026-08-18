@@ -408,6 +408,46 @@ def links_chat_id(owner_id: int) -> str | int:
     return raw if raw.startswith("@") else int(raw)
 
 
+def worker_publish_url() -> str:
+    """Where finished packs are announced from, when a Worker is deployed.
+
+    Set ``WORKER_PUBLISH_URL`` (and ``WORKER_PUBLISH_SECRET``) to have the
+    Cloudflare Worker post pack links to the channel instead of this process
+    talking to Telegram directly. Unset means the old direct path, so an
+    existing setup keeps working untouched.
+    """
+    return os.environ.get("WORKER_PUBLISH_URL", "").strip()
+
+
+def announce_via_worker(packs: list[dict], *, note: str = "",
+                        bot: str = "coin", timeout: int = 30) -> None:
+    """Ask the Worker to announce finished packs. Raises on any failure.
+
+    ``packs`` is a list of ``{"name", "title", "count"}`` -- the Worker builds
+    the message and owns the channel destination, so the link text lives in one
+    place instead of being duplicated per publisher.
+
+    NOT retried, for the same reason the direct send is not: the Worker's
+    sendMessage is not idempotent and has no dedup key, so a timeout after
+    Telegram accepted the post cannot be told from one before it, and retrying
+    turns one outage into several identical announcements. The caller's
+    ``state["sent"]`` guard is what makes a later re-run safe.
+    """
+    url = worker_publish_url()
+    secret = os.environ.get("WORKER_PUBLISH_SECRET", "")
+    if not url or not secret:
+        raise RuntimeError("WORKER_PUBLISH_URL and WORKER_PUBLISH_SECRET must both be set")
+    body = {"bot": bot, "packs": packs}
+    if note:
+        body["note"] = note
+    resp = requests.post(url, json=body, timeout=timeout,
+                         headers={"Authorization": f"Bearer {secret}"})
+    if resp.status_code != 200:
+        # The body can carry the Worker's reason; the bearer never appears in it.
+        raise RuntimeError(f"worker announce failed (HTTP {resp.status_code}): "
+                           f"{resp.text[:200]}")
+
+
 def _under_a_test_runner() -> bool:
     """True when a test runner, not a tool, owns this process.
 
