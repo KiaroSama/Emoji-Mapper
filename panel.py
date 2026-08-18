@@ -29,9 +29,7 @@ from urllib.parse import unquote
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
-# ``_load_lottie`` is private to media, but it owns the .tgs decompression bound
-# (TGS_MAX_UNPACKED). Importing it keeps one bound; a copy here would drift.
-from emojikit.media import _load_lottie
+from emojikit.media import lottie_preview_webp
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -155,6 +153,30 @@ def _is_loopback(netloc: str) -> bool:
     return host in LOOPBACK_HOSTS
 
 
+# Animated previews are rendered once and kept on disk. The work is ~300-500 ms
+# per animation, and the server is threaded, so a scrolling browser will ask for
+# the same key from several connections at once -- one lock per key collapses
+# that to a single render instead of N identical ones fighting for the CPU.
+_preview_locks: dict[str, threading.Lock] = {}
+_preview_locks_guard = threading.Lock()
+
+
+def _preview_bytes(key: str, src: Path, db_path: Path) -> bytes:
+    """Animated-WebP preview for a .tgs, rendered once and cached on disk."""
+    cache_dir = db_path.parent / "preview"
+    # content_key is a hash of the media, so the name can never go stale; ':'
+    # is not legal in a Windows filename.
+    dest = cache_dir / (key.replace(":", "_") + ".webp")
+    if dest.is_file():
+        return dest.read_bytes()
+    with _preview_locks_guard:
+        per_key = _preview_locks.setdefault(key, threading.Lock())
+    with per_key:
+        if not dest.is_file():          # another thread may have won the race
+            lottie_preview_webp(src, dest)
+        return dest.read_bytes()
+
+
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
     lock = threading.Lock()
 
@@ -237,22 +259,20 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                            _MIME.get(it.suffix.lower(), "application/octet-stream"),
                            cache=_IMMUTABLE)
                 return
-            if self.path.startswith("/lottie/"):
-                key = unquote(self.path[len("/lottie/"):])
+            if self.path.startswith("/preview/"):
+                key = unquote(self.path[len("/preview/"):])
                 it = by_key.get(key)
                 if not it or not it.is_file():
-                    self._send(404, b"{}")
+                    self._send(404, b"not found", "text/plain")
                     return
                 try:
-                    # Bounded: a .tgs is gzip, and a few KB of it can expand to
-                    # gigabytes. gzip.decompress has no cap, so a corrupt or
-                    # hostile catalog entry could exhaust this process's RAM.
-                    body = json.dumps(_load_lottie(it),
-                                      separators=(",", ":")).encode("utf-8")
-                except Exception:  # noqa: BLE001
-                    self._send(500, b"{}")
+                    body = _preview_bytes(key, it, db_path)
+                except Exception as exc:  # noqa: BLE001 - one bad item must not 500 the grid
+                    log.warning("preview failed for %s: %s", key, exc)
+                    self._send(404, b"no preview", "text/plain")
                     return
-                self._send(200, body, "application/json", cache=_IMMUTABLE)
+                # Keyed by content_key, so the bytes can never change under it.
+                self._send(200, body, "image/webp", cache=_IMMUTABLE)
                 return
             if self.path.startswith("/static/"):
                 name = unquote(self.path[len("/static/"):])
@@ -456,8 +476,6 @@ body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
 .thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
-.thumb.lottie svg{width:104px!important;height:104px!important}
-.ph{font-size:46px;line-height:108px}
 .badge{position:absolute;top:8px;left:8px;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
   border-radius:6px;padding:2px 6px}
@@ -497,7 +515,6 @@ body.bg-gray  .thumb{background:#808a96}
 <div class="grid" id="grid"></div>
 <div id="toast"></div>
 <script id="items-data" type="application/json">__ITEMS__</script>
-<script src="/static/vendor/lottie_svg.min.js"></script>
 <script>
 // Catalog labels are attacker-influenced (they come from downloaded packs), so
 // item data is parsed from an inert JSON block and only ever written to the DOM
@@ -529,9 +546,16 @@ function makeThumb(it){
     v.src = src + '#t=0.001';
     box.appendChild(v);
   } else if(it.fmt === 'animated'){
-    box.classList.add('lottie');
-    box.dataset.key = encodeURIComponent(it.key);
-    box.appendChild(el('span','ph', it.emoji || '▶'));
+    // An animated WebP, played by the browser itself. This used to be a
+    // lottie.js SVG player per card (~704 DOM nodes each, six figures for a
+    // full grid) which is what made this panel crawl. One <img> animates on the
+    // compositor and costs one node, so every card can play at once again.
+    const img = el('img');
+    img.loading = 'lazy'; img.decoding = 'async';
+    img.width = 104; img.height = 104;
+    img.alt = it.label || '';
+    img.src = '/preview/' + encodeURIComponent(it.key);
+    box.appendChild(img);
   } else {
     const img = el('img');
     // Native lazy loading: the browser already defers off-screen images, and
@@ -560,48 +584,23 @@ function makeCard(it){
   return card;
 }
 
-// --- lazy media: nothing loads or animates until it is actually on screen ---
-const anims = new Map();
-function playAnim(div){ const a=anims.get(div); if(a && !RM){ try{a.play();}catch(_){} } }
-function stopAnim(div){ const a=anims.get(div); if(a){ try{a.goToAndStop(0,true);}catch(_){} } }
-
-// Only .tgs needs an observer: a lottie player is expensive to keep alive, so
-// one is built when its card nears the viewport and destroyed when it leaves.
-// Images and video are handled natively (loading=lazy / preload=metadata).
-const io = window.IntersectionObserver ? new IntersectionObserver(entries=>{
-  for(const e of entries){
-    const box = e.target;
-    if(e.isIntersecting){
-      if(!anims.has(box) && window.lottie){
-        const ph = box.querySelector('.ph'); if(ph) ph.remove();
-        // Render the first frame and stop: no requestAnimationFrame runs until
-        // you hover this card, so a screen full of .tgs costs almost nothing.
-        const a = lottie.loadAnimation({container:box, renderer:'svg', loop:true,
-          autoplay:false, path:'/lottie/'+box.dataset.key});
-        a.addEventListener('DOMLoaded',()=>{ try{a.goToAndStop(0,true);}catch(_){} });
-        anims.set(box,a);
-      }
-    } else {
-      const a = anims.get(box);
-      if(a){
-        try{a.destroy();}catch(_){}
-        anims.delete(box);
-        box.textContent = '';
-        box.appendChild(el('span','ph','▶'));
-      }
-    }
-  }
-},{root:null, rootMargin:'200px'}) : null;
+// --- lazy media ---
+// Static and animated thumbs are both plain <img> (loading=lazy), video uses
+// preload=metadata. The browser owns all of it: no player objects, no
+// IntersectionObserver, no per-card listeners to leak.
+//
+// This replaced a lottie.js SVG player per animated card. Measured on a
+// 146-animation catalog that was ~704 DOM nodes EACH -- 1 426 document nodes
+// with none mounted, 8 476 with ten -- and every scroll tore down and rebuilt a
+// row's worth. Pre-rendering each .tgs to an animated WebP server-side moves
+// the work off the page entirely, so all of them animate at once.
 
 function render(){
-  anims.forEach(a=>{try{a.destroy();}catch(_){}}); anims.clear();
-  if(io) io.disconnect();
   cards.clear();
   const frag = document.createDocumentFragment();
   for(const it of ITEMS) frag.appendChild(makeCard(it));
   grid.textContent = '';
   grid.appendChild(frag);
-  if(io) grid.querySelectorAll('.thumb.lottie').forEach(t=>io.observe(t));
   updateCount();
 }
 function updateCount(){
@@ -621,12 +620,10 @@ function setAll(fn){ for(const it of ITEMS){ if(it.isLogo) continue; it.included
 // Hover play/pause, by delegation -- no per-card listeners to leak.
 grid.addEventListener('mouseover',e=>{
   const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-  if(box.classList.contains('lottie')) playAnim(box);
   const v = box.querySelector('video'); if(v && !RM){ try{v.play();}catch(_){} }
 });
 grid.addEventListener('mouseout',e=>{
   const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-  if(box.classList.contains('lottie')) stopAnim(box);
   const v = box.querySelector('video'); if(v){ try{v.pause(); v.currentTime=0;}catch(_){} }
 });
 
