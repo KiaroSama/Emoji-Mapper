@@ -220,6 +220,15 @@ class MakeEmojiPngsLegacyFallback(unittest.TestCase):
 # panel: /lottie/ must not decompress without a bound
 # --------------------------------------------------------------------------- #
 class PanelLottieBound(unittest.TestCase):
+    """The panel must never materialise an unbounded .tgs.
+
+    The endpoint moved from /lottie/ (Lottie JSON, rendered by lottie.js in the
+    page) to /preview/ (an animated WebP rendered here), but the guarantee did
+    not: both go through media._load_lottie, which is where TGS_MAX_UNPACKED
+    lives. gzip.decompress has no cap, so a few KB of hostile .tgs could
+    otherwise exhaust this process.
+    """
+
     TOKEN = "test-token-value"
 
     def setUp(self):
@@ -257,17 +266,20 @@ class PanelLottieBound(unittest.TestCase):
             return e.code, e.read()
 
     def test_oversized_tgs_is_rejected(self):
-        code, body = self._get("/lottie/bomb")
-        self.assertEqual(code, 500)
+        code, body = self._get("/preview/bomb")
+        self.assertEqual(code, 404)
         self.assertLess(len(body), 1024)  # nothing of the bomb reached the client
 
-    def test_normal_tgs_still_served_as_json(self):
-        code, body = self._get("/lottie/good")
+    def test_normal_tgs_is_served_as_animated_webp(self):
+        code, body = self._get("/preview/good")
         self.assertEqual(code, 200)
-        self.assertEqual(json.loads(body)["w"], 512)
+        # RIFF....WEBP: the browser plays this itself, which is the whole point
+        # of pre-rendering -- a lottie.js player cost ~704 DOM nodes per item.
+        self.assertEqual(body[:4], b"RIFF")
+        self.assertEqual(body[8:12], b"WEBP")
 
     def test_unknown_key_is_404(self):
-        self.assertEqual(self._get("/lottie/nope")[0], 404)
+        self.assertEqual(self._get("/preview/nope")[0], 404)
 
 
 # --------------------------------------------------------------------------- #

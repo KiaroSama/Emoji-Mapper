@@ -435,6 +435,62 @@ def _load_lottie(src: Path) -> dict:
     return data
 
 
+#: Preview defaults. 30fps and lossy q60 were measured against the real catalog:
+#: lossless averaged 507 KB per animation (72 MB for 146), this averages 179 KB
+#: (25 MB) and is visually indistinguishable at thumbnail size -- checked on a
+#: QR-code emoji, the worst case for lossy artefacts.
+PREVIEW_SIZE = 104
+PREVIEW_FPS = 30
+PREVIEW_QUALITY = 60
+
+
+def lottie_preview_webp(src: Path, out: Path, *, size: int = PREVIEW_SIZE,
+                        fps: int = PREVIEW_FPS,
+                        quality: int = PREVIEW_QUALITY) -> Path:
+    """Rasterise a Lottie animation to an ANIMATED WebP for previewing.
+
+    A browser plays an animated WebP natively, on the compositor, at one DOM
+    node. The alternative -- a lottie.js SVG player per item -- costs ~704 DOM
+    nodes each: a 146-item catalog measured 1 426 document nodes with none
+    mounted and 8 476 with ten, so a full grid was six figures of nodes that
+    every scroll rebuilt. That is what made the curate panel unusable, and no
+    amount of lazy-mounting fixes it, because the cost is the renderer.
+
+    Goes through ``_load_lottie`` rather than handing the .tgs to rlottie
+    directly: that is where the decompression bound lives, and a preview path
+    that skips it would be a gzip bomb away from unbounded memory.
+    """
+    from rlottie_python import LottieAnimation      # optional; see requirements
+
+    data = _load_lottie(src)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Keeps the .webp suffix: Pillow picks its encoder from the extension, so a
+    # ".webp.tmp" name fails with "unknown file extension".
+    tmp = out.with_name(out.stem + ".tmp" + out.suffix)
+    anim = LottieAnimation.from_data(json.dumps(data))
+    try:
+        # Only resample when the clip is long enough to survive it. Ten of this
+        # catalog's animations are a single 1/60 s frame (op=1); asking for 30fps
+        # sampled them down to an EMPTY frame list and rlottie then died on
+        # im_list[0]. Their native rate is already cheap, so leave them alone.
+        opts = dict(width=size, height=size, lossless=False,
+                    quality=quality, method=4)
+        try:
+            duration = float(anim.lottie_animation_get_duration())
+        except Exception:      # noqa: BLE001 - a rate we cannot read is one we do not force
+            duration = 0.0
+        if duration * fps >= 1:
+            opts["fps"] = fps
+        # Written to a temp name and renamed: a half-written preview served to
+        # the browser would cache a broken image against a content key that
+        # never changes again.
+        anim.save_animation(str(tmp), **opts)
+    finally:
+        anim.lottie_animation_destroy()
+    os.replace(tmp, out)
+    return out
+
+
 def to_animated_tgs(src: Path, out: Path) -> Path:
     """Package a Lottie animation (.json or .tgs) into a valid 512x512 .tgs.
 
