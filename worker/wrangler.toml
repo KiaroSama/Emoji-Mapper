@@ -2,8 +2,11 @@ name = "emoji-mapper-bots"
 main = "src/index.ts"
 compatibility_date = "2026-08-18"
 
-# Not secret: the channel the announcements go to. Everything else -- both bot
-# tokens, both webhook secrets, the publish bearer and the admin list -- is set
-# with `wrangler secret put` and never appears in this file or in git.
-[vars]
-PACK_LINKS_CHAT_ID = ""
+# No [vars]. Everything the Worker reads -- both bot tokens, both webhook
+# secrets, the publish bearer, the admin list AND the channel -- is a secret set
+# with `wrangler secret put`, so none of it appears in this file or in git.
+#
+# The channel is not a credential, but putting it here would publish the owner's
+# channel name in a public repo, and a secret costs nothing extra: both arrive
+# as `env.PACK_LINKS_CHAT_ID` at runtime. Use `worker\scripts\put-secrets.ps1`
+# to push all of them straight from .env without printing any value.
