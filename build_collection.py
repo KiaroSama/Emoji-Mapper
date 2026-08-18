@@ -37,7 +37,8 @@ from pathlib import Path
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
                         AmbiguousUploadError, LiveStateUnknown, LockBusy,
                         SetState, Telegram, exclusive_lock, ingest_exit_code,
-                        links_chat_id, load_env, safe_int_env,
+                        announce_via_worker, links_chat_id, load_env,
+                        safe_int_env, worker_publish_url,
                         write_json_atomic)
 from emojikit import media
 from emojikit.catalog import Catalog
@@ -652,9 +653,16 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
            name: str, title: str) -> None:
     if name in state["sent"]:
         return
-    dest = links_chat_id(user_id)
+    # With a Worker deployed, the BOT posts the announcement and this process
+    # never talks to the channel. `state["sent"]` still guards it, so which path
+    # sent it does not change whether a re-run announces twice.
+    via_worker = bool(worker_publish_url())
+    dest = "the worker" if via_worker else links_chat_id(user_id)
     try:
-        tg.send_message(dest, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
+        if via_worker:
+            announce_via_worker([{"name": name, "title": title}], bot="general")
+        else:
+            tg.send_message(dest, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
         state["sent"].append(name)
         save_json(_state_path(data_dir, base), state)
         log.info("sent link for %s to %s", name, dest)
