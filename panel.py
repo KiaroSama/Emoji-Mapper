@@ -29,7 +29,7 @@ from urllib.parse import unquote
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
-from emojikit.media import lottie_preview_webp
+from emojikit.media import PREVIEW_FPS, lottie_preview_webp
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -161,23 +161,26 @@ _preview_locks: dict[str, threading.Lock] = {}
 _preview_locks_guard = threading.Lock()
 
 
-def _preview_bytes(key: str, src: Path, db_path: Path) -> bytes:
+def _preview_bytes(key: str, src: Path, db_path: Path, fps: int) -> bytes:
     """Animated-WebP preview for a .tgs, rendered once and cached on disk."""
     cache_dir = db_path.parent / "preview"
     # content_key is a hash of the media, so the name can never go stale; ':'
-    # is not legal in a Windows filename.
-    dest = cache_dir / (key.replace(":", "_") + ".webp")
+    # is not legal in a Windows filename. The rate is part of the name because
+    # it changes the bytes -- otherwise --preview-fps would silently serve
+    # whatever the last run happened to render.
+    dest = cache_dir / f"{key.replace(':', '_')}@{fps}.webp"
     if dest.is_file():
         return dest.read_bytes()
     with _preview_locks_guard:
-        per_key = _preview_locks.setdefault(key, threading.Lock())
+        per_key = _preview_locks.setdefault(dest.name, threading.Lock())
     with per_key:
         if not dest.is_file():          # another thread may have won the race
-            lottie_preview_webp(src, dest)
+            lottie_preview_webp(src, dest, fps=fps)
         return dest.read_bytes()
 
 
-def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
+def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
+                 preview_fps: int = PREVIEW_FPS):
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -244,7 +247,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                 # rendered an empty grid.
                 with lock:
                     items = _json_for_script(view)
-                page = PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
+                page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
+                            .replace("__PREVIEW_FPS__", str(preview_fps)))
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -260,13 +264,17 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str):
                            cache=_IMMUTABLE)
                 return
             if self.path.startswith("/preview/"):
-                key = unquote(self.path[len("/preview/"):])
+                # The frame rate is in the URL, not just the disk filename:
+                # these are served immutable, so a browser that cached the old
+                # rate would keep using it and --preview-fps would look inert.
+                path, _, _ = self.path.partition("?")
+                key = unquote(path[len("/preview/"):])
                 it = by_key.get(key)
                 if not it or not it.is_file():
                     self._send(404, b"not found", "text/plain")
                     return
                 try:
-                    body = _preview_bytes(key, it, db_path)
+                    body = _preview_bytes(key, it, db_path, preview_fps)
                 except Exception as exc:  # noqa: BLE001 - one bad item must not 500 the grid
                     log.warning("preview failed for %s: %s", key, exc)
                     self._send(404, b"no preview", "text/plain")
@@ -521,6 +529,7 @@ body.bg-gray  .thumb{background:#808a96}
 // with textContent -- never interpolated into markup.
 const ITEMS = JSON.parse(document.getElementById('items-data').textContent);
 const TOKEN = "__TOKEN__";
+const PREVIEW_FPS = __PREVIEW_FPS__;
 const grid = document.getElementById('grid');
 const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const cards = new Map();          // key -> card element
@@ -554,7 +563,7 @@ function makeThumb(it){
     img.loading = 'lazy'; img.decoding = 'async';
     img.width = 104; img.height = 104;
     img.alt = it.label || '';
-    img.src = '/preview/' + encodeURIComponent(it.key);
+    img.src = '/preview/' + encodeURIComponent(it.key) + '?fps=' + PREVIEW_FPS;
     box.appendChild(img);
   } else {
     const img = el('img');
@@ -767,6 +776,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Curate downloaded emoji before publishing.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--preview-fps", type=int, default=PREVIEW_FPS,
+                    help="Frame rate for animated previews. The grid can show "
+                         "60+ cards at once and the browser decodes every frame "
+                         "of each, so this is the main lever on how heavy the "
+                         "panel feels (default: %(default)s).")
     ap.add_argument("--no-open", action="store_true", help="Don't auto-open the browser.")
     args = ap.parse_args()
 
@@ -789,7 +803,7 @@ def main() -> int:
     # attach it to a no-cors POST, so it cannot re-order or de-select the
     # catalog behind the user's back.
     token = secrets.token_urlsafe(24)
-    handler = make_handler(view, by_key, db_path, token)
+    handler = make_handler(view, by_key, db_path, token, args.preview_fps)
 
     class QuietServer(ThreadingHTTPServer):
         # Don't dump a traceback when a browser simply drops a connection

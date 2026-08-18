@@ -435,12 +435,22 @@ def _load_lottie(src: Path) -> dict:
     return data
 
 
-#: Preview defaults. 30fps and lossy q60 were measured against the real catalog:
-#: lossless averaged 507 KB per animation (72 MB for 146), this averages 179 KB
-#: (25 MB) and is visually indistinguishable at thumbnail size -- checked on a
-#: QR-code emoji, the worst case for lossy artefacts.
+#: Preview defaults, measured against the real 146-animation catalog.
+#:
+#: Quality: lossless averaged 507 KB per animation (72 MB for the set); lossy
+#: q60 is visually indistinguishable at thumbnail size -- checked on a QR-code
+#: emoji, the worst case for lossy artefacts.
+#:
+#: Frame rate is the one that matters for how the panel FEELS, because the cost
+#: is the browser decoding every frame of every card on screen, and this grid
+#: can show 60+ cards at once. Measured per animation: 30fps = 54 frames /
+#: 119 KB, 20fps = 37 / 80 KB, 15fps = 28 / 60 KB, 12fps = 22 / 48 KB. 15 halves
+#: both the decode work and the bytes against 30 and still reads as motion on a
+#: 104 px tile. Override with ``panel.py --preview-fps`` rather than editing
+#: this; the cache is keyed by content hash, so changing it means clearing
+#: ``<data-dir>/preview/``.
 PREVIEW_SIZE = 104
-PREVIEW_FPS = 30
+PREVIEW_FPS = 15
 PREVIEW_QUALITY = 60
 
 
