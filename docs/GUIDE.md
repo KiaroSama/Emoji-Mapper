@@ -87,6 +87,8 @@ TELEGRAM_BOT_TOKEN=<coin bot token>
 GENERAL_BOT_TOKEN=<general bot token>
 BOT_ALLOWED_USER_IDS=<optional: extra ids allowed to use emoji_bot.py>
 PACK_LINKS_CHAT_ID=<optional: channel that receives finished-pack links>
+WORKER_PUBLISH_URL=<optional: https://<worker>.workers.dev/publish — see §12.9>
+WORKER_PUBLISH_SECRET=<optional: bearer for that endpoint; both or neither>
 EMOJI_LOG_RETENTION_DAYS=30    # optional: prune logs/ older than N days (0 = keep all)
 EMOJI_FFMPEG_TIMEOUT=300       # optional: seconds per ffmpeg/ffprobe child
 CMC_API_KEY=<optional CoinMarketCap key, only for coins/fetch_cmc.py>
@@ -396,6 +398,19 @@ environment and refuses non-loopback sockets — never runs.
 `tests.test_entry_points.SuiteIsHermetic` fails loudly when the suite is started
 without it. Details in [`tests/README.md`](../tests/README.md).
 
+**The Worker suite is separate and is not in `check.ps1` or CI yet.** `worker/`
+is TypeScript with its own vitest suite; running it needs Node, which nothing
+else in this project does, so `check.ps1` stayed Python-only rather than
+demanding a Node toolchain from every contributor. Run it yourself after
+touching `worker/`:
+
+```bash
+cd worker && npm run typecheck && npm test
+```
+
+Wiring it into CI is an open item — do it together with the npm entry
+`dependabot.yml` is also missing for `/worker`.
+
 CI (`.github/workflows/ci.yml`, Python 3.11 **and** 3.12): installs both
 dependency manifests + ruff + ffmpeg, runs `ruff check .`, the import smoke
 test, then `scripts/check.ps1` (compile + lint + suite, `shell: pwsh`), then an
@@ -626,7 +641,10 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 | `--no-open` | off | Don't auto-open the browser. |
 
 Interactions: **click** a card to toggle include/exclude, **drag** a card to
-reorder (this is the publish order), **hover** an animated emoji to play it.
+reorder (this is the publish order), **hover** a *video* emoji to play it.
+Animated emoji play on their own while near the viewport; the header's
+**Animation: On/Off** button stops that everywhere and is remembered in
+`localStorage`.
 
 **Order = publish order.** The panel shows items in the saved manual order
 (`items.position`). On first open it is seeded to the look-alike similarity
@@ -637,19 +655,26 @@ is fixed first and is never reordered/counted/saved.
 
 **Performance.** Animated `.tgs` are pre-rendered server-side to an **animated
 WebP** (`media.lottie_preview_webp`, rlottie) and served as a plain
-`<img loading=lazy>`, so the browser animates every card at once on the
-compositor. There is no Lottie player, no `IntersectionObserver` and no
-animation JavaScript in the page at all. This replaced a lottie.js SVG player
-per card, which cost ~704 DOM nodes each -- measured on a 146-animation
-catalog, the document went from 1 426 nodes with none mounted to 8 476 with
-ten, and every scroll rebuilt a row's worth. Previews are cached under
-`<data-dir>/preview/` (~9 MB for 146 at 15fps/q60), keyed by content hash and
-frame rate, so they are built once. The frame rate is the lever that decides how
-heavy the grid feels, because the browser decodes every frame of every visible
-card and ~24 are on screen at 1280x720: measured per animation, 30fps costs 54
-frames / 119 KB against 15fps's 28 / 60 KB. Use `--preview-fps` to go lower.
-Benign browser disconnects while scrolling are
-swallowed server-side (no `ConnectionAbortedError` traceback spam).
+`<img loading=lazy>`, so the browser animates them on the compositor. There is
+no Lottie player and no animation library in the page. This replaced a
+lottie.js SVG player per card, which cost ~704 DOM nodes each -- measured on a
+146-animation catalog, the document went from 1 426 nodes with none mounted to
+8 476 with ten, and every scroll rebuilt a row's worth. Previews are cached
+under `<data-dir>/preview/` (~9 MB for 146 at 15fps/q60), keyed by content hash
+and frame rate, so they are built once. The frame rate is the lever that decides
+how heavy the grid feels, because the browser decodes every frame of every
+animated card: measured per animation, 30fps costs 54 frames / 119 KB against
+15fps's 28 / 60 KB. Use `--preview-fps` to go lower.
+
+**Only cards near the viewport carry the animated frames.** Each animated
+preview is rendered twice -- `?still=1` (frame 0, ~3 KB) and the animated file
+(~60 KB) -- and one `IntersectionObserver` (300-px margin) swaps `img.src`
+between them. `content-visibility:auto` alone was not enough: a decoded
+off-screen animation still costs its full frame buffer, so the swap is what
+bounds the work to what is on screen. **Animation: On** in the header (default
+on, persisted in `localStorage`) forces every card back to the still. Benign
+browser disconnects while scrolling are swallowed server-side (no
+`ConnectionAbortedError` traceback spam).
 
 **Brand logo preview.** If `GENERAL_BOT_TOKEN` resolves to
 `@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
@@ -683,6 +708,57 @@ plus `copy_text` “Copy” button(s) underneath — not two quotes (see §8/§1
 | `coins\write_manifests.py --out-dir DIR` | Write per-pack manifest `.md` files. |
 | `coins\enhance_map.py` | Map chain-suffixed tickers (e.g. `bnbbsc`) to the base id. |
 | `coins\alias_map.py` | Map tickers to a base id by matching coin name. |
+
+### 12.9 `worker/` — Cloudflare Worker (both bots + pack announcements)
+
+Both bots hosted on Cloudflare instead of this machine, plus the endpoint the
+local build calls so a finished pack is announced **by the bot** in the channel.
+
+| Route | Auth | What |
+|---|---|---|
+| `POST /tg/general` | `X-Telegram-Bot-Api-Secret-Token` | Webhook, general bot |
+| `POST /tg/coin` | `X-Telegram-Bot-Api-Secret-Token` | Webhook, coin bot |
+| `POST /publish` | `Authorization: Bearer …` | Announce finished packs |
+| `GET /health` | none | Liveness; returns no secrets |
+
+Each bot has its **own path and its own webhook secret** — the token never
+appears in a webhook request, so one shared endpoint could not tell the bots
+apart, and one shared secret would let a leak from either forge the other's
+updates.
+
+**A token can use `getUpdates` or a webhook, never both.** Registering a webhook
+stops `emoji_bot.py` (§12.7, §19) receiving anything on that token;
+`deleteWebhook` hands it back. Run one or the other per token.
+
+`ADMIN_USER_IDS` **fails closed**, exactly like `emoji_bot.allowed_user_ids()`:
+unset, empty or all-invalid means the bots answer nobody. Only plain positive
+integers count — `Number()` would have accepted `0x10`, `12.5` and `1e3`.
+A stranger gets one reply in private and **silence in a group**, so the bot
+cannot be turned into a spam vector.
+
+Webhook handlers return **200 even when handling fails**. Telegram redelivers
+any non-2xx and every action here is a `sendMessage`, so a redelivery after a
+partial success posts the reply twice; failures are logged instead. Nothing is
+retried internally, for the same reason as the Python client (§5).
+
+Local side: set `WORKER_PUBLISH_URL` **and** `WORKER_PUBLISH_SECRET` and
+`build_collection.notify()` routes links through the Worker; leave either unset
+and the original direct `sendMessage` path runs unchanged. The duplicate guard
+does not move — `state["sent"]` still decides, and a *failed* announcement is
+deliberately not recorded as sent, or the guard would skip it forever.
+Pack names are validated against `[A-Za-z0-9_]{1,64}` before they reach a public
+`t.me/addemoji/` link.
+
+```bash
+cd worker && npm install
+npm run typecheck     # tsc --noEmit
+npm test              # vitest; fetch is stubbed, nothing reaches Telegram
+wrangler deploy
+```
+
+Secrets (`wrangler secret put`), webhook registration and the channel id:
+`worker/README.md`.
+
 ---
 
 ## 13. The catalog database (`collection/catalog.db`)
@@ -1081,6 +1157,12 @@ Behaviour by chat type:
 callback is needed — the client copies locally. `setMyCommands` registers
 `/start` and `/help` in the bot's menu.
 
+The same extraction is ported to TypeScript in `worker/src/emoji.ts` (§12.9),
+including the `quote` / `external_reply.quote` entities — among the few that
+survive into a partial quote, and missing them silently drops premium emoji
+inside quoted replies. **A token can serve `getUpdates` or a webhook, never
+both**: point a webhook at the Worker and this poller goes deaf on that token.
+
 Operational notes: run exactly one instance (two concurrent `getUpdates` cause
 **409 Conflict**). For groups the bot needs admin or privacy-mode off to see
 messages; for channels it must be an admin to receive `channel_post`.
@@ -1118,18 +1200,17 @@ Front-end:
   default, plus a **Backdrop switch** (Checker → Light → Dark → Gray, persisted
   in `localStorage`) to inspect tricky emoji on any background.
 - All selected by default. Click toggles; **Shift+click** toggles a range.
-  Header buttons: Select all / Deselect all / Invert / Save.
-- **Nothing plays until you hover it.** A grid of simultaneously playing videos
-  and Lottie players was the main CPU sink, so every card paints a still first
-  frame instead: static → `<img loading="lazy">`; video → `<video>` with
-  `preload="metadata"` and `#t=0.001` (muted, looping, but **not** autoplaying),
-  playback starting on hover; animated → a Lottie SVG player created
-  `autoplay:false` + `goToAndStop(0)`.
-- Only `.tgs` needs an observer: its player is built by an `IntersectionObserver`
-  (200-px root margin) when the card nears the viewport and **destroyed** when it
-  leaves, so a catalog with hundreds of animations stays fast. Images and video
-  are handled natively (`loading="lazy"` / `preload="metadata"`).
-- `prefers-reduced-motion` is respected (hover never starts playback).
+  Header buttons: Select all / Deselect all / Invert / Animation: On|Off / Save.
+- **Static and animated are both plain `<img loading="lazy">`** — the browser
+  owns decoding and compositing, and there are no player objects to build or
+  tear down. Video is `<video preload="metadata">` with `#t=0.001` (muted,
+  looping, **not** autoplaying); it plays on hover, because a grid of
+  simultaneously playing videos was the original CPU sink.
+- Animated cards swap `src` between a still (`?still=1`) and the animated WebP
+  via one `IntersectionObserver` (300-px margin), so only what is near the
+  viewport holds frame buffers. `content-visibility:auto` is set as well but
+  does not by itself stop an off-screen animation from costing its buffers.
+- `prefers-reduced-motion` is respected (hover never starts video playback).
 
 The panel ships no animation library: animated emoji are rasterised to WebP by
 `rlottie-python` on the server, so the page needs nothing from a CDN and works
@@ -1422,7 +1503,8 @@ DUPLICATE image groups: 0 (extra duplicate stickers: 0)
 
 - **Language:** all code, comments, filenames, logs, docs in English.
 - **Placement:** source at root or in `emojikit/`/`coins/`; tests in `tests/`;
-  docs in `docs/`; vendored assets in `assets/vendor/`. Don't clutter the root.
+  docs in `docs/`; shipped images in `assets/`; the Cloudflare Worker in
+  `worker/`. Don't clutter the root.
 - **No new dedup/mapping mechanisms** — extend the catalog (§5, §13, §16).
 - **Never** commit `.env`, `secrets.md`, `collection/`, `logs/`, tokens.
 - **Logging** is mandatory for executable scripts via `emojikit.logsetup`
