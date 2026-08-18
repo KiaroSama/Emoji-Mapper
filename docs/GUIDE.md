@@ -749,15 +749,32 @@ deliberately not recorded as sent, or the guard would skip it forever.
 Pack names are validated against `[A-Za-z0-9_]{1,64}` before they reach a public
 `t.me/addemoji/` link.
 
-```bash
-cd worker && npm install
-npm run typecheck     # tsc --noEmit
-npm test              # vitest; fetch is stubbed, nothing reaches Telegram
-wrangler deploy
+```powershell
+cd worker; npm install
+npm run typecheck                    # tsc --noEmit
+npm test                             # vitest; fetch stubbed, nothing reaches Telegram
+.\scripts\put-secrets.ps1 -DryRun    # which key comes from where; no values shown
+.\scripts\put-secrets.ps1            # pipes them from ..\.env into wrangler stdin
+npx wrangler deploy
 ```
 
-Secrets (`wrangler secret put`), webhook registration and the channel id:
-`worker/README.md`.
+`wrangler.toml` has **no `[vars]`**. Everything the Worker reads — both tokens,
+both webhook secrets, the publish bearer, the admin list *and the channel* — is
+a secret, so none of it is in the committed file. The channel is not a
+credential; it is a secret only because `wrangler.toml` is public and both
+forms arrive as `env.PACK_LINKS_CHAT_ID` anyway.
+
+`scripts\put-secrets.ps1` reads `.env` with the same parse as
+`build_pack.load_env` and pipes each value to `wrangler secret put` **through
+stdin** — never an argument (arguments are visible in the process list), never
+printed. It composes `ADMIN_USER_IDS` from `PACK_OWNER_USER_ID` +
+`BOT_ALLOWED_USER_IDS` (deduped, integers only), because that list fails closed
+and a hand-typed mistake is silent: the bots simply answer nobody. Missing
+webhook/publish secrets are generated and written **back** to `.env`, or the
+next run would mint different ones and every delivery would fail its check. A
+missing token or channel is an error, not something to invent.
+
+Webhook registration and the per-secret detail: `worker/README.md`.
 
 ---
 
