@@ -191,21 +191,42 @@ premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
 .venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> C1
 ```
 
+## Cloudflare Worker (both bots, hosted)
+
+`worker/` runs the same bot behaviour on Cloudflare instead of your machine —
+both bots in one Worker, each on its own path (`/tg/general`, `/tg/coin`) with
+its own webhook secret, answering only the ids in `ADMIN_USER_IDS`. It also
+exposes `POST /publish`, so a finished pack is announced **by the bot** in your
+channel rather than by this machine: set `WORKER_PUBLISH_URL` and
+`WORKER_PUBLISH_SECRET` in `.env` and `build_collection.py` routes its links
+through it. Leave them unset and the existing direct path is used, unchanged.
+
+> **A Telegram bot token can use `getUpdates` (polling) or a webhook — never
+> both.** Registering a webhook for a token stops `emoji_bot.py` receiving
+> anything on it; `deleteWebhook` hands it back. Run one or the other per token.
+
+Setup, secrets and deployment: [`worker/README.md`](worker/README.md).
+
 ## Curate panel (pick which emoji go into the pack)
 
 `panel.py` opens a local dark neon-blue web panel showing every emoji in the
-catalog as a large labelled card — static as images, video as `<video>`, and
-**animated `.tgs` rendered with Lottie**. Nothing animates until you **hover** a
-card: a grid of simultaneously looping videos and Lottie players was the main
-CPU sink, so each card paints its first frame and stays still. Off-screen Lottie
-players are destroyed entirely. All cards are selected by default; click one to
-toggle it (deselected = excluded from the next publish), Shift+click for a
+catalog as a large labelled card. All cards are selected by default; click one
+to toggle it (deselected = excluded from the next publish), Shift+click for a
 range, **drag** to set the publish order. Visually similar emoji start out next
 to each other so look-alikes are quick to deselect. Click **Save**, then
 `build_collection.py` only publishes the included items.
 
+Animated `.tgs` are **pre-rendered to animated WebP on the server** (rlottie)
+and shown as plain `<img>`, so a grid of hundreds animates on the browser's
+compositor with no animation library in the page. Only cards near the viewport
+carry the animated frames; the rest hold a still. The header's **Animation:
+On/Off** button stops that everywhere (remembered across reloads), and
+`--preview-fps` sets the frame rate, which is the real lever on how heavy the
+grid feels. Video cards still play on hover only.
+
 ```powershell
 .venv\Scripts\python.exe panel.py        # or run.ps1 -> B4
+.venv\Scripts\python.exe panel.py --preview-fps 12   # lighter still
 ```
 
 ## Crypto-coin workflow (one component: `coins/`)
@@ -261,6 +282,10 @@ Emoji Mapper/                  # the whole project
     logsetup.py                # UTC file logging
     media.py                   # format detect + hashing + static/video/tgs convert
     catalog.py                 # content-addressed SQLite catalog (dedup)
+  worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
+    src/                       # auth, telegram, emoji-id extraction, routing
+    test/                      # vitest, fetch stubbed (never reaches Telegram)
+  assets/                      # shipped images (incl. the brand logo)
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   requirements.txt

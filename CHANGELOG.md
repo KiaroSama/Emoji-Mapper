@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`worker/` — both bots in one Cloudflare Worker (TypeScript).** Webhook
+  routes `POST /tg/general` and `POST /tg/coin`, plus `POST /publish` so a
+  finished pack is announced **by the bot** in the channel instead of by the
+  machine that built it, and `GET /health`. Each bot gets its own path and its
+  own webhook secret: the token never appears in a webhook request, so one
+  endpoint could not tell them apart, and one shared secret would let a leak
+  from either forge the other's updates.
+  `ADMIN_USER_IDS` fails closed like `emoji_bot.allowed_user_ids()` — unset,
+  empty or all-invalid answers nobody, and only plain positive integers count
+  (`Number()` would have taken `0x10`, `12.5`, `1e3`). A stranger gets one reply
+  in private and silence in a group.
+  Webhook handlers return 200 even on failure: Telegram redelivers any non-2xx
+  and every action is a `sendMessage`, so a redelivery after a partial success
+  posts the reply twice.
+  **A token can use `getUpdates` or a webhook, never both** — registering a
+  webhook stops `emoji_bot.py` receiving anything on that token. `emoji_bot.py`
+  is unchanged and still works; `deleteWebhook` hands the token back.
+  17 vitest tests with `fetch` stubbed, `tsc --noEmit` clean.
+- **`build_collection.notify()` routes through the Worker** when
+  `WORKER_PUBLISH_URL` *and* `WORKER_PUBLISH_SECRET` are both set; the original
+  direct path runs unchanged otherwise. `state["sent"]` still owns duplicate
+  suppression, and a failed announcement is deliberately **not** recorded as
+  sent — recording it would make the guard skip that pack forever.
+- **Panel: an `Animation: On/Off` button**, persisted in `localStorage`, and
+  animated cards now hold frames only while near the viewport (one
+  `IntersectionObserver` swapping a ~3 KB still for the ~60 KB animation).
+  `content-visibility:auto` alone did not stop an off-screen animation costing
+  its full frame buffer.
 - **`scripts/check.ps1`** — one command that byte-compiles every source file,
   runs `ruff check .`, then runs the full unit suite. Cheap gates first, each
   step bounded (per-step wall ceiling, exit 124 on timeout) and propagating a
