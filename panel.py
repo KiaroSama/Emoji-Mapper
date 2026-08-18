@@ -29,7 +29,8 @@ from urllib.parse import unquote
 from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
-from emojikit.media import PREVIEW_FPS, lottie_preview_webp
+from emojikit.media import (PREVIEW_FPS, lottie_preview_webp,
+                            lottie_still_webp)
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -161,21 +162,30 @@ _preview_locks: dict[str, threading.Lock] = {}
 _preview_locks_guard = threading.Lock()
 
 
-def _preview_bytes(key: str, src: Path, db_path: Path, fps: int) -> bytes:
-    """Animated-WebP preview for a .tgs, rendered once and cached on disk."""
+def _preview_bytes(key: str, src: Path, db_path: Path, fps: int,
+                   still: bool = False) -> bytes:
+    """Preview for a .tgs, rendered once and cached on disk.
+
+    ``still`` gives frame 0 as a single-frame WebP, which is what off-screen
+    cards show -- see lottie_still_webp for why that matters.
+    """
     cache_dir = db_path.parent / "preview"
     # content_key is a hash of the media, so the name can never go stale; ':'
     # is not legal in a Windows filename. The rate is part of the name because
     # it changes the bytes -- otherwise --preview-fps would silently serve
     # whatever the last run happened to render.
-    dest = cache_dir / f"{key.replace(':', '_')}@{fps}.webp"
+    tag = "still" if still else str(fps)
+    dest = cache_dir / f"{key.replace(':', '_')}@{tag}.webp"
     if dest.is_file():
         return dest.read_bytes()
     with _preview_locks_guard:
         per_key = _preview_locks.setdefault(dest.name, threading.Lock())
     with per_key:
         if not dest.is_file():          # another thread may have won the race
-            lottie_preview_webp(src, dest, fps=fps)
+            if still:
+                lottie_still_webp(src, dest)
+            else:
+                lottie_preview_webp(src, dest, fps=fps)
         return dest.read_bytes()
 
 
@@ -267,14 +277,15 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # The frame rate is in the URL, not just the disk filename:
                 # these are served immutable, so a browser that cached the old
                 # rate would keep using it and --preview-fps would look inert.
-                path, _, _ = self.path.partition("?")
+                path, _, query = self.path.partition("?")
+                still = "still=1" in query
                 key = unquote(path[len("/preview/"):])
                 it = by_key.get(key)
                 if not it or not it.is_file():
                     self._send(404, b"not found", "text/plain")
                     return
                 try:
-                    body = _preview_bytes(key, it, db_path, preview_fps)
+                    body = _preview_bytes(key, it, db_path, preview_fps, still)
                 except Exception as exc:  # noqa: BLE001 - one bad item must not 500 the grid
                     log.warning("preview failed for %s: %s", key, exc)
                     self._send(404, b"no preview", "text/plain")
@@ -518,6 +529,7 @@ body.bg-gray  .thumb{background:#808a96}
   <button id="none">Deselect all</button>
   <button id="inv">Invert</button>
   <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
+  <button id="anim" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding.">Animation: On</button>
   <button id="save" class="primary">Save selection</button>
 </header>
 <div class="grid" id="grid"></div>
@@ -563,7 +575,13 @@ function makeThumb(it){
     img.loading = 'lazy'; img.decoding = 'async';
     img.width = 104; img.height = 104;
     img.alt = it.label || '';
-    img.src = '/preview/' + encodeURIComponent(it.key) + '?fps=' + PREVIEW_FPS;
+    // Starts as the still. The observer swaps in the animation when the card is
+    // near the viewport -- an animated image the browser cannot show still costs
+    // its decoded frames (~2.5 MB each here, 361 MB if all 146 buffer at once).
+    const k = encodeURIComponent(it.key);
+    img.dataset.anim = '/preview/' + k + '?fps=' + PREVIEW_FPS;
+    img.dataset.still = '/preview/' + k + '?still=1';
+    img.src = img.dataset.still;
     box.appendChild(img);
   } else {
     const img = el('img');
@@ -593,6 +611,36 @@ function makeCard(it){
   return card;
 }
 
+// Only the cards you can actually see animate. Everything else holds frame 0,
+// so the number of live animations is bounded by the viewport rather than by
+// the catalog. Swapping an <img> src is cheap -- both URLs are immutable-cached,
+// so this never refetches -- which is what makes this affordable where
+// mounting/destroying a player was not.
+const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
+  for (const e of es) {
+    const img = e.target;
+    const want = (e.isIntersecting && ANIM_ON) ? img.dataset.anim : img.dataset.still;
+    if (want && img.getAttribute('src') !== want) img.src = want;
+  }
+}, {root: null, rootMargin: '300px'}) : null;
+
+function observeAnimated(){
+  if (!animIO) return;
+  grid.querySelectorAll('img[data-anim]').forEach(i => animIO.observe(i));
+}
+
+// Master switch. Off = every card holds frame 0 and nothing decodes at all,
+// which is the lightest the grid can be; the observer stops swapping so it
+// cannot undo the freeze behind your back.
+let ANIM_ON = localStorage.getItem('animOn') !== '0';
+function applyAnim(){
+  document.getElementById('anim').textContent = 'Animation: ' + (ANIM_ON ? 'On' : 'Off');
+  grid.querySelectorAll('img[data-anim]').forEach(img => {
+    if (!ANIM_ON) { if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still; }
+    else if (animIO) { animIO.unobserve(img); animIO.observe(img); }  // re-evaluate visibility
+  });
+}
+
 // --- lazy media ---
 // Static and animated thumbs are both plain <img> (loading=lazy), video uses
 // preload=metadata. The browser owns all of it: no player objects, no
@@ -610,6 +658,8 @@ function render(){
   for(const it of ITEMS) frag.appendChild(makeCard(it));
   grid.textContent = '';
   grid.appendChild(frag);
+  observeAnimated();
+  applyAnim();
   updateCount();
 }
 function updateCount(){
@@ -713,6 +763,11 @@ grid.addEventListener('dragend',()=>{
 document.getElementById('all').onclick=()=>setAll(()=>true);
 document.getElementById('none').onclick=()=>setAll(()=>false);
 document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
+document.getElementById('anim').onclick=()=>{
+  ANIM_ON = !ANIM_ON;
+  try{ localStorage.setItem('animOn', ANIM_ON ? '1' : '0'); }catch(_){}
+  applyAnim();
+};
 // Preview backdrop switcher: makes black / hollow / faint emoji visible.
 const BGS=['checker','light','dark','gray'];
 const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};

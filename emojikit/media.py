@@ -454,6 +454,31 @@ PREVIEW_FPS = 15
 PREVIEW_QUALITY = 60
 
 
+def lottie_still_webp(src: Path, out: Path, *, size: int = PREVIEW_SIZE,
+                      quality: int = PREVIEW_QUALITY) -> Path:
+    """Frame 0 of a Lottie animation as a single-frame WebP.
+
+    The panel shows this for cards that are off screen. An animated image is not
+    free just because you cannot see it: the browser holds its decoded frames,
+    and at ~60 frames of 104x104 RGBA that is ~2.5 MB each -- 361 MB if all 146
+    of this catalog's animations buffer at once. Swapping the off-screen ones to
+    a still bounds live animation to roughly what fits on screen.
+    """
+    from rlottie_python import LottieAnimation      # optional; see requirements
+
+    data = _load_lottie(src)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.stem + ".tmp" + out.suffix)
+    anim = LottieAnimation.from_data(json.dumps(data))
+    try:
+        frame = anim.render_pillow_frame(frame_num=0, width=size, height=size)
+    finally:
+        anim.lottie_animation_destroy()
+    frame.save(tmp, lossless=False, quality=quality, method=4)
+    os.replace(tmp, out)
+    return out
+
+
 def lottie_preview_webp(src: Path, out: Path, *, size: int = PREVIEW_SIZE,
                         fps: int = PREVIEW_FPS,
                         quality: int = PREVIEW_QUALITY) -> Path:
