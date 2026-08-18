@@ -1096,3 +1096,64 @@ class VideoBlankCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
+    """With a Worker configured, the BOT posts the link -- not this process.
+
+    The duplicate guard must not change with the route: `state["sent"]` is what
+    stops a re-run announcing the same pack twice, and it has to hold whichever
+    path did the sending.
+    """
+
+    PACK = "clos1_by_bot"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.state = {"sent": []}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _notify(self, tg):
+        bc.notify(tg, 1, self.state, self.dir, "clos", self.PACK, "Closure 1")
+
+    def test_worker_is_used_and_telegram_is_not_touched(self):
+        tg = mock.Mock()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
+                                          "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
+             mock.patch.object(bc, "announce_via_worker") as worker:
+            self._notify(tg)
+        worker.assert_called_once()
+        packs = worker.call_args.args[0]
+        self.assertEqual(packs[0]["name"], self.PACK)
+        tg.send_message.assert_not_called()
+        self.assertIn(self.PACK, self.state["sent"])
+
+    def test_without_a_worker_it_still_posts_directly(self):
+        tg = mock.Mock()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": ""}, clear=False):
+            self._notify(tg)
+        tg.send_message.assert_called_once()
+        self.assertIn(self.PACK, self.state["sent"])
+
+    def test_a_failed_worker_call_does_not_record_it_as_sent(self):
+        # Otherwise the pack is never announced: the guard would skip it forever.
+        tg = mock.Mock()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
+                                          "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
+             mock.patch.object(bc, "announce_via_worker",
+                               side_effect=RuntimeError("worker down")):
+            self._notify(tg)
+        self.assertEqual(self.state["sent"], [])
+
+    def test_an_already_sent_pack_is_not_announced_again(self):
+        self.state["sent"].append(self.PACK)
+        tg = mock.Mock()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
+                                          "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
+             mock.patch.object(bc, "announce_via_worker") as worker:
+            self._notify(tg)
+        worker.assert_not_called()
+        tg.send_message.assert_not_called()

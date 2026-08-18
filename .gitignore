@@ -128,3 +128,8 @@ launch_test.txt
 
 # Local assistant tooling state (never project content).
 /skills-lock.json
+
+# Cloudflare Worker (worker/): installed deps and wrangler's local state.
+node_modules/
+worker/.wrangler/
+.dev.vars
