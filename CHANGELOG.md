@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct path runs unchanged otherwise. `state["sent"]` still owns duplicate
   suppression, and a failed announcement is deliberately **not** recorded as
   sent — recording it would make the guard skip that pack forever.
+- **`worker/scripts/put-secrets.ps1`** — pushes every Worker secret straight
+  from `.env` to `wrangler secret put` through **stdin**, so no value is
+  printed, kept in shell history, or passed as an argument (arguments are
+  visible in the process list). It composes `ADMIN_USER_IDS` from
+  `PACK_OWNER_USER_ID` + `BOT_ALLOWED_USER_IDS` — that list fails closed, so a
+  hand-typed mistake is silent — and generates any missing webhook/publish
+  secret, writing it back to `.env` so a later run cannot mint a different one
+  and break every delivery's secret check.
+  `wrangler.toml` now declares **no `[vars]` at all**: the channel became a
+  secret too, not because it is a credential but because that file is committed
+  and it would have published the channel name. Both forms arrive as
+  `env.PACK_LINKS_CHAT_ID`.
 - **Panel: an `Animation: On/Off` button**, persisted in `localStorage`, and
   animated cards now hold frames only while near the viewport (one
   `IntersectionObserver` swapping a ~3 KB still for the ~60 KB animation).
