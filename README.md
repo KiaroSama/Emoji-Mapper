@@ -40,7 +40,7 @@ source folder and the selected bot token differ.
 - A Telegram bot (create one with [@BotFather](https://t.me/BotFather))
 - Your numeric Telegram user id (the pack owner) — press **Start** on the bot once
 - Dependencies in `requirements.txt` (`pip install -r requirements.txt`) — this
-  is the **core** set (requests, Pillow, resvg-py) and is all the general
+  is the **core** set (requests, Pillow, resvg-py, rlottie-python) and is all the general
   workflow needs. The coin tool `coins/remap_ids.py` additionally needs numpy,
   which lives in `requirements-coins.txt` (a ~20 MB wheel nobody building
   ordinary packs has to install)
