@@ -915,10 +915,14 @@ from the first skip onward, `ticker_to_id.json` pointed many tickers at the
 ### 17.2 The fix: content-based mapping (`coins/remap_ids.py`)
 
 Ignore positions entirely. Download every live sticker once, compute a small
-16×16 RGB **signature**, and match each local source logo (`<ticker>.png`) to the
-live sticker whose signature is nearest (L2 via a chunked Gram matrix). Drop
-matches above `--max-distance` (coins never uploaded). This rebuilt 4,121 of
-5,862 entries correctly and is the canonical way to (re)build the map.
+16×16 **signature** (RGB on black, plus the alpha channel as a fourth plane —
+see below for why alpha is not optional), and match each local source logo
+(`<ticker>.png`) to the live sticker whose signature is nearest (L2 via a
+chunked Gram matrix). Drop matches above `--max-distance` (coins never
+uploaded). This is the canonical way to (re)build the map; a correct run scores
+100% against the live stickers (`--max-distance 200 --min-margin 0` is the
+calibration that has worked in practice — recheck the distance histogram the
+dry run prints before trusting it on a changed corpus).
 
 ```powershell
 .venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "F:\...\emoji" --max-distance 200 --apply
@@ -927,17 +931,26 @@ matches above `--max-distance` (coins never uploaded). This rebuilt 4,121 of
 A resumable cache (`coins/remap_live_cache.json`, gitignored) avoids
 re-downloading.
 
-Two things `remap_ids.py` does **not** do for you, both learned the hard way:
+Things `remap_ids.py` does **not** do for you, each learned the hard way:
 
 * It writes only tickers that have a `<ticker>.png`, so letting it replace the
   map outright **deletes every alias** that has no file of its own (`1inchbsc`,
-  `avaxc`, …). Each alias shares its old id with a sibling that does have a PNG,
-  so its new target is that sibling's new id — re-derive them from the old map
-  and merge before writing.
-* It cannot tell a legitimate shared logo from corrupt source art. If many
-  tickers collapse onto one sticker, that is `SHARED_GROUP_LIMIT` doing its job:
-  check whether those logo *files* are actually the same picture before
-  believing the map. See `coins/unresolved_logos.json`.
+  `avaxc`, …). Re-derive them before writing, either from a sibling that shares
+  the old map's id, or — for an alias that was never in any prior map, such as
+  a chain-suffixed ticker added straight to the inventory — via
+  `coins._inventory.base_ticker()`, the same resolver `alias_map.py` and
+  `enhance_map.py` use.
+* **The signature must carry shape, not just colour.** RGB-on-black alone is
+  blind to any logo drawn in black on transparency: it flattens to a uniformly
+  black square, so Aptos/Arkham/NEAR/Worldcoin/Bittensor and every other
+  black-wordmark coin measured pairwise distance **0.0** — indistinguishable
+  from each other. That produced a confident, entirely wrong diagnosis once
+  ("128 coins have the wrong logo file"; they did not — the files were fine,
+  the metric was blind). **A distance of 0.0 between two files is a claim about
+  the metric before it is a claim about the files** — look at the images before
+  trusting the number. `SHARED_GROUP_LIMIT` (20) still earns its place as a
+  safety net for a *genuinely* corrupt or duplicated source file; just don't
+  assume that is the only thing it can mean.
 
 Take your own dated backup first. `ticker_to_id.prebroken.json` is **not** one —
 it is drifted too, and scores the same as the map it was meant to repair.
