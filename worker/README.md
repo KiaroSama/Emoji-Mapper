@@ -43,28 +43,44 @@ would mean a leak from either bot could forge updates for the other.
 
 ## Setup
 
-```bash
+```powershell
 cd worker
 npm install
+.\scripts\put-secrets.ps1 -DryRun    # shows which key comes from where
+.\scripts\put-secrets.ps1            # pushes them all from ..\.env
 ```
 
-Set the channel (not secret) in `wrangler.toml`:
+That script takes every value the Worker needs straight out of `.env` and pipes
+it to `wrangler secret put` **through stdin** — no value is printed, stored in
+shell history, or passed as an argument (arguments are visible in the process
+list). It reports key names and character counts only.
 
-```toml
-[vars]
-PACK_LINKS_CHAT_ID = "@yourchannel"     # or "-1001234567890"
-```
+It exists because two of these are easy to get wrong by hand:
 
-Everything else is a secret and never goes in git:
+- `ADMIN_USER_IDS` is **composed** from `PACK_OWNER_USER_ID` +
+  `BOT_ALLOWED_USER_IDS`. The list fails closed, so a typo means the bots answer
+  nobody and nothing tells you why.
+- `GENERAL_WEBHOOK_SECRET`, `COIN_WEBHOOK_SECRET` and `PUBLISH_SECRET` are
+  generated (32 random bytes) if `.env` has none — and written **back** to
+  `.env`, because a second run that minted different ones would break every
+  webhook delivery's secret check.
+
+Doing it by hand instead:
 
 ```bash
 wrangler secret put GENERAL_BOT_TOKEN
 wrangler secret put COIN_BOT_TOKEN
-wrangler secret put GENERAL_WEBHOOK_SECRET   # invent a long random string
+wrangler secret put GENERAL_WEBHOOK_SECRET   # a long random string
 wrangler secret put COIN_WEBHOOK_SECRET      # a DIFFERENT long random string
 wrangler secret put PUBLISH_SECRET           # bearer for /publish
 wrangler secret put ADMIN_USER_IDS           # e.g. 123456789,987654321
+wrangler secret put PACK_LINKS_CHAT_ID       # "@yourchannel" or "-100…"
 ```
+
+The channel is a secret rather than a `[vars]` entry — not because it is a
+credential, but because `wrangler.toml` is committed and that would publish the
+channel name. Both arrive as `env.PACK_LINKS_CHAT_ID` at runtime, so it costs
+nothing.
 
 `ADMIN_USER_IDS` **fails closed**: unset, empty, or all-invalid means the bots
 answer nobody. That is deliberate — a misconfiguration must not open the bots to
