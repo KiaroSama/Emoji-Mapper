@@ -228,7 +228,7 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 ### 6.3 Curate — pick what to publish (web panel)
 
 ```powershell
-.venv\Scripts\python.exe panel.py [--data-dir collection] [--port 8765] [--no-open]
+.venv\Scripts\python.exe panel.py [--data-dir collection] [--port 8765] [--preview-fps 15] [--no-open]
 ```
 
 Dark neon panel: every emoji is a big labelled card (static=image,
@@ -622,6 +622,7 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 |------|---------|---------|
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--port` | `8765` | Local port. |
+| `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
 | `--no-open` | off | Don't auto-open the browser. |
 
 Interactions: **click** a card to toggle include/exclude, **drag** a card to
@@ -642,10 +643,12 @@ animation JavaScript in the page at all. This replaced a lottie.js SVG player
 per card, which cost ~704 DOM nodes each -- measured on a 146-animation
 catalog, the document went from 1 426 nodes with none mounted to 8 476 with
 ten, and every scroll rebuilt a row's worth. Previews are cached under
-`<data-dir>/preview/` (~18 MB for 146 at 30fps/q60) and keyed by content hash,
-so they are built once. This keeps a 200-emoji grid
-responsive instead of running hundreds of looping animations at once (which
-previously hung the page). Benign browser disconnects while scrolling are
+`<data-dir>/preview/` (~9 MB for 146 at 15fps/q60), keyed by content hash and
+frame rate, so they are built once. The frame rate is the lever that decides how
+heavy the grid feels, because the browser decodes every frame of every visible
+card and ~24 are on screen at 1280x720: measured per animation, 30fps costs 54
+frames / 119 KB against 15fps's 28 / 60 KB. Use `--preview-fps` to go lower.
+Benign browser disconnects while scrolling are
 swallowed server-side (no `ConnectionAbortedError` traceback spam).
 
 **Brand logo preview.** If `GENERAL_BOT_TOKEN` resolves to
@@ -1092,7 +1095,7 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 |-------|----------|
 | `GET /` | The single-page HTML (items embedded as JSON). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
-| `GET /preview/<key>` | A `.tgs` rendered to an **animated WebP**, cached on disk. |
+| `GET /preview/<key>?fps=N` | A `.tgs` rendered to an **animated WebP**, cached on disk. The rate is in the URL because the response is immutable-cached. |
 | `GET /static/<file>` | Static assets (logo, favicon), traversal-guarded. |
 | `POST /api/save` | Body `{"excluded":[keys]}` → `catalog.set_inclusion(...)`. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
