@@ -269,6 +269,13 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
             if not _is_loopback(self.headers.get("Host", "")):
                 self._send(403, b"unexpected Host", "text/plain")
                 return
+            if self.path == "/api/ping":
+                # The page polls this so it can TELL YOU when this process is
+                # gone. Deliberately touches neither the lock nor the catalog:
+                # a liveness probe that can block behind a publish would report
+                # a healthy server as dead. No token: it reveals nothing.
+                self._send(200, b'{"ok":true}', cache="no-store")
+                return
             if self.path == "/" or self.path.startswith("/index"):
                 # /api/order sorts ``view`` in place, and CPython empties a list
                 # for the duration of list.sort(); serialising it unlocked
@@ -539,6 +546,12 @@ body.bg-gray  .thumb{background:#808a96}
 .card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
 .lbl.copyable:hover{color:var(--neon)}
+#alert{position:sticky;top:60px;z-index:6;display:none;margin:0;padding:12px 20px;
+  background:#3b0d16;border-bottom:1px solid #7f1d33;color:#ffd7de;font-size:14px;
+  display:none;align-items:center;gap:12px}
+#alert.show{display:flex}
+#alert b{color:#ff8fa3}
+#alert button{background:#7f1d33;border-color:#a3213f;color:#ffe4ea}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(40px);
   background:#0c1622;border:1px solid var(--neon);color:var(--txt);padding:10px 16px;
   border-radius:12px;box-shadow:0 0 22px #22d3ee44;opacity:0;transition:all .25s;pointer-events:none}
@@ -559,6 +572,7 @@ body.bg-gray  .thumb{background:#808a96}
   <button id="anim" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding.">Animation: On</button>
   <button id="save" class="primary">Save selection</button>
 </header>
+<div id="alert" role="alert" aria-live="assertive"></div>
 <div class="grid" id="grid"></div>
 <div id="toast"></div>
 <script id="items-data" type="application/json">__ITEMS__</script>
@@ -798,18 +812,94 @@ grid.addEventListener('click',e=>{
 // --- Drag & drop reordering (sets the publish order) --------------------
 let dragKey = null;
 let orderTimer = null;
+
+// --- Losing the server must never be silent ------------------------------
+// An owner spent three hours reordering a pack while this process was already
+// dead. The page looked fine, every drag "worked", and nothing reached the
+// catalog. A toast was the only signal and it fades in 2.6 seconds.
+//
+// So: a banner that stays until the problem is actually gone, an unsaved
+// change is remembered and flushed when the server comes back, and the browser
+// asks before you close the tab on work that never landed.
+let TOK = TOKEN;              // reissued per run; a restart invalidates ours
+let pendingOrder = null;      // an order we tried to save and could not
+let lastAlert = '';
+
+function setAlert(html){
+  if(html === lastAlert) return;
+  lastAlert = html;
+  const a = document.getElementById('alert');
+  a.innerHTML = html;
+  a.classList.toggle('show', !!html);
+}
+
+function offline(why){
+  setAlert('<b>Not saving.</b> ' + why +
+           ' Your arrangement is only in this page — <b>do not close this tab.</b>' +
+           ' It saves itself as soon as the panel is reachable again.');
+}
+
+/**
+ * POST with the mutation token, refreshing it once on 403.
+ *
+ * The token is per run, so a restarted panel rejects ours. Re-reading it from
+ * "/" is same-origin, which is exactly the boundary the token protects, so
+ * this weakens nothing -- and it is what turns "restart the panel and lose
+ * your afternoon" into "restart the panel and it catches up".
+ */
+async function apiPost(path, body){
+  const send = () => fetch(path, {method:'POST',
+    headers:{'Content-Type':'application/json','X-Panel-Token':TOK},
+    body:JSON.stringify(body)});
+  let r = await send();
+  if(r.status === 403){
+    const html = await (await fetch('/', {cache:'no-store'})).text();
+    const m = /const TOKEN = "([^"]+)"/.exec(html);
+    if(m){ TOK = m[1]; r = await send(); }
+  }
+  return r;
+}
+
+async function flushOrder(order){
+  try{
+    const r = await apiPost('/api/order', {order});
+    if(!r.ok){ pendingOrder = order; offline('The panel refused the save (HTTP ' + r.status + ').'); return false; }
+    pendingOrder = null;
+    setAlert('');
+    return true;
+  }catch(_){
+    pendingOrder = order;
+    offline('The panel at this address is not responding.');
+    return false;
+  }
+}
+
 function saveOrder(){
   clearTimeout(orderTimer);
+  const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
+  pendingOrder = order;                 // at risk from this moment on
   orderTimer = setTimeout(async ()=>{
-    const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
-    try{
-      const r = await fetch('/api/order',{method:'POST',
-        headers:{'Content-Type':'application/json','X-Panel-Token':TOKEN},
-        body:JSON.stringify({order})});
-      toast(r.ok ? 'Order saved ✓' : 'Could not save order');
-    }catch(_){ toast('Could not save order'); }
+    if(await flushOrder(order)) toast('Order saved ✓');
   }, 400);
 }
+
+// Poll for the server rather than waiting for the next drag to discover it is
+// gone -- the whole point is to find out while you can still act.
+setInterval(async ()=>{
+  try{
+    const r = await fetch('/api/ping', {cache:'no-store'});
+    if(!r.ok) throw new Error(r.status);
+    if(pendingOrder) await flushOrder(pendingOrder);
+    else setAlert('');
+  }catch(_){
+    offline('The panel process is not running.');
+  }
+}, 5000);
+
+// Last line of defence: the browser asks before the tab takes the work with it.
+addEventListener('beforeunload', e=>{
+  if(pendingOrder){ e.preventDefault(); e.returnValue = ''; }
+});
 grid.addEventListener('dragstart',e=>{
   const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
   const it = ITEMS.find(x=>x.key===card.dataset.key);
@@ -939,13 +1029,17 @@ applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){re
 document.getElementById('save').onclick=async()=>{
   const excluded = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
   try{
-    const r = await fetch('/api/save',{method:'POST',
-      headers:{'Content-Type':'application/json','X-Panel-Token':TOKEN},
-      body:JSON.stringify({excluded})});
+    const r = await apiPost('/api/save', {excluded});
     const j = await r.json();
-    toast(r.ok ? `Saved ✓  ${j.included} included · ${j.excluded} excluded`
-               : `Save failed: ${j.error||r.status}`);
-  }catch(_){ toast('Save failed'); }
+    if(r.ok){
+      setAlert('');
+      toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded`);
+    }else{
+      // Not a toast: a failed save you did not see is how an afternoon of
+      // work goes missing.
+      offline('The panel refused the save (' + (j.error || r.status) + ').');
+    }
+  }catch(_){ offline('The panel at this address is not responding.'); }
 };
 async function copyText(text){
   if(!text) return;
