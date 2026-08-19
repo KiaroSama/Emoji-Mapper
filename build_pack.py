@@ -971,6 +971,21 @@ class Telegram:
         return self._live_after_add(name, check)
 
     # ----- multi-format helpers (static / animated / video) -------------- #
+    def set_sticker_position(self, file_id: str, position: int) -> None:
+        """Move an existing sticker to ``position`` (zero-based) in its set.
+
+        The one mutation here that IS idempotent: setting the same sticker to
+        the same index twice leaves the same set. So unlike addStickerToSet it
+        can be retried normally -- no verified-retry machinery, no ambiguity to
+        reconcile.
+
+        Nothing is re-uploaded and nothing is recreated, so the sticker keeps
+        its file_id AND its custom_emoji_id: anyone already using the emoji is
+        unaffected by a reorder.
+        """
+        self._call("setStickerPositionInSet",
+                   data={"sticker": file_id, "position": int(position)})
+
     def get_sticker_set(self, name: str) -> dict:
         """Return the full Bot API StickerSet object for a set short name."""
         return self._call("getStickerSet", data={"name": name})
