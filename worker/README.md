@@ -209,9 +209,19 @@ Body shape:
 {
   "bot": "coin",
   "note": "optional line above the list",
+  "style": "cards",
   "packs": [{ "name": "cryptoemoji1_by_bot", "title": "Coins 1", "count": 200 }]
 }
 ```
+
+`style` picks the layout. **`cards`** (default) gives each pack a bold title
+line with its link below — right for announcing one or two finished packs.
+**`list`** is one line per pack, `title. url`, which is what a whole family of
+29 reads as; as cards it is three screens of scrolling. It is explicit rather
+than inferred from the pack count: the caller knows which it is announcing, and
+a rule like "more than five means list" would silently change the look of a
+real post. The direct (no-Worker) path renders the same two shapes, so turning
+the Worker on cannot change how an announcement looks.
 
 `name` must match `[A-Za-z0-9_]{1,64}` — it goes into a public `t.me/addemoji/`
 link, so anything else is refused rather than published.
