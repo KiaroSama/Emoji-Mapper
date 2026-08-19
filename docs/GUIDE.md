@@ -677,6 +677,25 @@ bottom edge of the window scrolls the page, so an item can be carried across
 the whole catalog in one motion. Releasing anywhere that is not a card cancels
 — it used to mean "move to the end".
 
+**A refresh shows the current catalog, and only one panel may hold a port.**
+Two separate reasons a reload used to appear to do nothing:
+
+* the page served a snapshot of the catalog taken at start-up, so an emoji
+  added by `fetch_emoji_ids.py` afterwards was invisible until a restart. The
+  view is now re-read from the database on every page load (200 rows, a few
+  milliseconds), replacing the shared list **in place** — rebinding it would
+  leave every route closed over the old object;
+* `socketserver` sets `SO_REUSEADDR` by default, and **on Windows that lets a
+  second bind succeed on a port that already has a live listener**. Two panels
+  then ran, both logging `Panel at …`, the browser reached whichever socket the
+  OS picked, and the older process kept serving its own start-up snapshot —
+  which is why only closing the launcher (killing every instance) made a change
+  appear. `allow_reuse_address` is now off, so a second panel exits 2 with what
+  to do about it instead of quietly sharing the port.
+
+Editing `panel.py` itself still needs the process restarted — a refresh asks the
+running server for a page, and that server holds the old code.
+
 **Losing the panel process is never silent.** The page polls `GET /api/ping`
 every 5 s. If the panel is gone — or a save is refused — a red banner appears
 *and stays* (a toast fades in 2.6 s, which is how an afternoon of reordering
