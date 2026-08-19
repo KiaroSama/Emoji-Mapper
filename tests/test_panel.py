@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import json
 import random
+import re
+import socket
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
@@ -26,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import panel as p  # noqa: E402
+import panel as p_mod  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 from emojikit.media import hamming  # noqa: E402
 
@@ -823,6 +829,115 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         # Centred by grid columns, not by flex spacers -- spacers only centre
         # when both sides weigh the same, and the title is far wider.
         self.assertIn("grid-template-columns:1fr auto 1fr", page)
+
+
+class RefreshMustActuallyRefresh(MutationGuard):
+    """Reloading the page has to show the current catalog, not a snapshot.
+
+    ``view`` was built once at start-up, so anything that changed the catalog
+    afterwards -- fetch_emoji_ids.py adding an emoji, add_media.py ingesting a
+    folder -- stayed invisible until the panel was restarted, and a refresh
+    looked like it did nothing.
+    """
+
+    def _page_items(self):
+        with request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=10) as r:
+            html = r.read().decode()
+        raw = re.search(r'<script id="items-data" type="application/json">(.*?)</script>',
+                        html, re.S).group(1)
+        return json.loads(raw.replace("\u003c", "<").replace("\u003e", ">"))
+
+    def test_a_reload_sees_a_change_another_process_made(self):
+        before = self._page_items()
+        key = before[0]["key"]
+
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE items SET keywords=? WHERE content_key=?",
+                    (json.dumps(["premium-id:9999999999999999999"]), key))
+        con.commit()
+        con.close()
+
+        after = self._page_items()
+        self.assertNotEqual(before[0]["label"], after[0]["label"],
+                            "the page still served the start-up snapshot")
+        self.assertEqual(after[0]["copyId"], "9999999999999999999",
+                         "derived fields must be rebuilt too, not just carried")
+
+    def test_the_reload_replaces_the_shared_view_in_place(self):
+        """Rebinding it would leave every route closed over the old object."""
+        src = Path(p_mod.__file__).read_text(encoding="utf-8")
+        block = src[src.index("def _reload_view("):]
+        block = block[:block.index("class Handler")]
+        self.assertIn("view[:] = fresh", block)
+        self.assertIn("by_key.clear()", block)
+        self.assertNotIn("view = fresh", block)
+
+
+class OnlyOnePanelPerPort(unittest.TestCase):
+    """A second panel must REFUSE the port, not quietly bind over the first.
+
+    socketserver sets SO_REUSEADDR by default and on Windows that does not mean
+    what it means on Linux: the second bind SUCCEEDS. Two panels then run, both
+    logging "Panel at ...", the browser reaches whichever socket the OS picks,
+    and the older process keeps serving its own start-up snapshot -- which is
+    why refreshing appeared to do nothing and only closing the launcher, which
+    kills every instance, made a change appear.
+    """
+
+    TIMEOUT = 60
+
+    def test_the_second_instance_exits_instead_of_sharing_the_port(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        img = data / "media" / "static" / "a.png"
+        _make_png(img)
+        with Catalog(data / "catalog.db") as cat:
+            cat.add(content_key="s:" + "a" * 30, fmt="static", file_path=img,
+                    emojis=["😀"], keywords=["one"])
+
+        with socket.socket() as probe:          # a free port, chosen by the OS
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        argv = [sys.executable, str(ROOT / "panel.py"), "--data-dir", str(data),
+                "--port", str(port), "--no-open"]
+        first = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True)
+
+        def stop_first():
+            # kill() alone leaves a zombie and an open pipe -- the guarded
+            # runner reports both, and a leaked process holding the port would
+            # make the NEXT run of this test fail for the wrong reason.
+            if first.poll() is None:
+                first.kill()
+            try:
+                first.communicate(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                first.kill()
+                first.communicate(timeout=self.TIMEOUT)
+
+        self.addCleanup(stop_first)
+
+        # Bounded polling on a real readiness signal, never a blind sleep.
+        deadline = time.monotonic() + self.TIMEOUT
+        ready = False
+        while time.monotonic() < deadline:
+            if first.poll() is not None:
+                out = first.communicate(timeout=self.TIMEOUT)[0] or ""
+                self.fail(f"the first panel exited early: {out[-400:]}")
+            try:
+                with request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=2) as r:
+                    ready = r.status == 200
+                    break
+            except (error.URLError, OSError):
+                continue
+        self.assertTrue(ready, "the first panel never became reachable")
+
+        second = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=self.TIMEOUT)
+        self.assertEqual(second.returncode, 2, second.stdout[-400:])
+        self.assertIn("already running", second.stdout + second.stderr)
 
 
 if __name__ == "__main__":

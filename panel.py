@@ -209,8 +209,31 @@ def _preview_bytes(key: str, src: Path, db_path: Path, fps: int,
 
 
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
-                 preview_fps: int = PREVIEW_FPS):
+                 preview_fps: int = PREVIEW_FPS, bot_username: str = ""):
     lock = threading.Lock()
+
+    def _reload_view() -> None:
+        """Refresh ``view``/``by_key`` from the catalog, IN PLACE.
+
+        In place, not rebound: the handler and every route close over these two
+        objects, so replacing them would leave the routes serving the old ones.
+
+        Call under ``lock`` -- /api/order sorts ``view`` and /api/save writes
+        ``included`` into it, and a rebuild racing either of those would drop a
+        change that was already accepted.
+        """
+        try:
+            cat = Catalog(db_path)
+            try:
+                fresh, fresh_by_key = build_view(cat, bot_username)
+            finally:
+                cat.close()
+        except Exception as exc:  # noqa: BLE001 - a page load must not 500
+            log.warning("could not refresh from the catalog: %s", exc)
+            return
+        view[:] = fresh
+        by_key.clear()
+        by_key.update(fresh_by_key)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet default logging
@@ -282,6 +305,13 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # for the duration of list.sort(); serialising it unlocked
                 # rendered an empty grid.
                 with lock:
+                    # Re-read the catalog on every page load. ``view`` used to be
+                    # a snapshot taken once at start-up, so anything that changed
+                    # the catalog afterwards -- fetch_emoji_ids.py adding an
+                    # emoji, add_media.py ingesting a folder -- was invisible
+                    # until the panel was restarted, and a refresh looked like it
+                    # did nothing. Reading 200 rows costs milliseconds.
+                    _reload_view()
                     items = _json_for_script(view)
                 page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
                             .replace("__PREVIEW_FPS__", str(preview_fps))
@@ -1283,9 +1313,20 @@ def main() -> int:
     # attach it to a no-cors POST, so it cannot re-order or de-select the
     # catalog behind the user's back.
     token = secrets.token_urlsafe(24)
-    handler = make_handler(view, by_key, db_path, token, args.preview_fps)
+    handler = make_handler(view, by_key, db_path, token, args.preview_fps,
+                           bot_username)
 
     class QuietServer(ThreadingHTTPServer):
+        # SO_REUSEADDR OFF. socketserver turns it on by default, and on Windows
+        # that does NOT mean what it means on Linux: a second bind to a port
+        # that already has a live listener SUCCEEDS. Two panels then run, both
+        # logging "Panel at ...", the browser reaches whichever socket the OS
+        # picks, and the older process keeps serving its own start-up snapshot
+        # of the page and the catalog. That is why refreshing appeared to do
+        # nothing and only closing the launcher -- which kills every instance --
+        # made a change show up.
+        allow_reuse_address = False
+
         # Don't dump a traceback when a browser simply drops a connection
         # (very common while scrolling a media-heavy grid on Windows).
         def handle_error(self, request, client_address):
@@ -1294,7 +1335,19 @@ def main() -> int:
                 return
             super().handle_error(request, client_address)
 
-    httpd = QuietServer(("127.0.0.1", args.port), handler)
+    try:
+        httpd = QuietServer(("127.0.0.1", args.port), handler)
+    except OSError as exc:
+        # Say what to do about it. A traceback here reads as "the panel is
+        # broken" when the real state is "the panel is already open".
+        log.error("cannot listen on port %d: %s", args.port, exc)
+        print(
+            f"\nA panel is already running on port {args.port}." + "\n"
+            f"  Open it:      http://127.0.0.1:{args.port}/" + "\n"
+            "  Or stop it:   press Ctrl+C in the window running it" + "\n"
+            f"  Or use another port:  panel.py --port {args.port + 1}" + "\n",
+            flush=True)
+        return 2
     url = f"http://127.0.0.1:{args.port}/"
     log.info("Panel at %s  (Ctrl+C to stop)", url)
     print(f"Emoji curate panel: {url}", flush=True)
