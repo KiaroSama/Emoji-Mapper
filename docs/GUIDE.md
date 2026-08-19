@@ -774,7 +774,33 @@ webhook/publish secrets are generated and written **back** to `.env`, or the
 next run would mint different ones and every delivery would fail its check. A
 missing token or channel is an error, not something to invent.
 
-Webhook registration and the per-secret detail: `worker/README.md`.
+Webhook registration is `scripts\set-webhooks.ps1` — one webhook per bot, read
+from the same `.env` the secrets came from so the registration and the deployed
+secret cannot drift. A mismatch is silent: Telegram accepts `setWebhook` and
+every delivery is then rejected 401, which looks exactly like a dead bot.
+`-Status` reports, `-Delete` hands a token back to the poller, and it refuses to
+replace a webhook pointing elsewhere without `-Force`.
+
+**Logs.** Every line starts with `[general]` or `[coin]`; both bots share this
+Worker, one D1 table and one channel, so an untagged line is not worth keeping.
+D1 is capped at **10 MB, oldest evicted first**, with the insert and the
+eviction in one `batch()` — a row cannot be stored without its budget check.
+The cap counts stored *text*, not the database file: D1 exposes no cheap
+reliable file size, and page overhead plus the index put the file above it.
+One line's detail is capped at 2000 characters (a publish announcing 120 packs
+listed every name and cost ~6 KB alone). `LOG_CHAT_ID` receives **errors only**
+— an unauthorised hit on a public webhook URL is a WARNING, and level-based
+routing would let an internet scanner turn that channel into a firehose. Both
+bots must administer it; each posts its own lines. Logging is handed to
+`ctx.waitUntil()` and every sink failure is swallowed, so it can neither delay
+a response nor take a bot down. `GET /health` reports `log_db`.
+
+```powershell
+npx wrangler d1 execute emoji-mapper-logs --remote `
+  --command "SELECT ts, bot, level, event, detail FROM logs ORDER BY id DESC LIMIT 20"
+```
+
+Per-secret detail: `worker/README.md`.
 
 ---
 
