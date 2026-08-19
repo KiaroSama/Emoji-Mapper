@@ -609,6 +609,23 @@ emoji.
 
 ### 12.5 `build_collection.py` — publish the catalog into new packs
 
+**`--mixed` publishes every format into ONE family**, named `<base><n>_by_<bot>`
+with no format letter, in the curate panel's order. Without it each format gets
+its own sets — which was this tool's default from before Bot API 7.2 allowed
+mixed sets, and it costs the curation: the panel's order runs *across* formats,
+so splitting regroups a hand-arranged pack into format blocks. It is a flag
+rather than the new default for one concrete reason: `state["sets"]` and the
+frozen plan are keyed by format, so flipping it would make an existing
+half-published family unresumable. A family started one way refuses to continue
+the other, with a usage error rather than a stranded set.
+
+`--base` follows Telegram's own rule for a set name: letters, digits and
+**single** underscores, beginning with a letter. The `_by_<bot_username>` tail
+is appended and is **not optional** — Telegram rejects a name without it. The
+64-character limit is checked against the real bot username before the first
+upload, not discovered as a Bot API error after the plan is frozen.
+
+
 **Set titles are one sequence across every format.** `--title "@GodVerify Emoji
 Packs"` produces `@GodVerify Emoji Packs 1`, `2`, `3` … in creation order,
 whatever format each set holds. They used to carry the format word and count
