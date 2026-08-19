@@ -198,14 +198,27 @@ both bots in one Worker, each on its own path (`/tg/general`, `/tg/coin`) with
 its own webhook secret, answering only the ids in `ADMIN_USER_IDS`. It also
 exposes `POST /publish`, so a finished pack is announced **by the bot** in your
 channel rather than by this machine: set `WORKER_PUBLISH_URL` and
-`WORKER_PUBLISH_SECRET` in `.env` and `build_collection.py` routes its links
-through it. Leave them unset and the existing direct path is used, unchanged.
+`WORKER_PUBLISH_SECRET` in `.env` and **all three publishers** — `build_pack.py`,
+`build_collection.py` and `coins/rebuild_dedup.py` — route their links through
+it. Leave either unset and the existing direct path is used, unchanged.
+
+It keeps its own log: a D1 table capped at 10 MB (oldest evicted first) plus an
+errors-only Telegram channel. Every line starts with the bot that wrote it,
+because both bots share the Worker, the table and the channel.
 
 > **A Telegram bot token can use `getUpdates` (polling) or a webhook — never
 > both.** Registering a webhook for a token stops `emoji_bot.py` receiving
 > anything on it; `deleteWebhook` hands it back. Run one or the other per token.
 
 Setup, secrets and deployment: [`worker/README.md`](worker/README.md).
+
+```powershell
+cd worker
+npm install
+.\scripts\put-secrets.ps1                       # from .env, nothing printed
+npx wrangler deploy
+.\scripts\set-webhooks.ps1 -BaseUrl https://<your-worker>.workers.dev
+```
 
 ## Curate panel (pick which emoji go into the pack)
 
