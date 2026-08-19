@@ -12,6 +12,7 @@ import worker from "../src/index";
 import { parseAdmins, verifyBearer, verifyWebhook } from "../src/auth";
 import { extractCustomEmojiIds } from "../src/emoji";
 import { renderAnnouncement, renderIdMessages } from "../src/handle";
+import { formatLine, log, redact } from "../src/logging";
 import type { Env, TgMessage } from "../src/types";
 
 const ENV: Env = {
@@ -24,6 +25,36 @@ const ENV: Env = {
   PACK_LINKS_CHAT_ID: "@testchannel",
   TELEGRAM_API_BASE: "https://api.telegram.invalid",
 };
+
+/**
+ * `waitUntil` runs the job instead of deferring it, so a test can await the
+ * logging a route fired and assert on what it wrote. Deferring it would make
+ * every log assertion a race.
+ */
+const pending: Promise<unknown>[] = [];
+const CTX = {
+  waitUntil: (p: Promise<unknown>) => { pending.push(p); },
+  passThroughOnException: () => {},
+} as unknown as ExecutionContext;
+const settle = () => Promise.allSettled(pending.splice(0));
+
+/** A D1 stand-in that records the SQL and bindings it was handed. */
+function stubDb() {
+  const runs: { sql: string; args: unknown[] }[] = [];
+  const prepare = (sql: string) => ({
+    bind: (...args: unknown[]) => ({ sql, args, run: async () => ({}) }),
+  });
+  return {
+    db: {
+      prepare,
+      batch: async (stmts: { sql: string; args: unknown[] }[]) => {
+        runs.push(...stmts);
+        return [];
+      },
+    } as unknown as D1Database,
+    runs,
+  };
+}
 
 /** Records every Bot API call instead of making one. */
 function stubApi() {
@@ -90,7 +121,7 @@ describe("webhook authentication", () => {
     const calls = stubApi();
     const res = await worker.fetch(
       webhookReq("/tg/coin", ENV.GENERAL_WEBHOOK_SECRET,
-                 { update_id: 1, message: msgFrom(42) }), ENV);
+                 { update_id: 1, message: msgFrom(42) }), ENV, CTX);
     expect(res.status).toBe(401);
     expect(calls).toHaveLength(0);
   });
@@ -101,7 +132,7 @@ describe("only admins get answered", () => {
     const calls = stubApi();
     const res = await worker.fetch(
       webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET,
-                 { update_id: 2, message: msgFrom(999) }), ENV);
+                 { update_id: 2, message: msgFrom(999) }), ENV, CTX);
     expect(res.status).toBe(200);          // 200, or Telegram redelivers forever
     expect(calls).toHaveLength(1);
     expect(String(calls[0].body.text)).toContain("not on its access list");
@@ -112,7 +143,7 @@ describe("only admins get answered", () => {
     await worker.fetch(webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET, {
       update_id: 3,
       message: msgFrom(999, { chat: { id: -100, type: "supergroup", title: "G" } }),
-    }), ENV);
+    }), ENV, CTX);
     // Answering here would make the bot a spam vector in any group it is in.
     expect(calls).toHaveLength(0);
   });
@@ -125,7 +156,7 @@ describe("only admins get answered", () => {
         text: "hi",
         entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "5899781975" }],
       }),
-    }), ENV);
+    }), ENV, CTX);
     expect(calls).toHaveLength(1);
     expect(String(calls[0].body.text)).toContain("5899781975");
   });
@@ -191,7 +222,7 @@ describe("publishing a finished pack", () => {
     const calls = stubApi();
     const res = await worker.fetch(new Request("https://w.dev/publish", {
       method: "POST", body: JSON.stringify(body),
-    }), ENV);
+    }), ENV, CTX);
     expect(res.status).toBe(401);
     expect(calls).toHaveLength(0);
   });
@@ -203,7 +234,7 @@ describe("publishing a finished pack", () => {
       headers: { Authorization: `Bearer ${ENV.PUBLISH_SECRET}` },
       // This ends up in a public t.me link; a path escape must not reach it.
       body: JSON.stringify({ packs: [{ name: "../../evil" }] }),
-    }), ENV);
+    }), ENV, CTX);
     expect(res.status).toBe(400);
     expect(calls).toHaveLength(0);
   });
@@ -214,7 +245,7 @@ describe("publishing a finished pack", () => {
       method: "POST",
       headers: { Authorization: `Bearer ${ENV.PUBLISH_SECRET}` },
       body: JSON.stringify(body),
-    }), ENV);
+    }), ENV, CTX);
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0].body.chat_id).toBe("@testchannel");
@@ -222,8 +253,158 @@ describe("publishing a finished pack", () => {
   });
 
   it("escapes a title so it cannot inject markup", () => {
-    const text = renderAnnouncement({ packs: [{ name: "ok_set", title: "<b>x</b>&" }] });
-    expect(text).toContain("&lt;b&gt;x&lt;/b&gt;&amp;");
+    const parts = renderAnnouncement({ packs: [{ name: "ok_set", title: "<b>x</b>&" }] });
+    expect(parts.join("\n")).toContain("&lt;b&gt;x&lt;/b&gt;&amp;");
+  });
+
+  it("splits a whole pack family instead of losing every link to one rejection", () => {
+    // The coin rebuild announces its entire family in one call. A single
+    // message would eventually pass 4096 characters and Telegram rejects the
+    // WHOLE thing -- so the overflow costs every link, not just the last one.
+    const packs = Array.from({ length: 120 }, (_, i) => ({
+      name: `gvcryptoemoji${i + 1}_by_GodVerifyCoinEmojiMapperbot`,
+      title: `Crypto pack number ${i + 1}`,
+    }));
+    const parts = renderAnnouncement({ packs, note: "all packs:" });
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) expect(p.length).toBeLessThanOrEqual(4096);
+    const joined = parts.join("\n");
+    for (const p of packs) expect(joined).toContain(p.name);
+  });
+
+  it("never splits a pack entry away from its link", () => {
+    const packs = Array.from({ length: 200 }, (_, i) => ({ name: `set_${i}`, title: `T${i}` }));
+    for (const part of renderAnnouncement({ packs })) {
+      // Every ✅ line in a part must be followed by its own URL in that part.
+      const ticks = (part.match(/✅/g) ?? []).length;
+      const links = (part.match(/t\.me\/addemoji\//g) ?? []).length;
+      expect(links).toBe(ticks);
+    }
+  });
+
+  it("returns one message id per part", async () => {
+    const calls = stubApi();
+    const packs = Array.from({ length: 120 }, (_, i) => ({
+      name: `gvcryptoemoji${i + 1}_by_GodVerifyCoinEmojiMapperbot`,
+      title: `Crypto pack number ${i + 1}`,
+    }));
+    const res = await worker.fetch(new Request("https://w.dev/publish", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ENV.PUBLISH_SECRET}` },
+      body: JSON.stringify({ packs }),
+    }), ENV, CTX);
+    const out = await res.json() as { ok: boolean; message_ids: number[] };
+    expect(out.ok).toBe(true);
+    expect(out.message_ids).toHaveLength(calls.length);
+    expect(calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("logging", () => {
+  it("names the bot first, in D1 and in the channel alike", async () => {
+    expect(formatLine({ bot: "coin", level: "ERROR", event: "publish" }))
+      .toBe("[coin] ERROR publish");
+    expect(formatLine({ bot: "general", level: "INFO", event: "webhook", detail: "x" }))
+      .toBe("[general] INFO webhook\nx");
+  });
+
+  it("keeps a bot token out of a line even when an API error echoes one", () => {
+    // The URL shape is the whole point: `bot123...` has no word boundary
+    // before the digits, and a \b-anchored pattern silently misses it.
+    expect(redact("GET https://api.telegram.org/bot123456789:AAH1234567890abcdefghijklmnopqrstuvw/x"))
+      .toBe("GET https://api.telegram.org/bot[REDACTED]/x");
+  });
+
+  it("caps one line's detail, so a 120-pack publish cannot eat the budget", () => {
+    const out = redact("x".repeat(9000));
+    expect(out.length).toBeLessThan(2100);
+    expect(out).toContain("+7000 chars");
+  });
+
+  it("writes the row and the eviction in ONE batch", async () => {
+    const { db, runs } = stubDb();
+    await log({ ...ENV, DB: db }, { bot: "coin", level: "INFO", event: "webhook" });
+    expect(runs).toHaveLength(2);
+    expect(runs[0].sql).toContain("INSERT INTO logs");
+    // Same batch, so a row can never be inserted without its budget check --
+    // which is how a table quietly grows past the cap.
+    expect(runs[1].sql).toContain("DELETE FROM logs");
+    expect(runs[1].args[0]).toBe(10 * 1024 * 1024);
+  });
+
+  it("counts BYTES, not characters, so non-ASCII cannot overshoot the cap", async () => {
+    const { db, runs } = stubDb();
+    await log({ ...ENV, DB: db }, { bot: "coin", level: "INFO", event: "e", detail: "سلام" });
+    const bytes = runs[0].args[5] as number;
+    // 4 Persian characters are 8 UTF-8 bytes; "coin"+"INFO"+"e" adds 9.
+    expect(bytes).toBe(17);
+  });
+
+  it("sends an ERROR to the log channel and an INFO nowhere near it", async () => {
+    const calls = stubApi();
+    await log({ ...ENV, LOG_CHAT_ID: "-1001" },
+              { bot: "general", level: "INFO", event: "webhook" });
+    expect(calls).toHaveLength(0);
+    await log({ ...ENV, LOG_CHAT_ID: "-1001" },
+              { bot: "general", level: "ERROR", event: "webhook", detail: "boom" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body.chat_id).toBe("-1001");
+    expect(String(calls[0].body.text)).toBe("[general] ERROR webhook\nboom");
+  });
+
+  it("posts a bot's own lines with that bot's token", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen.push(String(url));
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 1 } } }),
+                          { headers: { "Content-Type": "application/json" } });
+    });
+    await log({ ...ENV, LOG_CHAT_ID: "-1001" }, { bot: "coin", level: "ERROR", event: "x" });
+    // The poster must match the [coin] tag the line claims.
+    expect(seen[0]).toContain("/bot222:coin/");
+  });
+
+  it("never rejects, so a dead sink cannot drop an update", async () => {
+    stubApi();     // both sinks must be attempted; neither may reach a network
+    const exploding = {
+      prepare: () => { throw new Error("D1 is down"); },
+    } as unknown as D1Database;
+    await expect(log({ ...ENV, DB: exploding, LOG_CHAT_ID: "-1001" },
+                     { bot: "coin", level: "ERROR", event: "x" })).resolves.toBeUndefined();
+  });
+
+  it("an unauthorised webhook hit is recorded but NOT broadcast", async () => {
+    // This URL is public. Level-based routing would let a scanner turn the log
+    // channel into a firehose.
+    const calls = stubApi();
+    await worker.fetch(webhookReq("/tg/general", "wrong-secret", { update_id: 9 }),
+                       { ...ENV, LOG_CHAT_ID: "-1001" }, CTX);
+    await settle();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a handler failure IS broadcast, because nothing else reports it", async () => {
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    let first = true;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      const method = String(url).split("/").pop() ?? "";
+      if (first && method === "sendMessage") {
+        first = false;   // the reply to the admin fails
+        return new Response(JSON.stringify({ ok: false, description: "blocked", error_code: 403 }),
+                            { headers: { "Content-Type": "application/json" } });
+      }
+      calls.push({ method, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 1 } } }),
+                          { headers: { "Content-Type": "application/json" } });
+    });
+    const res = await worker.fetch(webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET, {
+      update_id: 10, message: msgFrom(42, { text: "hi" }),
+    }), { ...ENV, LOG_CHAT_ID: "-1001" }, CTX);
+    expect(res.status).toBe(200);      // still 200, or Telegram redelivers
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body.chat_id).toBe("-1001");
+    expect(String(calls[0].body.text)).toMatch(/^\[general\] ERROR webhook/);
   });
 });
 

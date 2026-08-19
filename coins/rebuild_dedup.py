@@ -45,8 +45,8 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
-                        LiveStateUnknown, SetState, Telegram, canonical_map_lock,
-                        exclusive_lock, links_chat_id, load_env,
+                        LiveStateUnknown, SetState, Telegram, announce_packs,
+                        canonical_map_lock, exclusive_lock, load_env,
                         pack_family_lock_path, safe_int_env, write_json_atomic)
 from coins._inventory import refill_inventory
 from emojikit.media import _dhash, hamming
@@ -432,31 +432,17 @@ def _mark_in_flight(state: dict, key: str, operation: str, set_name: str,
     save_state(state)
 
 
-def msg(tg: Telegram, text: str) -> None:
-    """Announce pack links, with link previews disabled.
-
-    Goes to PACK_LINKS_CHAT_ID when configured (a channel the bot administers),
-    otherwise the owner's private chat.
-
-    ``retries=2`` on purpose, matching Telegram.send_message: sendMessage is not
-    idempotent and has no dedup key, so a timeout AFTER Telegram accepted the
-    post cannot be told from one before it -- the default five attempts turn a
-    single outage into five identical link messages.
-    """
-    tg._call("sendMessage", retries=2, data={
-        "chat_id": links_chat_id(USER_ID), "text": text,
-        "disable_web_page_preview": True,
-    })
-
-
 def notify(tg: Telegram, state: dict, name: str, title: str) -> None:
     if name in state["sent"]:
         return
     try:
-        msg(tg, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
+        # Shared with the other two publishers so the coin rebuild cannot be
+        # the one left talking to Telegram directly after a Worker is deployed.
+        dest = announce_packs(tg, USER_ID, [{"name": name, "title": title}],
+                              bot="coin")
         state["sent"].append(name)
         save_state(state)
-        print(f"  sent link for {name}", flush=True)
+        print(f"  sent link for {name} to {dest}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  notify failed {name}: {exc}", flush=True)
 
@@ -1023,12 +1009,16 @@ def send_final_links(tg: Telegram) -> None:
         if not sets:
             print("no sets to send.", flush=True)
             return
-        lines = [f"{s['index']}. https://t.me/addemoji/{s['name']}" for s in sets]
-        text = "\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:\n" + "\n".join(lines)
-        msg(tg, text)
+        # One call carrying every pack. The Worker splits it across messages
+        # when the family outgrows Telegram's 4096-character limit; the single
+        # hand-built string could only be rejected whole, losing every link.
+        dest = announce_packs(
+            tg, USER_ID,
+            [{"name": s["name"], "title": str(s["index"])} for s in sets],
+            bot="coin", note="\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:")
         state["final_sent"] = True
         save_state(state)
-        print(f"sent final combined message with {len(sets)} links (preview off).",
+        print(f"sent final links for {len(sets)} packs to {dest} (preview off).",
               flush=True)
 
 

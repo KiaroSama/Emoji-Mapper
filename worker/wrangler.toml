@@ -10,3 +10,12 @@ compatibility_date = "2026-08-18"
 # channel name in a public repo, and a secret costs nothing extra: both arrive
 # as `env.PACK_LINKS_CHAT_ID` at runtime. Use `worker\scripts\put-secrets.ps1`
 # to push all of them straight from .env without printing any value.
+
+# Log store. A binding cannot be a secret, and a database_id is useless without
+# account credentials, so this one line is fine in a public file.
+# Created by `scripts\deploy.ps1`, which fills the id in and applies migrations.
+[[d1_databases]]
+binding = "DB"
+database_name = "emoji-mapper-logs"
+database_id = ""
+migrations_dir = "migrations"

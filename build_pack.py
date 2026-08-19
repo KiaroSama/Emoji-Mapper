@@ -448,6 +448,40 @@ def announce_via_worker(packs: list[dict], *, note: str = "",
                            f"{resp.text[:200]}")
 
 
+def announce_packs(tg: "Telegram", owner_id: int, packs: list[dict], *,
+                   bot: str, note: str = "") -> str:
+    """Post finished packs' add-links. Returns where they went, for the log.
+
+    ONE function, because this project had three publishers -- the single-pack
+    build, the collector and the coin rebuild -- each carrying its own copy of
+    "format the link and sendMessage". When the Worker arrived only the
+    collector learned about it, so a coin rebuild or a plain build went on
+    talking to Telegram from this machine while the owner believed the bot was
+    posting. A third copy is how that happens again.
+
+    Routing: the Worker when BOTH ``WORKER_PUBLISH_URL`` and
+    ``WORKER_PUBLISH_SECRET`` are set -- one alone is a half-configured setup,
+    and silently falling back would look identical to a working Worker. The
+    direct path is unchanged otherwise.
+
+    Not retried on either route (see ``announce_via_worker``). Callers keep
+    their ``state["sent"]`` guard; this function has no memory.
+    """
+    if worker_publish_url() and os.environ.get("WORKER_PUBLISH_SECRET", "").strip():
+        announce_via_worker(packs, bot=bot, note=note)
+        return "the worker"
+    dest = links_chat_id(owner_id)
+    # Previews off: these messages are mostly addemoji URLs, and one preview
+    # card per link buries them. The Worker route does the same by default.
+    if note:
+        tg.send_message(dest, note, disable_preview=True)
+    for p in packs:
+        tg.send_message(dest, f"✅ {p.get('title') or p['name']}\n"
+                              f"https://t.me/addemoji/{p['name']}",
+                        disable_preview=True)
+    return str(dest)
+
+
 def _under_a_test_runner() -> bool:
     """True when a test runner, not a tool, owns this process.
 
@@ -855,8 +889,14 @@ class Telegram:
     def get_me(self) -> dict:
         return self._call("getMe")
 
-    def send_message(self, chat_id: int | str, text: str) -> None:
+    def send_message(self, chat_id: int | str, text: str, *,
+                     disable_preview: bool = False) -> None:
         """Send a notification.
+
+        ``disable_preview`` matters for a message that is mostly links: the coin
+        family posts 30+ addemoji URLs and a preview card per link buries them.
+        It used to be a private ``_call`` in the coin script for exactly that;
+        it lives here so every announcer can ask for it.
 
         sendMessage is not idempotent and the Bot API offers no dedup key, so a
         network failure AFTER Telegram accepted the message cannot be told from
@@ -867,7 +907,8 @@ class Telegram:
         into five identical posts.
         """
         self._call("sendMessage", retries=2, data={
-            "chat_id": chat_id, "text": text, "disable_web_page_preview": False,
+            "chat_id": chat_id, "text": text,
+            "disable_web_page_preview": disable_preview,
         })
 
     # NOTE: all upload methods pass the file CONTENT (bytes), not an open
@@ -1384,12 +1425,10 @@ def _run_build(args, token, state_file, sources, keywords) -> int:
         if name in sent:
             return
         try:
-            tg.send_message(
-                links_chat_id(args.user_id),
-                f"\u2705 {title}\nhttps://t.me/addemoji/{name}",
-            )
+            dest = announce_packs(tg, args.user_id,
+                                  [{"name": name, "title": title}], bot="general")
             sent.add(name)
-            print(f"  sent link for {name}", flush=True)
+            print(f"  sent link for {name} to {dest}", flush=True)
         except Exception as exc:  # noqa: BLE001 - never let notify break the build
             print(f"  notify failed for {name}: {exc}", flush=True)
 
