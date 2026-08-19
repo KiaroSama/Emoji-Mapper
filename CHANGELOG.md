@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — pack titles are one sequence
+
+- **`build_collection.py` titles now read `<title> 1, 2, 3` across every
+  format**, in creation order. They used to be `<title> Animated 1` and
+  `<title> Static 1` — three separate sequences, so two different packs were
+  both called "1". The number counts every set already recorded, which is what
+  makes it resumable: a restarted run continues the count instead of restarting
+  it. Set **names** are unchanged (`<base>s<n>`/`<base>v<n>`/`<base>a<n>` remain
+  the identity); only the human title moved.
+- **Announcements gained `style`.** `cards` (default, unchanged) per pack;
+  `list` renders one line per pack for a whole family. The direct Telegram path
+  renders both shapes identically, so enabling the Worker cannot change how a
+  post looks.
+- **The per-set announcement uses the recorded title** instead of rebuilding it
+  — rebuilding is how the announcement and the set drift apart.
+
 ### Fixed — a single-frame video had no content key at all
 
 - **`_video_content_digest` resamples at a fixed `fps=10`, and a single-frame
