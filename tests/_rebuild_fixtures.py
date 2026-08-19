@@ -74,6 +74,7 @@ class FakeTelegram:
         self.deleted: list[str] = []
         self.messages: list[str] = []
         self.message_retries: list[int | None] = []
+        self.message_previews: list[bool | None] = []
         self.add_error: BaseException | None = None
         self.create_error: BaseException | None = None
         self.delete_error: BaseException | None = None
@@ -134,6 +135,12 @@ class FakeTelegram:
         self.images[name] = []
         self.append(name, Path(png).read_bytes())
 
+    # The REAL implementation, bound onto the fake rather than reimplemented.
+    # It is what decides `retries=2` and the preview flag, and a fake copy of
+    # it would keep passing after the real one changed -- which is exactly the
+    # bug the retry test exists to catch.
+    send_message = bp.Telegram.send_message
+
     def _call(self, method, *, data=None, **kw):
         if method == "deleteStickerSet":
             self.deleted.append(data["name"])
@@ -146,6 +153,7 @@ class FakeTelegram:
         if method == "sendMessage":
             self.messages.append(data["text"])
             self.message_retries.append(kw.get("retries"))
+            self.message_previews.append(data.get("disable_web_page_preview"))
             return {}
         if method == "getStickerSet":
             # Same contract as the real client: a missing set is an error here,

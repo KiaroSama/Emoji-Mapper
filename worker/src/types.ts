@@ -13,6 +13,17 @@ export interface Env {
   ADMIN_USER_IDS: string;
   /** Channel the finished-pack announcements go to: "-100..." or "@name". */
   PACK_LINKS_CHAT_ID: string;
+  /**
+   * Channel that receives important log lines (errors). Optional: unset means
+   * D1 and `wrangler tail` only, which is a quieter setup, not a broken one.
+   * Both bots must be administrators of it -- each posts its own lines.
+   */
+  LOG_CHAT_ID?: string;
+  /**
+   * Log table. Optional so the Worker still serves if the binding is missing;
+   * logging degrades to console, it does not take the bots down.
+   */
+  DB?: D1Database;
   /** Overridable for tests; defaults to the real Bot API. */
   TELEGRAM_API_BASE?: string;
 }

@@ -36,10 +36,39 @@ messages.
 | `POST /tg/general` | `X-Telegram-Bot-Api-Secret-Token` | Webhook for the general bot |
 | `POST /tg/coin` | `X-Telegram-Bot-Api-Secret-Token` | Webhook for the coin bot |
 | `POST /publish` | `Authorization: Bearer …` | Announce finished packs in the channel |
-| `GET /health` | none | Liveness. Returns no secrets. |
+| `GET /health` | none | Liveness + whether the log store is bound. No secrets. |
 
 Each bot has its **own** path and its **own** webhook secret. One shared secret
 would mean a leak from either bot could forge updates for the other.
+
+## Logs
+
+Every line starts with the bot that produced it — `[general]` or `[coin]` —
+because both bots share this Worker, one log table and one channel, and a line
+that does not say which one wrote it is not worth keeping.
+
+**D1**, capped at 10 MB, oldest evicted first. The insert and the eviction go in
+one `batch()`, so a row can never be stored without its budget check. The cap
+counts the *text* stored, not the database file: D1 offers no cheap, reliable
+file-size reading, and page overhead plus the index put the file somewhat above
+it. One line's detail is capped at 2000 characters — a publish announcing 120
+packs listed every name and cost ~6 KB by itself.
+
+**Channel** (`LOG_CHAT_ID`), errors only. Level-based routing with WARNING
+included was the obvious design and the wrong one: an unauthorised hit on a
+public webhook URL is a WARNING, and a scanner walking the internet would turn
+the channel into a firehose. Both bots must be administrators of it — each
+posts its own lines, so the poster matches the tag.
+
+Logging can never take the bots down: every sink failure is swallowed and
+reported to `console`, which `wrangler tail` reads. `GET /health` reports
+`log_db`, so a missing binding is visible without waiting for a line that will
+never arrive.
+
+```bash
+npx wrangler d1 execute emoji-mapper-logs --remote \
+  --command "SELECT ts, bot, level, event, detail FROM logs ORDER BY id DESC LIMIT 20"
+```
 
 ## Setup
 
@@ -87,21 +116,31 @@ answer nobody. That is deliberate — a misconfiguration must not open the bots 
 everyone. Only plain positive integers are accepted, so `0x10`, `12.5` and `1e3`
 are ignored rather than silently coerced.
 
-Deploy, then point Telegram at it:
+Create the log database once, then deploy:
 
-```bash
-wrangler deploy
-
-curl -X POST "https://api.telegram.org/bot<GENERAL_TOKEN>/setWebhook" \
-  -d "url=https://<your-worker>.workers.dev/tg/general" \
-  -d "secret_token=<GENERAL_WEBHOOK_SECRET>"
-
-curl -X POST "https://api.telegram.org/bot<COIN_TOKEN>/setWebhook" \
-  -d "url=https://<your-worker>.workers.dev/tg/coin" \
-  -d "secret_token=<COIN_WEBHOOK_SECRET>"
+```powershell
+npx wrangler d1 create emoji-mapper-logs      # put the id in wrangler.toml
+npx wrangler d1 migrations apply emoji-mapper-logs --remote
+npx wrangler deploy
 ```
 
-The bot must be an **administrator** of the channel to post in it.
+Then point Telegram at it — one webhook per bot:
+
+```powershell
+.\scripts\set-webhooks.ps1 -BaseUrl https://<your-worker>.workers.dev
+.\scripts\set-webhooks.ps1 -Status                    # confirm
+.\scripts\set-webhooks.ps1 -Delete -Only general      # hand a token back
+```
+
+The script reads the same `.env` the secrets came from, so the registration and
+the deployed secret cannot drift apart — a mismatch is silent: Telegram accepts
+`setWebhook` happily and every delivery is then rejected 401, which looks
+exactly like a dead bot. It refuses to replace a webhook that already points
+somewhere else unless you pass `-Force`, and it says so when a token stops being
+pollable.
+
+The bots must be **administrators** of both the pack-links channel and the log
+channel to post in them.
 
 ## Announcing from the local build
 
@@ -113,7 +152,17 @@ WORKER_PUBLISH_URL=https://<your-worker>.workers.dev/publish
 WORKER_PUBLISH_SECRET=<the PUBLISH_SECRET you set above>
 ```
 
-Leave them unset and the old direct path is used, unchanged.
+Leave either unset and the old direct path is used, unchanged. Both or neither:
+a URL without a secret is a half-finished setup that would 401 every
+announcement, so it takes the direct path rather than pretending to work.
+
+**All three publishers** go through one `build_pack.announce_packs` —
+`build_pack.py` (single pack), `build_collection.py` (collector) and
+`coins/rebuild_dedup.py` (coin family). They used to carry three copies of
+"format the link and sendMessage", and when this Worker arrived only the
+collector learned about it, so a coin rebuild kept talking to Telegram from the
+build machine while the owner believed the bot was posting. A test asserts all
+three share the function.
 
 The duplicate guard does not move: `state["sent"]` is what stops a re-run
 announcing the same pack twice, and it holds whichever route sent it. A failed
@@ -121,6 +170,10 @@ announcement is **not** recorded as sent, so the next run retries it — and
 neither route retries a `sendMessage` internally, because it is not idempotent
 and has no dedup key, so a timeout after Telegram accepted the post cannot be
 told from one before it.
+
+A whole pack family goes in **one** `/publish` call, and the Worker splits it
+across messages if it passes 4096 characters. A single message would be
+rejected whole at that point, losing every link rather than just the overflow.
 
 Body shape:
 

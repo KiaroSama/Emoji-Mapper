@@ -40,21 +40,34 @@ foreach ($line in [System.IO.File]::ReadAllLines($EnvFile, [System.Text.Encoding
     }
 }
 
-# ADMIN_USER_IDS = the owner plus any extra allowed ids, deduped, order kept.
-# Only plain positive integers survive - the Worker's parseAdmins() rejects
-# anything else anyway, and a value dropped here is better than one dropped
-# silently in production.
+# ADMIN_USER_IDS: an explicit list in .env wins outright. Otherwise it is the
+# owner plus any extra allowed ids, deduped, order kept.
+#
+# Only plain positive integers survive. The Worker's parseAdmins() rejects
+# anything else anyway, and dropping a malformed id HERE - visibly, in the
+# count printed below - is better than dropping it silently in production,
+# where the list fails closed and the bot just stops answering someone.
+$source = if ($env_['ADMIN_USER_IDS']) { 'ADMIN_USER_IDS (explicit)' }
+          else { 'PACK_OWNER_USER_ID + BOT_ALLOWED_USER_IDS' }
+$raws = if ($env_['ADMIN_USER_IDS']) { $env_['ADMIN_USER_IDS'] -split ',' }
+        else { @($env_['PACK_OWNER_USER_ID']) + ($env_['BOT_ALLOWED_USER_IDS'] -split ',') }
 $ids = [System.Collections.Generic.List[string]]::new()
-foreach ($raw in @($env_['PACK_OWNER_USER_ID']) + ($env_['BOT_ALLOWED_USER_IDS'] -split ',')) {
+$rejected = 0
+foreach ($raw in $raws) {
     $id = "$raw".Trim()
-    if ($id -match '^\d+$' -and $id -ne '0' -and -not $ids.Contains($id)) { $ids.Add($id) }
+    if (-not $id) { continue }
+    if ($id -match '^\d+$' -and $id -ne '0') {
+        if (-not $ids.Contains($id)) { $ids.Add($id) }
+    } else { $rejected++ }
 }
+if ($rejected) { Write-Warning "$rejected admin id(s) in .env are not plain positive integers and were dropped." }
 
 $plan = [ordered]@{
     GENERAL_BOT_TOKEN      = @{ value = $env_['GENERAL_BOT_TOKEN'];   from = 'GENERAL_BOT_TOKEN' }
     COIN_BOT_TOKEN         = @{ value = $env_['TELEGRAM_BOT_TOKEN'];  from = 'TELEGRAM_BOT_TOKEN (the coin bot)' }
     PACK_LINKS_CHAT_ID     = @{ value = $env_['PACK_LINKS_CHAT_ID'];  from = 'PACK_LINKS_CHAT_ID' }
-    ADMIN_USER_IDS         = @{ value = ($ids -join ',');             from = "PACK_OWNER_USER_ID + BOT_ALLOWED_USER_IDS ($($ids.Count) id(s))" }
+    LOG_CHAT_ID            = @{ value = $env_['LOG_CHAT_ID'];         from = 'LOG_CHAT_ID' }
+    ADMIN_USER_IDS         = @{ value = ($ids -join ',');             from = "$source ($($ids.Count) id(s))" }
     PUBLISH_SECRET         = @{ value = $env_['WORKER_PUBLISH_SECRET']; from = 'WORKER_PUBLISH_SECRET'; generate = $true }
     GENERAL_WEBHOOK_SECRET = @{ value = $env_['GENERAL_WEBHOOK_SECRET']; from = '.env'; generate = $true }
     COIN_WEBHOOK_SECRET    = @{ value = $env_['COIN_WEBHOOK_SECRET'];    from = '.env'; generate = $true }

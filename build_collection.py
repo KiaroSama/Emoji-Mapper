@@ -37,8 +37,7 @@ from pathlib import Path
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
                         AmbiguousUploadError, LiveStateUnknown, LockBusy,
                         SetState, Telegram, exclusive_lock, ingest_exit_code,
-                        announce_via_worker, links_chat_id, load_env,
-                        safe_int_env, worker_publish_url,
+                        announce_packs, load_env, safe_int_env,
                         write_json_atomic)
 from emojikit import media
 from emojikit.catalog import Catalog
@@ -656,19 +655,14 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
     # With a Worker deployed, the BOT posts the announcement and this process
     # never talks to the channel. `state["sent"]` still guards it, so which path
     # sent it does not change whether a re-run announces twice.
-    via_worker = bool(worker_publish_url())
-    dest = "the worker" if via_worker else links_chat_id(user_id)
     try:
-        if via_worker:
-            announce_via_worker([{"name": name, "title": title}], bot="general")
-        else:
-            tg.send_message(dest, f"\u2705 {title}\nhttps://t.me/addemoji/{name}")
+        dest = announce_packs(tg, user_id, [{"name": name, "title": title}],
+                              bot="general")
         state["sent"].append(name)
         save_json(_state_path(data_dir, base), state)
         log.info("sent link for %s to %s", name, dest)
     except Exception as exc:  # noqa: BLE001
-        log.warning("notify failed for %s (destination %s): %s",
-                    name, dest, redact(str(exc)))
+        log.warning("notify failed for %s: %s", name, redact(str(exc)))
 
 
 _FRAME_BYTES = 64 * 64 * 4          # one sampled RGBA frame
