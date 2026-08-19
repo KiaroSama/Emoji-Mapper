@@ -40,6 +40,7 @@ Emoji Mapper/
   fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
   add_media.py             collector: build emoji from local files -> catalog
   build_collection.py      collector: publish the catalog into new packs
+  sync_order.py            reorder an already published pack (no re-upload)
   panel.py                 web "Curate" panel: pick which emoji to publish
   emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
   emojikit/                shared core library
@@ -662,6 +663,43 @@ logo is always a **static** 100x100 PNG and leads a static, video *or* animated
 set alike (verified live). The `@GodVerifyCoinEmojiMapperbot` coin bot is exempt.
 Disable with `--no-brand-logo`. The logo occupies position 0, so item
 `custom_emoji_id`s are read from position 1 onward (handled automatically).
+
+### 12.5b `sync_order.py` — reorder an ALREADY PUBLISHED pack
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--base <name>` | *(required)* | The published family to reorder. |
+| `--data-dir <dir>` | `collection` | Catalog/state directory. |
+| `--token-env <VAR>` | `GENERAL_BOT_TOKEN` | Which token owns the packs. |
+| `--apply` | off | Actually move stickers. Without it, report only. |
+
+Rearranging the panel after a pack is live does **not** mean republishing it.
+`setStickerPositionInSet` moves a sticker that is already in the set, so every
+emoji keeps its `file_id` **and** its `custom_emoji_id`: nobody who already
+uses one is affected, and no upload happens.
+
+```powershell
+$PY sync_order.py --base mypack             # what would move
+$PY sync_order.py --base mypack --apply
+```
+
+It is the one set mutation in this project that is genuinely idempotent —
+setting the same sticker to the same index twice leaves the same set — so it
+may be re-run, and an interrupted run simply continues. Moves are planned as a
+selection sort (one API call each, ~120 ms apart), which means a run stopped
+halfway leaves a set that is correct up to where it stopped rather than
+scrambled.
+
+Two refusals, both about identity:
+
+- **An unrecognised sticker stops that set.** Positions only mean something
+  once every sticker is identified; shuffling around an unknown one would move
+  a stranger's emoji into the middle of the pack.
+- **The brand logo stays at position 0.** It is not a catalog item, so it is
+  the one legitimately unknown sticker — and only at index 0.
+
+It takes the same pack-family lock as the publisher: reordering while a publish
+appends would move stickers out from under it.
 
 ### 12.6 `panel.py` — curate web panel
 
@@ -1467,6 +1505,7 @@ set regardless of the set's format.
 | `addStickerToSet` | build | Append to a set. |
 | `replaceStickerInSet` | verify_logos / fixes | Swap a wrong sticker in place. |
 | `deleteStickerSet` | rebuild | Remove old packs before a clean rebuild. |
+| `setStickerPositionInSet` | sync_order | Move a sticker; ids survive. |
 | `getCustomEmojiStickers` | bot / resolve | id → emoji char + `set_name` (≤200/call). |
 | `sendMessage` (+ `entities`, `reply_markup`) | bot / links | Send IDs, copy buttons, links. |
 | `deleteMessage` | bot housekeeping | Remove old bot messages. |
@@ -1588,6 +1627,8 @@ $PY add_media.py --in input\set --emoji 😀
 $PY panel.py                                            # curate, then Save
 $PY build_collection.py --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN --dry-run
 $PY build_collection.py --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN
+$PY sync_order.py --base mypack                          # reorder a LIVE pack
+$PY sync_order.py --base mypack --apply
 
 # --- bot ---
 $PY emoji_bot.py

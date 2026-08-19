@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — reorder a pack that is already published
+
+- **`sync_order.py` makes a live pack match the curate panel** without
+  republishing it. `setStickerPositionInSet` moves a sticker that is already in
+  the set, so every emoji keeps its `file_id` *and* its `custom_emoji_id` —
+  anyone already using one is unaffected, and nothing is re-uploaded. It is the
+  one set mutation here that is genuinely idempotent, so it may be re-run and an
+  interrupted run continues. Moves are a selection sort, one API call each, so a
+  run stopped halfway leaves a set correct up to that point rather than
+  scrambled. It refuses a set holding a sticker the catalog cannot identify —
+  positions only mean something once every sticker is known — and pins the brand
+  logo at position 0. It takes the publisher's pack-family lock.
+
+### Fixed — publishing a mixed family stopped twice on its own checks
+
+- **`mixed` was rejected by the state validator** that the publisher's own
+  writes had to pass. A new format value was added without teaching the check
+  about it.
+- **An upload was confirmed by exact content key, which cannot match.**
+  Telegram re-encodes what it stores: measured on a real sticker, 2304 of 16384
+  normalised bytes changed. Confirmation now compares against the file that was
+  just sent — exact first, then a bounded perceptual distance. The catalog-wide
+  search uses a much tighter tolerance than that targeted compare, because a
+  catalog full of near-identical check-marks put a rival within 5 bits of the
+  right answer while the right answer sat at 0.
+
+### Fixed — the launcher died on Ctrl+C
+
+- **Ctrl+C during a task closed the whole launcher.** The console signal reached
+  the parent as well as the child, so stopping the panel ended the session. It
+  now stops the child and returns to the menu.
+
 ### Changed — pack titles are one sequence
 
 - **`build_collection.py` titles now read `<title> 1, 2, 3` across every
