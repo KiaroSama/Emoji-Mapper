@@ -543,7 +543,16 @@ h1 .dot{color:var(--neon)}
 #none      {--btn:#fb7185;--btnLine:#5c2330}
 #inv       {--btn:#fbbf24;--btnLine:#5a4415}
 #bg        {--btn:#38bdf8;--btnLine:#1c4257}
-#anim      {--btn:#a78bfa;--btnLine:#382a5c}
+/* A switch, not a label that happens to say On. The pill on the left is the
+   state: green when animations run, red when they are frozen. */
+#anim{--btn:#34ebc6;--btnLine:#14584c;display:flex;align-items:center;gap:8px}
+.switch .knob{width:26px;height:14px;border-radius:8px;flex:none;position:relative;
+  background:#3a4657;transition:background .18s}
+.switch .knob::after{content:"";position:absolute;top:2px;left:2px;width:10px;
+  height:10px;border-radius:50%;background:#0b1422;transition:transform .18s}
+#anim[aria-pressed="true"]  .knob{background:#22c55e}
+#anim[aria-pressed="true"]  .knob::after{transform:translateX(12px)}
+#anim[aria-pressed="false"] .knob{background:#f43f5e}
 button:disabled{opacity:.4;cursor:default;border-color:var(--line);box-shadow:none}
 button:disabled:hover{border-color:var(--line);box-shadow:none}
 /* Explicit line-height: the undo/redo arrow glyphs have a taller line box
@@ -581,11 +590,15 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
    into stripes on a dark background; the badge is where the format belongs.
    No blurred glow either: a 16px shadow on 200 cards is the most expensive
    thing the browser paints here, and it bought nothing but noise. */
-.card.on{border-color:#2b6f7d;box-shadow:inset 0 0 0 1px #22d3ee22}
+.card{border-width:2px}
+.card.on{border-color:#22c55e;box-shadow:inset 0 0 0 1px #22c55e55}
 .card.off{opacity:.42;filter:grayscale(.9)}
+/* Inner frame = the FORMAT. Outer frame (the card) = whether it is selected.
+   Two questions, two frames -- one frame carrying both was the complaint. */
 .thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
-  box-shadow:inset 0 0 0 1px #00000026, inset 0 0 0 2px #ffffff14}
+  border:2px solid var(--fmt,#2b6f7d);
+  box-shadow:inset 0 0 0 1px #00000026}
 /* Backdrops so black / hollow / faint emoji are all visible. Default = checker.
    Dark-friendly mid-slate checker: light enough to reveal black/hollow emoji,
    dark enough to reveal faint/white emoji, while matching the dark panel. */
@@ -600,8 +613,11 @@ body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
 .thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
-.hdr{display:flex;align-items:center;gap:5px;margin:0 0 6px;min-height:22px}
-.badge{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+/* Two centred rows above the emoji: the position first, then what it is.
+   The tick keeps the corner so it never pushes either off centre. */
+.hdr{display:flex;flex-direction:column;align-items:center;gap:3px;
+  margin:0 0 8px;position:relative}
+.badge{max-width:100%;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:var(--fmtInk,#9fd);
   background:var(--fmtBg,#06121b);border:1px solid var(--fmtLine,#1c3a44);
@@ -609,19 +625,20 @@ body.bg-gray  .thumb{background:#808a96}
 .card{cursor:grab}
 .card.drag{opacity:.5;cursor:grabbing}
 .card.over{border-color:#f472b6;box-shadow:inset 0 0 0 2px #f472b688}
-.card.logo{cursor:default;border-color:#6b5316}
+/* The logo has no format, but it still gets an inner frame -- amber, to
+   match its badge, so the two frames mean the same thing on every card. */
+.card.logo{cursor:default;border-color:#6b5316;--fmt:#fbbf24}
 .card.logo:hover{border-color:#fbbf24}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
 .card.logo .lbl{color:#fbbf24}
-.tick{flex:0 0 auto;width:22px;height:22px;border-radius:7px;
+.tick{position:absolute;top:0;right:0;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
-.pos{flex:0 0 auto;margin-left:auto;
-  font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;
+.pos{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;
   color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
   border-radius:6px;padding:2px 6px;min-width:24px;text-align:center;pointer-events:none}
 .card.off .pos{color:var(--muted)}
@@ -656,7 +673,7 @@ body.bg-gray  .thumb{background:#808a96}
     <button id="none">Deselect all</button>
     <button id="inv">Invert</button>
     <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
-    <button id="anim" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding.">Animation: On</button>
+    <button id="anim" class="switch" aria-pressed="true" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding."><span class="knob"></span><span id="animLabel">Animation: On</span></button>
   </div>
   <div class="hright"><button id="save" class="primary">Save selection</button></div>
 </header>
@@ -743,10 +760,11 @@ function makeCard(it){
   // "animated" needs 67px in a 48px strip, so it rendered as "anima…".
   // A shorter word beats an ellipsis and beats a smaller font.
   const FMT = {animated: 'anim', static: 'static', video: 'video'};
-  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : (FMT[it.fmt] || it.fmt)));
+  // Number first, format under it -- both centred, per owner request.
   // Filled by renumber(), never here: a number written at build time is right
   // exactly once, and wrong from the first drag onwards.
   hdr.appendChild(el('span','pos',''));
+  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : (FMT[it.fmt] || it.fmt)));
   if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
@@ -826,7 +844,10 @@ function observeAnimated(){
 // cannot undo the freeze behind your back.
 let ANIM_ON = localStorage.getItem('animOn') !== '0';
 function applyAnim(){
-  document.getElementById('anim').textContent = 'Animation: ' + (ANIM_ON ? 'On' : 'Off');
+  const btn = document.getElementById('anim');
+  btn.setAttribute('aria-pressed', ANIM_ON ? 'true' : 'false');
+  document.getElementById('animLabel').textContent =
+    'Animation: ' + (ANIM_ON ? 'On' : 'Off');
   animatedNodes().forEach(n => {
     if (!ANIM_ON) {
       if (n.dataset.play) setPlaying(n, false);

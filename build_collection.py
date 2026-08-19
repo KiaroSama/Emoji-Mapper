@@ -49,6 +49,17 @@ log = logging.getLogger("build_collection")
 
 PER_SET = 200                       # Telegram custom-emoji set hard cap
 FMT_TAG = {"static": "s", "video": "v", "animated": "a"}
+# Publishing every format into ONE family. Since Bot API 7.2 (March 2024) a set
+# may hold mixed formats, so the per-format split this tool did by default was a
+# choice, not a rule -- and a costly one: the curate panel's order runs ACROSS
+# formats, so splitting regrouped a hand-arranged pack into three blocks and
+# threw the arrangement away. In this mode the sets are named `<base><n>` with
+# no format letter, and each item is uploaded with ITS OWN format.
+#
+# It is a flag, not the new default, for one concrete reason: `state["sets"]`
+# entries and the frozen plan are keyed by format, so flipping the default would
+# make an existing half-published family unresumable.
+MIXED = "mixed"
 DEFAULT_EMOJI = "\U0001F600"
 
 # --- Brand logo (first emoji of every set built with the Emoji Mapper bot) --- #
@@ -294,6 +305,8 @@ def freeze_plan(cat: Catalog, data_dir: Path, base: str, formats: list[str]) -> 
     """
     plan = load_plan(data_dir, base)
     for fmt in formats:
+        # In mixed mode `formats` is [MIXED] and _all_items returns every
+        # format in panel order, so the loop below needs no special case.
         existing = plan.get(fmt, [])
         have = set(existing)
         # Catalog rows in deterministic content_key order (matches Catalog.pending).
@@ -311,9 +324,15 @@ def _all_items(cat: Catalog, fmt: str):
     """All catalog items of a format in deterministic order (uploaded or not)."""
     # Publish in the manual curate-panel order (position), content_key as a
     # stable tiebreak, so each format's set follows the order you arranged.
-    rows = cat.db.execute(
-        "SELECT * FROM items WHERE format=? ORDER BY position, content_key", (fmt,)
-    ).fetchall()
+    if fmt == MIXED:
+        # One list across every format, in exactly the order the panel saved --
+        # which is the whole point of publishing mixed.
+        rows = cat.db.execute(
+            "SELECT * FROM items ORDER BY position, content_key").fetchall()
+    else:
+        rows = cat.db.execute(
+            "SELECT * FROM items WHERE format=? ORDER BY position, content_key",
+            (fmt,)).fetchall()
     from emojikit.catalog import _row_to_item  # local import to avoid cycle noise
     return [_row_to_item(r) for r in rows]
 
@@ -804,7 +823,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             if in_set != 0:
                 before = _live_index(tg, set_name)
                 try:
-                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                    tg.add_emoji(user_id, set_name, path, item.fmt, emojis,
                                  item.keywords, expected_before=in_set)
                     placed = True
                 except RuntimeError as exc:
@@ -814,7 +833,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             if not placed:
                 before = {}             # the create below starts from nothing
                 set_index += 1
-                set_name = f"{base}{FMT_TAG[fmt]}{set_index}_by_{bot}"
+                set_name = f"{base}{FMT_TAG.get(fmt, '')}{set_index}_by_{bot}"
                 # Numbered across ALL formats in creation order, so the
                 # owner sees "<title> 1, 2, 3" and not three separate
                 # sequences with a format word in each. state["sets"]
@@ -831,7 +850,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                         tg.create_emoji_set(user_id, set_name, set_title, logo_png,
                                             "static", [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
                     else:
-                        tg.create_emoji_set(user_id, set_name, set_title, path, fmt,
+                        tg.create_emoji_set(user_id, set_name, set_title, path,
+                                            item.fmt,
                                             emojis, item.keywords)
                 except RuntimeError as exc:
                     # If an earlier attempt of THIS name actually landed (network
@@ -867,14 +887,14 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                         failed += 1
                         continue
                     before = _live_index(tg, set_name)
-                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                    tg.add_emoji(user_id, set_name, path, item.fmt, emojis,
                                  item.keywords, expected_before=in_set)
                 elif logo_png:
                     # Set now exists with the logo at position 0; protect it from
                     # index rollback, then place this item as the second sticker.
                     in_set = 1
                     before = _live_index(tg, set_name)
-                    tg.add_emoji(user_id, set_name, path, fmt, emojis,
+                    tg.add_emoji(user_id, set_name, path, item.fmt, emojis,
                                  item.keywords, expected_before=in_set)
         except AmbiguousUploadError as exc:
             # The add/create may or may not be live. NEVER blind-retry (that is
@@ -985,11 +1005,47 @@ def _record_cids(tg: Telegram, cat: Catalog, fmt_sets: list[dict], base: str,
                 cat.record_file_unique_id(fuid, key)
 
 
+# Telegram's own rule for a sticker-set name: English letters, digits and
+# underscores, must begin with a letter, NO consecutive underscores, must end in
+# "_by_<bot_username>", 1-64 characters. This validates the part we choose; the
+# "_by_<bot>" tail is appended for us and is not optional -- Telegram rejects a
+# name without it.
+_BASE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*")
+# The longest suffix a base can pick up: one format letter, a set index, and
+# "_by_" plus the bot username. Checked against the real username at publish
+# time; this is the static part.
+_NAME_MAX = 64
+
+
 def valid_base(base: str) -> str:
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", base):
-        raise SystemExit("ERROR: --base must start with a letter and contain only "
-                         "letters/digits (no underscores), e.g. 'mypack'.")
+    """The chosen part of a set name, checked against Telegram's rule.
+
+    Underscores are allowed -- this used to reject them, which is stricter than
+    Telegram and refuses a perfectly legal name like YourBrand_Emoji_Packs.
+    Consecutive underscores are not, and neither is a trailing one, because
+    "<base>_" + "1_by_..." is fine but "<base>_" + "_by_..." is not, and the
+    rule is easier to hold as "single underscores between parts".
+    """
+    if not _BASE_RE.fullmatch(base):
+        raise SystemExit(
+            "ERROR: --base must begin with a letter and contain only letters, "
+            "digits and single underscores between them (Telegram's rule for a "
+            "sticker-set name). Examples: 'mypack', 'YourBrand_Emoji_Packs'.")
     return base
+
+
+def check_name_length(base: str, bot: str, tag: str = "") -> None:
+    """Refuse a base that cannot fit Telegram's 64-character set name.
+
+    Caught here rather than as a Bot API error on the first upload, which is
+    after the plan is frozen and the run has already started.
+    """
+    longest = f"{base}{tag}999_by_{bot}"
+    if len(longest) > _NAME_MAX:
+        raise SystemExit(
+            f"ERROR: --base '{base}' is too long: the set name would reach "
+            f"{len(longest)} characters ('{longest}') and Telegram allows "
+            f"{_NAME_MAX}. Shorten --base by {len(longest) - _NAME_MAX}.")
 
 
 def parse_formats(raw: str) -> list[str]:
@@ -1013,6 +1069,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--user-id", type=int,
                     default=safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0))
     ap.add_argument("--emoji", default=DEFAULT_EMOJI, help="Fallback associated emoji.")
+    ap.add_argument("--mixed", action="store_true",
+                    help="Publish every format into ONE family named "
+                         "<base><n>_by_<bot>, in the curate panel's order. "
+                         "Without it each format gets its own sets, which "
+                         "regroups a hand-arranged pack into format blocks.")
     ap.add_argument("--formats", default="static,video,animated",
                     help="Comma list of formats to publish, in order.")
     ap.add_argument("--per-set", type=int, default=PER_SET)
@@ -1027,7 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
 
     base = valid_base(args.base)
     try:
-        formats = parse_formats(args.formats)
+        formats = [MIXED] if args.mixed else parse_formats(args.formats)
     except ValueError as exc:
         log.error("%s", exc)
         return EXIT_USAGE
@@ -1076,6 +1137,17 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
     # frozen plan is rewritten or a single Telegram call is made: every one of
     # those acts on the numbers in this file.
     state = load_state(data_dir, base)
+    # A family already published per format cannot be continued as one family,
+    # or the other way round: `state["sets"]` and the frozen plan are keyed by
+    # format, so the sets already created would be stranded -- invisible to the
+    # resume logic and re-created under new names.
+    started = {rec.get("fmt") for rec in state.get("sets", [])}
+    if started and started != set(formats) and not started <= set(formats):
+        want = "--mixed" if args.mixed else "per-format"
+        log.error("this pack family was started as %s; %s cannot continue it. "
+                  "Use a new --base, or finish it the way it was started.",
+                  ", ".join(sorted(started)), want)
+        return EXIT_USAGE
     with Catalog(db) as cat:
         # Databases written before publication records existed only knew "this
         # item was uploaded", not to which base. The first base to publish
@@ -1086,11 +1158,20 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
         if args.dry_run:
             print("DRY RUN: nothing uploaded.", flush=True)
             note = " (+1 brand logo each)" if logo_planned else ""
+            skipped = set(state.get("skipped", []))
             for fmt in formats:
-                keys = plan.get(fmt, [])
-                n_sets = -(-len(keys) // capacity)
+                # Count what will ACTUALLY publish, using the same filter the
+                # publisher uses. Counting raw plan keys reported 200 emoji and
+                # "2 sets" for a catalog with one item deselected, when the real
+                # answer is 199 + logo = exactly one set -- and one-pack-or-two
+                # is the whole question a dry run is asked.
+                keys = [k for k in plan.get(fmt, [])
+                        if (it := cat.get(k)) and it.included
+                        and not cat.is_published(base, k) and k not in skipped]
+                n_sets = -(-len(keys) // capacity) if keys else 0
                 print(f"  {fmt}: {len(keys)} emoji -> {n_sets} set(s) of up to "
-                      f"{capacity}{note}, named {base}{FMT_TAG[fmt]}1_by_<bot> ...",
+                      f"{capacity}{note}, named "
+                      f"{base}{FMT_TAG.get(fmt, '')}1_by_<bot> ...",
                       flush=True)
             return EXIT_OK
 
@@ -1105,6 +1186,10 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
         tg = Telegram(token)
         bot = tg.get_me()["username"]
         log.info("Publishing as @%s, owner=%s", bot, args.user_id)
+        # Now that the real username is known, prove the names will fit before
+        # the first upload freezes anything.
+        for f in formats:
+            check_name_length(base, bot, FMT_TAG.get(f, ""))
 
         # The YourBrand logo is the mandatory first emoji of every set built by
         # the Emoji Mapper bot; the coin bot is excluded by design.
