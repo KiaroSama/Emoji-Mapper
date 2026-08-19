@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct path runs unchanged otherwise. `state["sent"]` still owns duplicate
   suppression, and a failed announcement is deliberately **not** recorded as
   sent — recording it would make the guard skip that pack forever.
+- **Log-channel messages follow the Ad Timer Bot's format**, with the bot tag on
+  its own first line, a level emoji, and a UTC stamp. Three of its behaviours
+  came across with it because they solve problems this Worker has: a 12/minute
+  budget that **drops and counts** instead of queueing (a queue inside a Worker
+  isolate outlives its request and loses the messages anyway), a chat-id
+  normaliser that accepts the bare id Telegram's UI shows and adds the `-100`
+  the Bot API needs, and a 700-character cap for readability on a phone.
+- **The bots no longer log their own output.** Both administer the log channel,
+  so every line posted there returned as a `channel_post` — to both — and each
+  wrote another row about a message we had just written. Not a loop today, but
+  one as soon as channel handling grows a path that logs an ERROR. Found by
+  watching live traffic, not by reading the code.
 - **Worker logs: a 10 MB D1 table plus an errors-only Telegram channel.** Every
   line starts with the bot that wrote it, in both sinks — the two bots share one
   Worker, one table and one channel. The insert and the oldest-first eviction go
