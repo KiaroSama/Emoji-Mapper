@@ -292,7 +292,8 @@ Emoji Mapper/                  # the whole project
   fetch_pack.py                # collector: download Telegram packs -> catalog
   fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
   add_media.py                 # collector: build emoji from scratch -> catalog
-  build_collection.py          # collector: publish catalog -> new per-format packs
+  build_collection.py          # collector: publish catalog -> new packs
+  sync_order.py                # reorder a LIVE pack to match the panel
   panel.py                     # curate panel: pick & order what gets published
   emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
   emojikit/                    # shared core toolkit
