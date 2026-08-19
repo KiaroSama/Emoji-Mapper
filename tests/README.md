@@ -67,6 +67,26 @@ module imports). One copy each, because a duplicated fake drifts away from the
 thing it stands in for. The leading underscore is load-bearing:
 `-p "test_*.py"` must not collect them as test modules.
 
+`FakeTelegram` binds the **real** `build_pack.Telegram.send_message` rather than
+reimplementing it. The retry count and the link-preview flag are guarantees
+those tests assert, and a hand-written copy would keep asserting them long after
+the shipped method stopped providing them.
+
+## The Cloudflare Worker has its own suite
+
+`worker/` is TypeScript and is **not** collected by the command above, nor by
+`scripts\check.ps1` — running it needs Node, which nothing else in this project
+does. Run it yourself after touching `worker/`:
+
+```powershell
+cd worker
+npm run typecheck    # tsc --noEmit
+npm test             # vitest
+```
+
+Same hermetic rule, enforced the same way: the tests stub `fetch`, so nothing in
+them can reach Telegram. Wiring this suite into CI is an open item.
+
 ## Fixtures
 
 | Fixture | Purpose | Safe to commit |
