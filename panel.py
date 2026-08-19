@@ -512,6 +512,8 @@ body.bg-gray  .thumb{background:#808a96}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
+.lbl.copyable{cursor:copy;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
+.lbl.copyable:hover{color:var(--neon)}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(40px);
   background:#0c1622;border:1px solid var(--neon);color:var(--txt);padding:10px 16px;
   border-radius:12px;box-shadow:0 0 22px #22d3ee44;opacity:0;transition:all .25s;pointer-events:none}
@@ -523,7 +525,7 @@ body.bg-gray  .thumb{background:#808a96}
   <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
   <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
   <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
-    <span style="color:#8aa0b8">· click = toggle · drag = reorder · hover = play</span></span>
+    <span style="color:#8aa0b8">· click = toggle · drag = reorder · click the id = copy</span></span>
   <span class="spacer"></span>
   <button id="all">Select all</button>
   <button id="none">Deselect all</button>
@@ -603,7 +605,14 @@ function makeCard(it){
   card.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
   if(!it.isLogo) card.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(makeThumb(it));
-  card.appendChild(el('div','lbl', it.label || ''));
+  const lbl = el('div','lbl', it.label || '');
+  // The label is usually "premium-id:<digits>" -- the source emoji's id, which
+  // is the one thing here anyone wants on their clipboard. Copy the bare id,
+  // not the prefix.
+  const id = /^premium-id:(\d+)$/.exec(it.label || '');
+  if(id){ lbl.classList.add('copyable'); lbl.dataset.copy = id[1];
+          lbl.title = 'Click to copy ' + id[1]; }
+  card.appendChild(lbl);
   card.appendChild(el('div','sub', it.isLogo
     ? 'always first, not part of the catalog'
     : it.key.slice(0,10) + '…'));
@@ -687,6 +696,10 @@ grid.addEventListener('mouseout',e=>{
 });
 
 grid.addEventListener('click',e=>{
+  // Copying must not also toggle the card: the label sits inside it, so this
+  // has to run first and stop there.
+  const cp = e.target.closest('.copyable');
+  if(cp){ e.stopPropagation(); copyText(cp.dataset.copy); return; }
   const card = e.target.closest('.card'); if(!card) return;
   const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
   if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
@@ -793,6 +806,31 @@ document.getElementById('save').onclick=async()=>{
                : `Save failed: ${j.error||r.status}`);
   }catch(_){ toast('Save failed'); }
 };
+async function copyText(text){
+  if(!text) return;
+  // The panel is served from a loopback host, which IS a secure context, so
+  // the async clipboard API is normally available. It still REJECTS in real
+  // situations -- "Document is not focused" is the one this hit in testing --
+  // so a rejection falls through to execCommand rather than giving up.
+  if(navigator.clipboard && window.isSecureContext){
+    try{ await navigator.clipboard.writeText(text); toast('Copied ' + text); return; }
+    catch(_){ /* fall through */ }
+  }
+  let ok = false;
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly','');
+    ta.style.cssText = 'position:fixed;top:-1000px';
+    document.body.appendChild(ta);
+    ta.select(); ta.setSelectionRange(0, text.length);
+    ok = document.execCommand('copy');
+    ta.remove();
+  }catch(_){ ok = false; }
+  // Never claim a copy that did not happen: the user would paste whatever was
+  // on the clipboard before and not know why it was wrong.
+  toast(ok ? 'Copied ' + text : 'Could not copy — select and copy manually');
+}
+
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;
   t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
 render();

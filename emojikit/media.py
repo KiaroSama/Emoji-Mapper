@@ -695,14 +695,59 @@ def content_key(path: Path, fmt: str) -> str:
 
 
 def _video_content_digest(path: Path) -> str:
-    """Hash normalized sampled frames so visually identical videos match."""
-    ff = ffmpeg_path()
-    cmd = [ff, "-v", "error", "-t", str(WEBM_MAX_SECONDS), "-i", str(path),
-           "-an", "-vf", "fps=10,scale=64:64,format=rgba", "-f", "rawvideo", "-"]
-    res = _run(cmd, capture=True)
-    if res.stdout:
-        return hashlib.sha256(res.stdout).hexdigest()
+    """Hash normalized sampled frames so visually identical videos match.
+
+    Resampling to a fixed 10 fps is what makes two encodes of the same clip
+    agree. It also has one hole: a SINGLE-FRAME video is shorter than one
+    sampling interval, so the filter emits NOTHING and the digest silently fell
+    through to hashing the container bytes -- which is not a content key at all.
+    Two such stickers differing only in container framing did not dedup, and
+    re-encoding one (owner rule 1) moved its key, orphaning its catalog row.
+    Real files: two single-frame .webm in the collector catalog.
+
+    So an empty resample retries at the video's OWN frames before giving up.
+    Raw bytes remain the last resort for a file ffmpeg cannot decode at all,
+    where any key is better than none -- but that is now a decode failure, not
+    an ordinary short clip.
+    """
+    frames = _video_frames_rgba(path)
+    if frames:
+        return hashlib.sha256(frames).hexdigest()
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _video_frames_rgba(path: Path) -> bytes:
+    """The normalized frame stream BOTH video identity keys are built from.
+
+    One helper, not two copies of the ffmpeg call: fingerprint() used to carry
+    its own, and when the single-frame retry was added to the digest alone the
+    two silently disagreed -- the same file getting one key from content_key()
+    and a different one from fingerprint(), which is the identity bug this
+    project exists to avoid.
+
+    Failure is NOT caught here. A hung or timed-out ffmpeg is "I could not
+    look", and turning that into an empty sample would turn it into a byte
+    hash -- a key that looks fine, never dedups, and hides the timeout.
+    fingerprint() used to swallow it exactly that way. Let MediaError out;
+    every ingest site already fails that one item and counts it.
+
+    An EMPTY result from a SUCCESSFUL run is different: the file decoded, it
+    just produced no frames at this sampling rate. That is the case the retry
+    below is for, and the byte-hash fallback in the callers remains only for a
+    file that genuinely renders nothing.
+    """
+    ff = ffmpeg_path()
+
+    def sample(rate_filter: str) -> bytes:
+        cmd = [ff, "-v", "error", "-t", str(WEBM_MAX_SECONDS), "-i", str(path),
+               "-an", "-vf", f"{rate_filter}scale=64:64,format=rgba",
+               "-f", "rawvideo", "-"]
+        return _run(cmd, capture=True).stdout or b""
+
+    # fps=10 is what makes two encodes of the same clip agree. A single-frame
+    # video is shorter than one sampling interval and yields NOTHING, so retry
+    # at the file's own frames before giving up on a content key.
+    return sample("fps=10,") or sample("")
 
 
 def _animated_content_digest(path: Path) -> str:
@@ -752,16 +797,7 @@ def fingerprint(path: Path, fmt: str) -> tuple[str, int | None]:
     pixels, same filter chain.
     """
     if fmt == "video":
-        ff = ffmpeg_path()
-        cmd = [ff, "-v", "error", "-t", str(WEBM_MAX_SECONDS), "-i", str(path),
-               "-an", "-vf", "fps=10,scale=64:64,format=rgba",
-               "-f", "rawvideo", "-"]
-        try:
-            res = _run(cmd, capture=True)
-            raw = res.stdout or b""
-        except Exception as exc:  # noqa: BLE001 - fall back to the byte hash
-            log.debug("video fingerprint failed for %s: %s", path.name, exc)
-            raw = b""
+        raw = _video_frames_rgba(path)
         if not raw:
             return "v:" + hashlib.sha256(path.read_bytes()).hexdigest()[:32], None
         key = "v:" + hashlib.sha256(raw).hexdigest()[:32]
