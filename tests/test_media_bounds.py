@@ -95,6 +95,13 @@ class TestChildProcessTimeout(unittest.TestCase):
              lambda: media.to_video_webm(self.sample, self.tmp / "out.webm")),
             ("_video_content_digest",
              lambda: media._video_content_digest(self.sample)),
+            # fingerprint() shares that decode now. It used to catch the
+            # failure and return a byte-hash key instead -- a key that looks
+            # valid, never dedups, and hides the fact that ffmpeg hung.
+            ("fingerprint",
+             lambda: media.fingerprint(self.sample, "video")),
+            ("_video_frames_rgba",
+             lambda: media._video_frames_rgba(self.sample)),
             ("_first_video_frame",
              lambda: media._first_video_frame(self.sample)),
         ):

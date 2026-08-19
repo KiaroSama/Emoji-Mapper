@@ -483,5 +483,84 @@ class TestReencodeGivesUsOurOwnBytes(unittest.TestCase):
         self.assertEqual(p.read_bytes(), b"\x00\x01\x02")
 
 
+class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
+    """A one-frame video's key must describe its PICTURE, not its bytes.
+
+    The digest resamples to a fixed 10 fps so two encodes of the same clip
+    agree. A single-frame video is shorter than one sampling interval, so the
+    filter emitted nothing and the digest fell through to hashing the container
+    bytes. Consequences, both real and both found in the collector catalog:
+    two such stickers differing only in container framing did not dedup, and
+    re-encoding one under owner rule 1 moved its primary key, orphaning its
+    catalog row and its media path -- which are both named after that key.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _one_frame_webm(self, name: str) -> Path:
+        out = self.dir / name
+        subprocess.run(
+            [media.ffmpeg_path(), "-y", "-f", "lavfi", "-i",
+             "testsrc2=size=100x100:rate=30:duration=1", "-frames:v", "1",
+             "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "50",
+             "-b:v", "0", "-an", str(out)],
+            capture_output=True, check=True, timeout=FFMPEG_TIMEOUT)
+        return out
+
+    def test_the_key_survives_a_reencode(self):
+        src = self._one_frame_webm("one.webm")
+        before_bytes = src.read_bytes()
+        key_before = media.content_key(src, "video")
+
+        self.assertTrue(media.reencode_in_place(src, "video"),
+                        "nothing was rewritten, so this proves nothing")
+        self.assertNotEqual(src.read_bytes(), before_bytes,
+                            "owner rule 1: our bytes must differ from theirs")
+        self.assertEqual(media.content_key(src, "video"), key_before,
+                         "the primary key moved on a -c copy remux, which "
+                         "orphans the catalog row and the media path")
+
+    def test_fingerprint_and_content_key_agree(self):
+        """They must be the same key, or ingest and dedup disagree.
+
+        fingerprint() carried its own copy of the ffmpeg call. When the
+        single-frame retry was added to the digest alone, the two produced
+        DIFFERENT keys for the same file -- and fingerprint()'s byte-hash
+        fallback hashed a WebM whose SegmentUID is random, so the "identity" of
+        a single-frame video changed on every run.
+        """
+        src = self._one_frame_webm("agree.webm")
+        key, _phash = media.fingerprint(src, "video")
+        self.assertEqual(key, media.content_key(src, "video"))
+
+    def test_the_key_is_stable_across_runs(self):
+        src = self._one_frame_webm("stable.webm")
+        first = media.content_key(src, "video")
+        self.assertEqual(first, media.content_key(src, "video"))
+        media.reencode_in_place(src, "video")
+        self.assertEqual(media.content_key(src, "video"), first,
+                         "a remux rewrites the container's random SegmentUID; "
+                         "a key that follows it is a byte hash, not identity")
+
+    def test_the_key_is_not_merely_a_hash_of_the_file(self):
+        src = self._one_frame_webm("a.webm")
+        clone = self.dir / "b.webm"
+        # Same single frame, different container bytes -- exactly the pair the
+        # byte-hash fallback failed to collapse.
+        subprocess.run([media.ffmpeg_path(), "-y", "-i", str(src), "-c", "copy",
+                        str(clone)], capture_output=True, check=True,
+                       timeout=FFMPEG_TIMEOUT)
+        self.assertNotEqual(src.read_bytes(), clone.read_bytes(),
+                            "the two files are byte-identical; nothing tested")
+        self.assertEqual(media.content_key(src, "video"),
+                         media.content_key(clone, "video"),
+                         "two encodes of one frame must dedup onto one key")
+
+
 if __name__ == "__main__":
     unittest.main()
