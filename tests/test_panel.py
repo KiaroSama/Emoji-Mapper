@@ -517,5 +517,63 @@ class SimilarityOrder(unittest.TestCase):
         self.assertEqual([it.fmt for it in out], ["static", "static", "animated"])
 
 
+class CopyTheEmojiId(unittest.TestCase):
+    """Clicking the id under a card copies it, and does not toggle the card."""
+
+    def test_only_a_whole_premium_id_label_is_copyable(self):
+        self.assertEqual(p.copy_id_for("premium-id:5406926593698312391"),
+                         "5406926593698312391")
+        # Anchored: a label that merely contains the prefix or trails junk is
+        # not an id, and offering it would put the wrong thing on the clipboard.
+        for junk in ("xpremium-id:12", "premium-id:12x", "premium-id:",
+                     "premium-id:12 34", "", "coin logo", "premium-id:abc"):
+            self.assertEqual(p.copy_id_for(junk), "", junk)
+
+    def test_the_view_carries_the_id_for_the_page(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        img = data / "media" / "static" / "a.png"
+        _make_png(img)
+        other = data / "media" / "static" / "b.png"
+        _make_png(other)
+        with Catalog(data / "catalog.db") as cat:
+            cat.add(content_key="s:" + "a" * 30, fmt="static", file_path=img,
+                    emojis=["😀"], keywords=["premium-id:5406926593698312391"])
+            cat.add(content_key="s:" + "b" * 30, fmt="static", file_path=other,
+                    emojis=["😀"], keywords=["hand drawn"])
+        with Catalog(data / "catalog.db") as cat:
+            view, _ = p.build_view(cat, "")
+        by_label = {v["label"]: v["copyId"] for v in view}
+        self.assertEqual(by_label["premium-id:5406926593698312391"],
+                         "5406926593698312391")
+        self.assertEqual(by_label["hand drawn"], "")
+
+    def test_the_page_stops_the_click_before_the_toggle(self):
+        """The label sits inside the card, so without this a copy also toggles.
+
+        Asserted against the served page because the ordering lives in the
+        click handler, not in any Python function.
+        """
+        page = p.PAGE
+        copy_at = page.index("closest('.copyable')")
+        toggle_at = page.index("closest('.card')", copy_at - 400)
+        self.assertLess(copy_at, toggle_at,
+                        "the copy branch must run before the toggle branch")
+        self.assertIn("e.stopPropagation()", page[copy_at:copy_at + 200])
+
+    def test_video_plays_without_hover(self):
+        """Hover-only playback was rejected: a grid of stills cannot be curated.
+
+        Video is bounded the same way the animated cards are -- by the viewport
+        observer and the Animation switch -- not by the mouse.
+        """
+        page = p.PAGE
+        self.assertIn("data-play", page.replace("dataset.play", "data-play"))
+        self.assertIn("video[data-play]", page)
+        # The remaining hover handlers exist only for prefers-reduced-motion.
+        self.assertIn("if (RM) {", page)
+
+
 if __name__ == "__main__":
     unittest.main()

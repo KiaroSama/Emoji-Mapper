@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -103,6 +104,22 @@ def order_by_similarity(items: list) -> list:
     return out
 
 
+# The collector labels an ingested emoji "premium-id:<id>", and that id is the
+# one thing anyone wants off this page. Decided here rather than by a regex
+# inside the page's JavaScript, so it can actually be tested.
+_PREMIUM_ID = re.compile(r"^premium-id:(\d+)$")
+
+
+def copy_id_for(label: str) -> str:
+    """The id a label offers for copying, or "" when it offers none.
+
+    Anchored on purpose: "xpremium-id:12" and "premium-id:12x" are not ids, and
+    a label that merely CONTAINS digits is not one either.
+    """
+    m = _PREMIUM_ID.match(label or "")
+    return m.group(1) if m else ""
+
+
 def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
     # First time only: seed the manual order with the look-alike-grouped
     # similarity order (a nice starting point). After that, always use the saved
@@ -134,6 +151,7 @@ def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
             "key": it.content_key,
             "fmt": it.fmt,
             "label": label,
+            "copyId": copy_id_for(label),
             "emoji": it.emojis[0] if it.emojis else "",
             "included": it.included,
         })
@@ -512,7 +530,7 @@ body.bg-gray  .thumb{background:#808a96}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
-.lbl.copyable{cursor:copy;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
+.lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
 .lbl.copyable:hover{color:var(--neon)}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(40px);
   background:#0c1622;border:1px solid var(--neon);color:var(--txt);padding:10px 16px;
@@ -562,10 +580,12 @@ function makeThumb(it){
   if(it.fmt === 'video'){
     const v = el('video');
     v.muted = true; v.loop = true; v.playsInline = true;
-    // No autoplay -- every video playing at once was the main CPU sink. With
-    // preload=metadata the browser fetches only headers, and #t=0.001 makes it
-    // paint the first frame as a still. Playback starts on hover.
+    // Plays on its own, like the animated cards. Hover-only was rejected: a
+    // grid of stills is useless for curating. Bounded the same way instead --
+    // the viewport observer starts and pauses playback, so what costs anything
+    // is what you can actually see, not the whole catalog.
     v.preload = 'metadata';
+    v.dataset.play = '1';
     v.src = src + '#t=0.001';
     box.appendChild(v);
   } else if(it.fmt === 'animated'){
@@ -606,12 +626,9 @@ function makeCard(it){
   if(!it.isLogo) card.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(makeThumb(it));
   const lbl = el('div','lbl', it.label || '');
-  // The label is usually "premium-id:<digits>" -- the source emoji's id, which
-  // is the one thing here anyone wants on their clipboard. Copy the bare id,
-  // not the prefix.
-  const id = /^premium-id:(\d+)$/.exec(it.label || '');
-  if(id){ lbl.classList.add('copyable'); lbl.dataset.copy = id[1];
-          lbl.title = 'Click to copy ' + id[1]; }
+  // copyId is decided server-side (panel.copy_id_for) so it is unit-tested.
+  if(it.copyId){ lbl.classList.add('copyable'); lbl.dataset.copy = it.copyId;
+                 lbl.title = 'Click to copy ' + it.copyId; }
   card.appendChild(lbl);
   card.appendChild(el('div','sub', it.isLogo
     ? 'always first, not part of the catalog'
@@ -627,15 +644,34 @@ function makeCard(it){
 // mounting/destroying a player was not.
 const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
   for (const e of es) {
-    const img = e.target;
-    const want = (e.isIntersecting && ANIM_ON) ? img.dataset.anim : img.dataset.still;
-    if (want && img.getAttribute('src') !== want) img.src = want;
+    const t = e.target;
+    const live = e.isIntersecting && ANIM_ON && !RM;
+    if (t.dataset.play) { setPlaying(t, live); continue; }
+    const want = live ? t.dataset.anim : t.dataset.still;
+    if (want && t.getAttribute('src') !== want) t.src = want;
   }
 }, {root: null, rootMargin: '300px'}) : null;
 
+// play() rejects when the element is detached or the browser refuses; that is
+// not an error worth surfacing, but it MUST be caught or it becomes an
+// unhandled rejection on every scroll.
+function setPlaying(v, on){
+  try { if (on) { const q = v.play(); if (q) q.catch(()=>{}); } else { v.pause(); } }
+  catch(_){}
+}
+
+function animatedNodes(){
+  return grid.querySelectorAll('img[data-anim], video[data-play]');
+}
+
 function observeAnimated(){
   if (!animIO) return;
-  grid.querySelectorAll('img[data-anim]').forEach(i => animIO.observe(i));
+  animatedNodes().forEach(n => animIO.observe(n));
+  // Without an observer nothing would ever start, so fall back to playing all
+  // of them rather than showing a grid of frozen videos.
+  if (!window.IntersectionObserver) {
+    grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, ANIM_ON));
+  }
 }
 
 // Master switch. Off = every card holds frame 0 and nothing decodes at all,
@@ -644,9 +680,11 @@ function observeAnimated(){
 let ANIM_ON = localStorage.getItem('animOn') !== '0';
 function applyAnim(){
   document.getElementById('anim').textContent = 'Animation: ' + (ANIM_ON ? 'On' : 'Off');
-  grid.querySelectorAll('img[data-anim]').forEach(img => {
-    if (!ANIM_ON) { if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still; }
-    else if (animIO) { animIO.unobserve(img); animIO.observe(img); }  // re-evaluate visibility
+  animatedNodes().forEach(n => {
+    if (!ANIM_ON) {
+      if (n.dataset.play) setPlaying(n, false);
+      else if (n.getAttribute('src') !== n.dataset.still) n.src = n.dataset.still;
+    } else if (animIO) { animIO.unobserve(n); animIO.observe(n); }  // re-evaluate
   });
 }
 
@@ -685,15 +723,18 @@ function setCard(it){
 }
 function setAll(fn){ for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); } updateCount(); }
 
-// Hover play/pause, by delegation -- no per-card listeners to leak.
-grid.addEventListener('mouseover',e=>{
-  const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-  const v = box.querySelector('video'); if(v && !RM){ try{v.play();}catch(_){} }
-});
-grid.addEventListener('mouseout',e=>{
-  const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-  const v = box.querySelector('video'); if(v){ try{v.pause(); v.currentTime=0;}catch(_){} }
-});
+// Reduced motion is the one case where nothing plays by itself; hover is then
+// the only way to see a video move at all, so the old handlers survive for it.
+if (RM) {
+  grid.addEventListener('mouseover',e=>{
+    const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
+    const v = box.querySelector('video'); if(v) setPlaying(v, true);
+  });
+  grid.addEventListener('mouseout',e=>{
+    const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
+    const v = box.querySelector('video'); if(v){ setPlaying(v, false); try{v.currentTime=0;}catch(_){} }
+  });
+}
 
 grid.addEventListener('click',e=>{
   // Copying must not also toggle the card: the label sits inside it, so this
