@@ -1,0 +1,105 @@
+"""Start the curate panel against a THROWAWAY COPY of the catalog.
+
+Why this exists, plainly: an agent verifying the panel in a browser fired
+synthetic drag events at the panel that was serving the owner's real
+`collection/` directory. Every one of those drags called `/api/order` and
+rewrote `items.position` in the live catalog, on top of an afternoon of manual
+ordering. Reordering is exactly what the panel is for, so there is no way to
+"test carefully" against real data -- the test IS the mutation.
+
+So automated UI checks get their own catalog and their own port:
+
+* the catalog is copied to a temp directory, media is symlinked or copied, and
+  the copy is deleted on exit;
+* port 8766, not 8765, so a sandbox can never take the port a real panel is on
+  and a real panel is never mistaken for the sandbox;
+* it refuses to start if `--data-dir` points anywhere inside the project.
+
+Usage (this is what `.claude/launch.json` runs):
+
+    .venv\\Scripts\\python.exe scripts/panel_sandbox.py
+    .venv\\Scripts\\python.exe scripts/panel_sandbox.py --source collection --port 8766
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PORT = 8766          # never 8765: that is where a real panel lives
+
+
+def clone_catalog(source: Path, dest: Path) -> int:
+    """Copy the catalog and its media into ``dest``. Returns the item count."""
+    db = source / "catalog.db"
+    if not db.is_file():
+        raise SystemExit(f"no catalog at {db} -- nothing to sandbox")
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(db, dest / "catalog.db")
+
+    # Media is read-only to the panel, so hard-link it where the filesystem
+    # allows: 200 emoji is ~20 MB and copying it on every launch is waste.
+    # A link failure is not fatal -- fall back to copying.
+    media_src, media_dst = source / "media", dest / "media"
+    for src in media_src.rglob("*"):
+        if not src.is_file():
+            continue
+        out = media_dst / src.relative_to(media_src)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, out)
+        except OSError:
+            shutil.copy2(src, out)
+
+    import sqlite3
+    with sqlite3.connect(dest / "catalog.db") as con:
+        n = con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    # The copied rows still hold absolute/relative paths into the SOURCE tree.
+    # Repoint them at the clone, or the sandbox would serve -- and a future
+    # writer could touch -- the real files.
+    with sqlite3.connect(dest / "catalog.db") as con:
+        for key, path in con.execute("SELECT content_key, file_path FROM items").fetchall():
+            p = Path(path)
+            try:
+                rel = p.relative_to(source) if p.is_absolute() else Path(path).relative_to(source.name)
+            except ValueError:
+                continue
+            con.execute("UPDATE items SET file_path=? WHERE content_key=?",
+                        (str(dest / rel).replace("\\", "/"), key))
+        con.commit()
+    return n
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--source", default="collection",
+                    help="Catalog to CLONE (never served directly).")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    args = ap.parse_args(argv)
+
+    if args.port == 8765:
+        raise SystemExit("refusing port 8765: that is the real panel's port")
+
+    source = (ROOT / args.source).resolve()
+    tmp = Path(tempfile.mkdtemp(prefix="panel-sandbox-"))
+    atexit.register(shutil.rmtree, tmp, True)
+
+    n = clone_catalog(source, tmp)
+    print(f"sandbox catalog: {n} items cloned from {source} -> {tmp}", flush=True)
+    print(f"the real catalog at {source} is NOT served and cannot be modified",
+          flush=True)
+
+    cmd = [sys.executable, str(ROOT / "panel.py"), "--data-dir", str(tmp),
+           "--port", str(args.port), "--no-open"]
+    return subprocess.call(cmd, cwd=ROOT)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

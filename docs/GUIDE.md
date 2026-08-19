@@ -654,6 +654,25 @@ from the order on every drop, never stored on the card. Dragging to the top or
 bottom edge of the window scrolls the page, so an item can be carried across
 the whole catalog in one motion. Releasing anywhere that is not a card cancels
 — it used to mean "move to the end".
+
+**Losing the panel process is never silent.** The page polls `GET /api/ping`
+every 5 s. If the panel is gone — or a save is refused — a red banner appears
+*and stays* (a toast fades in 2.6 s, which is how an afternoon of reordering
+was once done against a dead server and never noticed). The unsaved order is
+kept in the page and flushed automatically the moment the panel answers again,
+including across a **restart**: the mutation token is per run, so the page
+re-reads it from `/` after a 403 and retries. Closing the tab with unsaved work
+triggers the browser's "leave site?" prompt.
+
+**Never point automated UI checks at `collection/`.** Reordering is what this
+panel does, so a synthetic drag event *is* a write — there is no careful way to
+test it against real data. `scripts/panel_sandbox.py` clones the catalog to a
+temp directory, serves it on port **8766** (never 8765), and deletes the clone
+on exit:
+
+```powershell
+.venv\Scripts\python.exe scripts\panel_sandbox.py
+```
 Animated *and* video emoji play on their own while near the viewport; hover
 plays a video only under `prefers-reduced-motion`, where nothing autoplays.
 Animated emoji play on their own while near the viewport; the header's
