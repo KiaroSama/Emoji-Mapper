@@ -1015,7 +1015,10 @@ def send_final_links(tg: Telegram) -> None:
         dest = announce_packs(
             tg, USER_ID,
             [{"name": s["name"], "title": str(s["index"])} for s in sets],
-            bot="coin", note="\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:")
+            bot="coin", note="\U0001F4E6 @GodVerify Crypto Emoji \u2014 all packs:",
+            # One line per pack: 29 of them as titled cards is three screens of
+            # scrolling, and this message is a link index, not an announcement.
+            style="list")
         state["final_sent"] = True
         save_state(state)
         print(f"sent final links for {len(sets)} packs to {dest} (preview off).",
