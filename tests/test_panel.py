@@ -727,5 +727,81 @@ class LosingTheServerIsNeverSilent(MutationGuard):
         self.assertIn("if(pendingOrder)", guard[:200])
 
 
+class UndoRedoAndFormatColours(unittest.TestCase):
+    """The header controls, the history stack, and telling formats apart."""
+
+    def test_every_mutation_records_the_state_to_return_to(self):
+        """remember() must run BEFORE the change, at all three sites.
+
+        A missed site is invisible until someone undoes past it and gets the
+        wrong state back, which is worse than having no undo at all.
+        """
+        page = p.PAGE
+        for label, marker, mutation in (
+            ("select all / invert", "function setAll(fn){", "it.included = fn(it)"),
+            ("card toggle", "if(i < 0 || ITEMS[i].isLogo) return;", "ITEMS[i].included=!ITEMS[i].included"),
+            ("drag reorder", "if(from>=0 && to>=0 && to!==from){", "ITEMS.splice(from,1)"),
+        ):
+            block = page[page.index(marker):]
+            block = block[:block.index(mutation)]
+            self.assertIn("remember()", block, f"{label} does not record history first")
+
+    def test_the_history_is_bounded(self):
+        """A long curation session must not grow the stack without limit."""
+        page = p.PAGE
+        self.assertIn("HISTORY_MAX", page)
+        block = page[page.index("function remember(){"):]
+        self.assertIn("past.shift()", block[:block.index("}")+200])
+
+    def test_a_new_action_drops_the_redo_branch(self):
+        page = p.PAGE
+        block = page[page.index("function remember(){"):]
+        self.assertIn("future.length = 0", block[:block.index("updateHistoryButtons")])
+
+    def test_undo_moves_the_cards_instead_of_rebuilding_them(self):
+        """render() here would re-request all 200 thumbnails and previews.
+
+        Appending a node that is already in the document relocates it, so the
+        loaded media survives an undo.
+        """
+        page = p.PAGE
+        block = page[page.index("function applySnapshot("):]
+        block = block[:block.index("function undo()")]
+        # Comments explain what the code deliberately does NOT do, so they
+        # mention render() -- strip them or the assertion matches the prose.
+        code = chr(10).join(ln for ln in block.splitlines()
+                            if not ln.strip().startswith("//"))
+        self.assertIn("grid.appendChild(frag)", code)
+        self.assertNotIn("render()", code)
+        # Order auto-saves, so an undone reorder must reach the catalog too.
+        self.assertIn("saveOrder()", code)
+
+    def test_each_format_has_its_own_accent(self):
+        page = p.PAGE
+        colours = {}
+        for fmt in ("static", "animated", "video"):
+            rule = page[page.index(f".card.fmt-{fmt}"):]
+            colours[fmt] = rule[rule.index("--fmt:") + 6:rule.index(";")]
+        self.assertEqual(len(set(colours.values())), 3, colours)
+        # The drag-over highlight must not be any format's colour, or a drop
+        # target reads as "this card is animated".
+        over = page[page.index(".card.over{"):]
+        over = over[:over.index("}")]
+        for fmt, c in colours.items():
+            self.assertNotIn(c, over, f"drop target uses the {fmt} colour")
+
+    def test_only_save_selection_sits_outside_the_centre_group(self):
+        page = p.PAGE
+        actions = page[page.index('<div class="actions">'):]
+        actions = actions[:actions.index("</div>")]
+        for btn in ("undo", "redo", "all", "none", "inv", "bg", "anim"):
+            self.assertIn(f'id="{btn}"', actions, btn)
+        self.assertNotIn('id="save"', actions,
+                         "Save writes; it stays out of the centre group")
+        # Centred by grid columns, not by flex spacers -- spacers only centre
+        # when both sides weigh the same, and the title is far wider.
+        self.assertIn("grid-template-columns:1fr auto 1fr", page)
+
+
 if __name__ == "__main__":
     unittest.main()
