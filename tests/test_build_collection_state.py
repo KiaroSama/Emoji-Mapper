@@ -1187,6 +1187,31 @@ class MixedPublishesOneFamily(unittest.TestCase):
         self.assertIn("started", block)
         self.assertIn("EXIT_USAGE", block)
 
+    def test_state_written_by_mixed_can_be_read_back(self):
+        """The validator rejected the very state the publisher had written.
+
+        `--mixed` records sets with fmt="mixed"; load_state only accepted the
+        three real formats, so the first resume of a mixed family refused its
+        own file and the publish could not continue.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        bc.save_json(bc._state_path(data, "b"), {
+            "base": "b", "sent": [], "skipped": [],
+            "sets": [{"fmt": bc.MIXED, "index": 1, "name": "b1_by_bot",
+                      "title": "T 1", "live": 1, "logo": True, "keys": []}]})
+        state = bc.load_state(data, "b")          # must not raise
+        self.assertEqual(state["sets"][0]["fmt"], bc.MIXED)
+
+        # A genuinely unknown format must still be refused.
+        bc.save_json(bc._state_path(data, "c"), {
+            "base": "c", "sent": [], "skipped": [],
+            "sets": [{"fmt": "sideways", "index": 1, "name": "c1_by_bot",
+                      "title": "T", "live": 0, "keys": []}]})
+        with self.assertRaises(bc.StateError):
+            bc.load_state(data, "c")
+
     def test_the_dry_run_counts_what_will_publish_not_the_plan(self):
         """It reported 200 emoji and "2 sets" with one item deselected.
 

@@ -256,7 +256,10 @@ def _validate_state(state: dict, path: Path) -> None:
         name, fmt, index = s.get("name"), s.get("fmt"), s.get("index")
         if not isinstance(name, str) or not name:
             raise bad(f"sets[{i}] has no name.")
-        if fmt not in FMT_TAG:
+        # MIXED is a real recorded value: a --mixed family stores one set list
+        # under it. Leaving it out of this check made the validator reject the
+        # state the publisher had just written itself.
+        if fmt not in FMT_TAG and fmt != MIXED:
             raise bad(f"sets[{i}] ({name}) has unknown format {fmt!r}.")
         # bool is an int in Python, and JSON `true` must not pass as index 1.
         if isinstance(index, bool) or not isinstance(index, int) or index < 1:
@@ -434,6 +437,81 @@ class Unresolvable(Exception):
     """
 
 
+# How far Telegram's own re-encode may move an image and still be OUR upload.
+#
+# Measured, not guessed: a 100x100 WEBP from this catalog came back from
+# Telegram with 2304 of 16384 normalised bytes changed (mean delta 2.38) and a
+# perceptual distance of 1 bit out of 64. Exact content_key equality therefore
+# CANNOT hold for a fresh upload -- the publisher stopped on its own integrity
+# guard before a single emoji was recorded.
+#
+# This does not weaken the guard. It is compared against ONE expected source --
+# the file we just uploaded -- not searched across the catalog, so a false
+# positive would have to be a foreign sticker that is visually that exact
+# image. A foreign llama sits tens of bits away.
+UPLOAD_PHASH_TOLERANCE = 6
+
+# The same tolerance is NOT safe for a catalog-wide search. Verifying an upload
+# compares against ONE expected file; reconciling an unknown live sticker asks
+# "which of 200 is this?", and this catalog is full of near-identical marks --
+# at 6 bits, two items matched and the run stopped as ambiguous, correctly.
+#
+# Measured on the live sticker: the right item sits at 0 bits (dHash shrugs off
+# Telegram's re-encode, which moved the exact key), and the nearest rival at 5.
+# 2 separates them with room, and anything closer than that on both sides would
+# be reported as ambiguous rather than guessed.
+SEARCH_PHASH_TOLERANCE = 2
+
+
+def _same_image(tg, st: dict, source: Path, tmp_dir: Path) -> bool | None:
+    """Is this live sticker the image in ``source``? None = could not tell.
+
+    Exact first, because when Telegram's re-encode happens to be pixel-exact
+    that is the strongest possible answer. Perceptual second, bounded.
+    """
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_dir / f"verify_{st.get('file_unique_id') or 'x'}.dl"
+    try:
+        fmt = media.telegram_sticker_format(st)
+        tg.download_file(st["file_id"], tmp)
+        if media.content_key(tmp, fmt) == media.content_key(source, fmt):
+            return True
+        a, b = media.perceptual_hash(tmp, fmt), media.perceptual_hash(source, fmt)
+        if a is None or b is None:
+            # Animated (vector) has no raster hash. Nothing further to compare,
+            # and "I could not tell" must not read as "not ours".
+            return None
+        d = media.hamming(a, b)
+        log.debug("upload verify: perceptual distance %d for %s", d, source.name)
+        return d <= UPLOAD_PHASH_TOLERANCE
+    except Exception as exc:  # noqa: BLE001 - a failed probe is not a "no"
+        log.warning("upload verify failed for %s: %s", source.name, redact(str(exc)))
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
+    """The one catalog item this image is, within the re-encode tolerance.
+
+    Returns the content_key, None for "no catalog item looks like this", or
+    the string "ambiguous" when more than one does -- which the caller must
+    treat as "I could not tell", never as a pick.
+
+    Animated is vector and has no raster hash, so there is nothing to compare:
+    its content key survives a re-gzip exactly, and a miss there is a real miss.
+    """
+    probe = media.perceptual_hash(path, fmt)
+    if probe is None:
+        return None
+    close = [it.content_key for it in cat.all_items()
+             if it.fmt == fmt and it.phash is not None
+             and media.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
+    if len(close) > 1:
+        return "ambiguous"
+    return close[0] if close else None
+
+
 def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | None:
     """Map a LIVE sticker back to its catalog content_key.
 
@@ -457,19 +535,33 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
             f"this Telegram client cannot download {fuid or file_id}")
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp = tmp_dir / f"reconcile_{fuid or 'unknown'}.dl"
+    tmp_kept = tmp
     try:
         tg.download_file(file_id, tmp)
         key = media.content_key(tmp, media.telegram_sticker_format(st))
     except Exception as exc:
+        tmp.unlink(missing_ok=True)
         log.warning("reconcile download failed (%s): %s", fuid or file_id,
                     redact(str(exc)))
         raise Unresolvable(
             f"could not fetch or hash {fuid or file_id}: {redact(str(exc))}"
         ) from exc
-    finally:
-        tmp.unlink(missing_ok=True)
     if cat.get(key) is None:
-        return None
+        # Exact miss. Telegram re-encoded it, so for a raster format the key
+        # cannot match -- fall back to the perceptual hash, but ONLY when the
+        # answer is unambiguous. Two catalog items within tolerance means we
+        # cannot tell which one this is, and guessing is what put a foreign
+        # llama on `sol`; that is Unresolvable, not a negative.
+        near = _near_catalog_match(cat, tmp_kept, media.telegram_sticker_format(st))
+        if near == "ambiguous":
+            raise Unresolvable(
+                f"{fuid or file_id} is within the re-encode tolerance of more "
+                f"than one catalog item; refusing to attribute it by guess")
+        if near is None:
+            tmp_kept.unlink(missing_ok=True)
+            return None
+        key = near
+    tmp_kept.unlink(missing_ok=True)
     if fuid:
         cat.record_file_unique_id(fuid, key)
     return key
@@ -531,20 +623,27 @@ def _confirm_new_upload(tg, cat: Catalog, set_name: str, key: str,
     # also appears. Resolve the candidate's CONTENT and require it to be this
     # key before anything durable is written -- otherwise a foreign FUID and
     # CID get bound to our catalog entry permanently.
-    try:
-        resolved = _resolve_sticker_key(tg, cat, st, tmp_dir)
-    except Unresolvable as exc:
+    # Compared against the file we JUST uploaded, not searched across the
+    # catalog by exact hash. Telegram re-encodes on upload, so the exact key
+    # cannot survive -- measured on this catalog: 14% of normalised bytes
+    # changed, perceptual distance 1 of 64 bits. Searching by exact key made
+    # every fresh upload "an unidentifiable image" and stopped the publish
+    # before a single emoji was recorded.
+    item = cat.get(key)
+    if item is None:
+        raise SetDrift(f"{key} is no longer in the catalog; refusing to "
+                       f"attribute a live sticker to a missing item.")
+    same = _same_image(tg, st, Path(item.file_path), tmp_dir)
+    if same is None:
         raise SetDrift(
             f"the sticker that appeared in {set_name} while uploading {key} "
-            f"could not be examined ({exc}), so it cannot be proven to be ours. "
-            f"Nothing was recorded; re-run to reconcile it from live state."
-        ) from exc
-    if resolved != key:
+            f"could not be examined, so it cannot be proven to be ours. "
+            f"Nothing was recorded; re-run to reconcile it from live state.")
+    if not same:
         raise SetDrift(
             f"the sticker that appeared in {set_name} while uploading {key} "
-            f"resolves to {resolved or 'an unidentifiable image'}, not {key}. "
-            f"Our upload did not land, or someone else wrote to this set; "
-            f"refusing to record a foreign sticker as ours.")
+            f"is not that image. Our upload did not land, or someone else "
+            f"wrote to this set; refusing to record a foreign sticker as ours.")
     fuid = str(st.get("file_unique_id") or "")
     owner = cat.seen_file_unique_id(fuid) if fuid else None
     if owner is not None and owner != key:
