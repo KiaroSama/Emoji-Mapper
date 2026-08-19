@@ -640,8 +640,10 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 | `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
 | `--no-open` | off | Don't auto-open the browser. |
 
-Interactions: **click** a card to toggle include/exclude, **drag** a card to
-reorder (this is the publish order), **hover** a *video* emoji to play it.
+Interactions: **click** a card to toggle include/exclude, **click the
+`premium-id:` label** to copy that id to the clipboard (it stops there and does
+not toggle the card), **drag** a card to reorder (this is the publish order),
+**hover** a *video* emoji to play it.
 Animated emoji play on their own while near the viewport; the header's
 **Animation: On/Off** button stops that everywhere and is remembered in
 `localStorage`.
@@ -1020,9 +1022,18 @@ From the Bot API, prefer the sticker object's `is_animated` / `is_video` flags.
   truly distinct images get distinct keys.
 - **video** → `"v:" + sha256(<sampled frames>)`. ffmpeg samples `fps=10` over
   ≤3 s at 64×64 RGBA; visually identical videos match regardless of container.
+  **A single-frame video is shorter than one sampling interval and yields no
+  frames**, so an empty resample retries at the file's own frames rather than
+  falling through to a byte hash — which is not a content key, and which made
+  two containers of the same frame fail to dedup while a `-c copy` remux moved
+  the key (WebM randomises its SegmentUID). `fingerprint()` shares this exact
+  decode; it must never grow its own copy again.
 - **animated** → `"a:" + sha256(<canonical Lottie JSON>)`. The `.tgs` is
   gunzipped, parsed, re-serialized with sorted keys; re-gzipped copies match.
-- unknown → `"r:" + sha256(raw bytes)`.
+- unknown → `"r:" + sha256(raw bytes)` — reached only when ffmpeg renders
+  nothing at all. A ffmpeg **failure or timeout** is not that case: it raises
+  `MediaError` and the ingest site fails that one item, because a byte-hash key
+  looks valid, never dedups, and hides the timeout.
 
 ### 16.2 Perceptual near-duplicate (opt-in)
 
