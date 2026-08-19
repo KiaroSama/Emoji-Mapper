@@ -781,8 +781,25 @@ every delivery is then rejected 401, which looks exactly like a dead bot.
 `-Status` reports, `-Delete` hands a token back to the poller, and it refuses to
 replace a webhook pointing elsewhere without `-Force`.
 
-**Logs.** Every line starts with `[general]` or `[coin]`; both bots share this
-Worker, one D1 table and one channel, so an untagged line is not worth keeping.
+**Logs.** The channel line follows the Ad Timer Bot's format, bot tag on its own
+first line:
+
+```
+[general]
+❌ ERROR webhook
+update 42: sendMessage failed (400): chat not found
+2026-08-19 00:45:12 UTC
+```
+
+Both bots share this Worker, one D1 table and one channel, so an untagged line
+is not worth keeping. The channel is capped at 12 messages a minute; over budget
+it drops and counts rather than queueing (a queue in a Worker isolate outlives
+its request and loses them anyway), and the count rides on the next message
+through. That budget is per isolate, not global. `LOG_CHAT_ID` also accepts a
+bare channel id copied from the Telegram UI and adds the `-100` prefix.
+**Channel posts from the log channel itself are ignored** — both bots administer
+it, so every line posted there came back to both and each wrote another row
+about a message we had just written.
 D1 is capped at **10 MB, oldest evicted first**, with the insert and the
 eviction in one `batch()` — a row cannot be stored without its budget check.
 The cap counts stored *text*, not the database file: D1 exposes no cheap
