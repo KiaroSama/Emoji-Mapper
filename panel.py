@@ -474,17 +474,35 @@ PAGE = r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:radial-gradient(1200px 800px at 70% -10%,#0b1a2b 0%,var(--bg) 60%);
   color:var(--txt);font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif}
-header{position:sticky;top:0;z-index:5;backdrop-filter:blur(10px);
+/* Three columns, not flex spacers: the middle group is only truly centred in
+   the WINDOW if the side columns each take the same share, and the title plus
+   the hint text is far wider than one Save button. With 1fr auto 1fr the
+   actions sit on the window's centre line whatever the sides weigh. */
+header{display:grid;grid-template-columns:1fr auto 1fr;
+  position:sticky;top:0;z-index:5;backdrop-filter:blur(10px);
   background:linear-gradient(180deg,#0a0f1aee,#0a0f1abb);border-bottom:1px solid var(--line);
-  padding:14px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+  padding:14px 20px;gap:12px;align-items:center}
 .brand{border-radius:8px;flex:none;filter:drop-shadow(0 0 8px #22d3ee55)}
 h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px;
   text-shadow:0 0 12px #22d3ee66}
 h1 .dot{color:var(--neon)}
 .count{color:var(--muted);font-size:13px;margin-left:4px}
 .count b{color:var(--neon2)}
-.spacer{flex:1}
-button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);
+/* Everything except Save selection sits together in the middle; Save stays
+   alone on the right, where a button that writes belongs. */
+.hleft{display:flex;align-items:center;gap:12px;min-width:0}
+.hright{display:flex;justify-content:flex-end}
+/* The hint is the first thing that may go: it is a reminder, not a control. */
+.hint{color:#8aa0b8}
+@media (max-width:1500px){ .hint{display:none} }
+.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
+.actions .sep{width:1px;height:20px;background:var(--line);margin:0 2px}
+button:disabled{opacity:.4;cursor:default;border-color:var(--line);box-shadow:none}
+button:disabled:hover{border-color:var(--line);box-shadow:none}
+/* Explicit line-height: the undo/redo arrow glyphs have a taller line box
+   than plain text, which made those two buttons 42px against everything
+   else's 40px and knocked the row out of alignment. */
+button{font:inherit;line-height:1.25;cursor:pointer;border-radius:10px;border:1px solid var(--line);
   background:#0e1626;color:var(--txt);padding:9px 14px;transition:all .18s ease}
 button:hover{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee55,0 0 14px #22d3ee33}
 button.primary{background:linear-gradient(180deg,#0ea5b7,#0b7c8b);border-color:#22d3ee;
@@ -501,7 +519,19 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   content-visibility:auto;contain-intrinsic-size:auto 238px}
 .card:hover{border-color:var(--neon2);box-shadow:0 0 0 1px #38bdf855,0 0 18px #38bdf833}
 .card:active{transform:scale(.985)}
-.card.on{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee66,0 0 16px #22d3ee2e}
+/* One accent per format. Set as variables so the border, the glow, the badge
+   and the tick all follow from a single value per format instead of four rules
+   that can drift apart. Chosen to stay apart on this dark background AND from
+   the two colours already in use: amber is the brand logo, pink is the
+   drag-over target. */
+.card.fmt-static  {--fmt:#22d3ee;--fmtRing:#22d3ee66;--fmtGlow:#22d3ee2e;
+                   --fmtInk:#9fe8f5;--fmtBg:#06121b;--fmtLine:#1c3a44}
+.card.fmt-animated{--fmt:#a78bfa;--fmtRing:#a78bfa66;--fmtGlow:#a78bfa2e;
+                   --fmtInk:#d6c7ff;--fmtBg:#120c1f;--fmtLine:#382a5c}
+.card.fmt-video   {--fmt:#34d399;--fmtRing:#34d39966;--fmtGlow:#34d3992e;
+                   --fmtInk:#a7f3d0;--fmtBg:#04170f;--fmtLine:#1b4a38}
+.card.on{border-color:var(--fmt,var(--neon));
+  box-shadow:0 0 0 1px var(--fmtRing,#22d3ee66),0 0 16px var(--fmtGlow,#22d3ee2e)}
 .card.off{opacity:.42;filter:grayscale(.9)}
 .thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
@@ -523,11 +553,12 @@ body.bg-gray  .thumb{background:#808a96}
 .hdr{display:flex;align-items:center;gap:5px;margin:0 0 6px;min-height:22px}
 .badge{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;font-size:10px;letter-spacing:.5px;
-  text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
+  text-transform:uppercase;color:var(--fmtInk,#9fd);
+  background:var(--fmtBg,#06121b);border:1px solid var(--fmtLine,#1c3a44);
   border-radius:6px;padding:2px 5px}
 .card{cursor:grab}
 .card.drag{opacity:.5;cursor:grabbing}
-.card.over{border-color:#a78bfa;box-shadow:0 0 0 2px #a78bfa88,0 0 18px #a78bfa55}
+.card.over{border-color:#f472b6;box-shadow:0 0 0 2px #f472b688,0 0 18px #f472b655}
 .card.logo{cursor:default;border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2455,0 0 16px #fbbf2433}
 .card.logo:hover{border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2477,0 0 18px #fbbf2455}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
@@ -535,13 +566,15 @@ body.bg-gray  .thumb{background:#808a96}
 .tick{flex:0 0 auto;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a}
-.card.on .tick{background:var(--neon);border-color:var(--neon);box-shadow:0 0 10px #22d3ee88}
+.card.on .tick{background:var(--fmt,var(--neon));border-color:var(--fmt,var(--neon));
+  box-shadow:0 0 10px var(--fmtRing,#22d3ee88)}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
 .pos{flex:0 0 auto;margin-left:auto;
   font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;
-  color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
+  color:var(--fmtInk,var(--neon2));background:var(--fmtBg,#08131f);
+  border:1px solid var(--fmtLine,#1c3a44);
   border-radius:6px;padding:2px 6px;min-width:24px;text-align:center;pointer-events:none}
 .card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
@@ -560,17 +593,23 @@ body.bg-gray  .thumb{background:#808a96}
 </style></head>
 <body class="bg-checker">
 <header>
-  <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
-  <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
-  <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
-    <span style="color:#8aa0b8">· click = toggle · drag = reorder · click the id = copy</span></span>
-  <span class="spacer"></span>
-  <button id="all">Select all</button>
-  <button id="none">Deselect all</button>
-  <button id="inv">Invert</button>
-  <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
-  <button id="anim" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding.">Animation: On</button>
-  <button id="save" class="primary">Save selection</button>
+  <div class="hleft">
+    <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
+    <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
+    <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
+      <span class="hint">· click = toggle · drag = reorder · click the id = copy</span></span>
+  </div>
+  <div class="actions">
+    <button id="undo" title="Undo the last reorder or selection change (Ctrl+Z)" disabled>&#8630; Undo</button>
+    <button id="redo" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" disabled>Redo &#8631;</button>
+    <span class="sep"></span>
+    <button id="all">Select all</button>
+    <button id="none">Deselect all</button>
+    <button id="inv">Invert</button>
+    <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
+    <button id="anim" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding.">Animation: On</button>
+  </div>
+  <div class="hright"><button id="save" class="primary">Save selection</button></div>
 </header>
 <div id="alert" role="alert" aria-live="assertive"></div>
 <div class="grid" id="grid"></div>
@@ -640,7 +679,10 @@ function makeThumb(it){
 }
 
 function makeCard(it){
-  const card = el('div', it.isLogo ? 'card logo' : 'card ' + (it.included ? 'on' : 'off'));
+  // fmt-* drives the colour: static, animated and video are told apart at a
+  // glance instead of by reading the badge on every card.
+  const card = el('div', it.isLogo ? 'card logo'
+    : 'card fmt-' + it.fmt + ' ' + (it.included ? 'on' : 'off'));
   card.dataset.key = it.key;
   if(!it.isLogo) card.draggable = true;
   // One flex row, not three absolutely-positioned corners. Absolute placement
@@ -776,7 +818,9 @@ function setCard(it){
   const tick = el2.querySelector('.tick');
   if(tick) tick.textContent = it.included ? '✓' : '✕';
 }
-function setAll(fn){ for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); } updateCount(); }
+function setAll(fn){ remember();
+  for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); }
+  updateCount(); }
 
 // Reduced motion is the one case where nothing plays by itself; hover is then
 // the only way to see a video move at all, so the old handlers survive for it.
@@ -799,6 +843,7 @@ grid.addEventListener('click',e=>{
   const card = e.target.closest('.card'); if(!card) return;
   const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
   if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
+  remember();
   if(e.shiftKey && lastIdx!==null){
     const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
     const val = !ITEMS[i].included;
@@ -807,6 +852,75 @@ grid.addEventListener('click',e=>{
     ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
   }
   lastIdx=i; updateCount();
+});
+
+// --- Undo / redo ---------------------------------------------------------
+// Snapshots, not a command log. A snapshot is 200 keys plus the included set,
+// which is nothing, and it cannot drift out of step with ITEMS the way an
+// inverse-operation log can -- and ITEMS is the only thing that decides what
+// gets published. Bounded so a long session cannot grow without limit.
+const HISTORY_MAX = 100;
+let past = [], future = [];
+
+function snapshot(){
+  return {order: ITEMS.map(x=>x.key),
+          included: ITEMS.filter(x=>x.included).map(x=>x.key)};
+}
+
+// Call BEFORE mutating, so the stack holds the state to return to. A new
+// action drops the redo branch, which is what every editor does.
+function remember(){
+  past.push(snapshot());
+  if(past.length > HISTORY_MAX) past.shift();
+  future.length = 0;
+  updateHistoryButtons();
+}
+
+function applySnapshot(snap){
+  const pos = new Map(snap.order.map((k,i)=>[k,i]));
+  const inc = new Set(snap.included);
+  for(const it of ITEMS) if(!it.isLogo) it.included = inc.has(it.key);
+  ITEMS.sort((a,b)=>(a.isLogo?-1:b.isLogo?1:pos.get(a.key)-pos.get(b.key)));
+  // Move the existing nodes rather than rebuilding: appending a node that is
+  // already in the document RELOCATES it, so every loaded thumbnail, preview
+  // and playing video survives. A render() here would re-request all 200.
+  const frag = document.createDocumentFragment();
+  for(const it of ITEMS){ const n = cards.get(it.key); if(n) frag.appendChild(n); }
+  grid.appendChild(frag);
+  for(const it of ITEMS) if(!it.isLogo) setCard(it);
+  renumber();
+  updateCount();
+  observeAnimated();
+  saveOrder();          // order is auto-saved; selection waits for Save, as always
+  updateHistoryButtons();
+}
+
+function undo(){
+  if(!past.length) return;
+  future.push(snapshot());
+  applySnapshot(past.pop());
+  toast('Undone');
+}
+
+function redo(){
+  if(!future.length) return;
+  past.push(snapshot());
+  applySnapshot(future.pop());
+  toast('Redone');
+}
+
+function updateHistoryButtons(){
+  document.getElementById('undo').disabled = !past.length;
+  document.getElementById('redo').disabled = !future.length;
+}
+
+document.getElementById('undo').onclick = undo;
+document.getElementById('redo').onclick = redo;
+addEventListener('keydown', e=>{
+  if(!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if(k === 'z' && !e.shiftKey){ e.preventDefault(); undo(); }
+  else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redo(); }
 });
 
 // --- Drag & drop reordering (sets the publish order) --------------------
@@ -933,6 +1047,7 @@ grid.addEventListener('drop',e=>{
   const firstMovable = ITEMS.findIndex(x=>!x.isLogo);
   if(to < firstMovable) to = firstMovable;            // never before the logo
   if(from>=0 && to>=0 && to!==from){
+    remember();
     const [moved]=ITEMS.splice(from,1);
     ITEMS.splice(to,0,moved);
     // Move the one node instead of rebuilding every card (which would drop
