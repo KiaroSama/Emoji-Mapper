@@ -190,6 +190,34 @@ class LockOwnership(unittest.TestCase):
         with bp.exclusive_lock(self.lock, stale_after=3600):
             pass                                   # must not raise
 
+    def test_a_killed_run_can_resume_within_minutes_not_hours(self):
+        """The DEFAULT grace, with no stale_after passed -- what a user gets.
+
+        A publish stopped halfway leaves a lock behind whose process is gone.
+        The threshold used to be six hours, so resuming meant waiting or
+        deleting a lock file by hand; the liveness check already refuses to
+        touch a live holder, so age had nothing left to protect.
+        """
+        self.lock.write_text(
+            json.dumps({"token": "t", "pid": 999_999_999, "started": "old"}),
+            encoding="utf-8")
+        old = time.time() - 300                    # five minutes ago
+        os.utime(self.lock, (old, old))
+        with bp.exclusive_lock(self.lock):         # no stale_after override
+            pass                                   # must not raise
+
+    def test_a_lock_still_being_written_is_not_stolen(self):
+        """Why a grace exists at all, and why it may not be zero.
+
+        Claiming is O_CREAT|O_EXCL and THEN a write, so for a moment the record
+        is empty and its pid parses as 0 -- which reads as 'dead'. A fresh lock
+        must survive that even though nothing in it says who owns it yet.
+        """
+        self.lock.write_text("", encoding="utf-8")   # claimed, not yet written
+        with self.assertRaises(bp.LockBusy):
+            with bp.exclusive_lock(self.lock):
+                self.fail("stole a lock that was still being claimed")
+
     def test_a_reclaimed_lock_is_not_deleted_by_the_old_holder(self):
         """The bug: the original holder unlinked the REPLACEMENT holder's lock."""
         cm = bp.exclusive_lock(self.lock)
