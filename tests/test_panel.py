@@ -627,13 +627,35 @@ class DragAndDropOrdering(unittest.TestCase):
         drop = page[page.index("addEventListener('drop'"):]
         self.assertIn("renumber();", drop[:drop.index("saveOrder();")])
 
-    def test_the_logo_card_is_not_numbered(self):
-        """It is fixed first and never published, so it holds no slot."""
+    def test_the_logo_IS_numbered_because_it_takes_a_real_slot(self):
+        """It leads every set it is added to, so it costs one of the 200.
+
+        build_collection reserves it -- `capacity = per_set - 1` -- so leaving
+        it out of the panel's numbering made the panel disagree with what ships:
+        the owner read "200" and the pack was 201.
+        """
         page = p.PAGE
         hdr = page[page.index("const hdr = el('div','hdr');"):]
         block = hdr[:hdr.index("card.appendChild(hdr);")]
-        self.assertIn("if(!it.isLogo){", block)
         self.assertIn("hdr.appendChild(el('span','pos',''));", block)
+        # The tick is the one thing the logo does NOT get: it is not toggleable.
+        self.assertIn("if(!it.isLogo) hdr.appendChild(el('span','tick'", block)
+        renumber = page[page.index("function renumber(){"):]
+        renumber = renumber[:renumber.index(chr(10) + "}")]
+        self.assertNotIn("if(it.isLogo) continue", renumber,
+                         "skipping the logo is what made the count wrong")
+
+    def test_a_selection_that_cannot_be_one_pack_says_so(self):
+        """200 chosen emoji plus the logo is 201, over Telegram's per-set cap.
+
+        Surfaced in the header rather than discovered as a surprise second set.
+        """
+        page = p.PAGE
+        self.assertIn("included > PER_SET", page)
+        self.assertIn("Math.ceil(included / PER_SET)", page)
+        # The limit comes from build_collection, not a second copy that drifts.
+        self.assertIn("PER_SET", p.PAGE)
+        self.assertEqual(p.PER_SET, 200)
 
     def test_the_card_header_is_a_row_not_three_stacked_corners(self):
         """The badge, the number and the tick shared one ~120px strip.

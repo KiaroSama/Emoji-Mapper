@@ -659,7 +659,20 @@ Interactions: **click** a card to toggle include/exclude, **click the
 `premium-id:` label** to copy that id to the clipboard (it stops there and does
 not toggle the card), **drag** a card to reorder (this is the publish order).
 Each card shows its **publish position** at the top; the numbers are recomputed
-from the order on every drop, never stored on the card. Dragging to the top or
+from the order on every drop, never stored on the card. **The brand logo is
+numbered and counted**, because it is the first emoji of every set it leads and
+costs one of the 200 (`capacity = per_set - 1` in `build_collection`). Leaving
+it out made the panel disagree with what ships — the owner read "200" and the
+pack was 201. When the total passes the per-set cap the header says so, with how
+many packs it will actually become, rather than letting a second set be a
+surprise.
+
+Colour carries the format on the **badge only**: static cyan, animated violet,
+video emerald, brand logo amber. The card border is the same for every card —
+per-format borders turned the grid into stripes on a dark background — and the
+include tick is green, because it answers a different question from the badge
+and must not read as the same axis. The header controls each have their own
+accent so the row is scannable. Dragging to the top or
 bottom edge of the window scrolls the page, so an item can be carried across
 the whole catalog in one motion. Releasing anywhere that is not a card cancels
 — it used to mean "move to the end".
