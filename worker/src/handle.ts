@@ -25,6 +25,14 @@ const START_TEXT =
 /** Telegram rejects a sendMessage over 4096 characters. */
 const TEXT_LIMIT = 4096;
 
+/**
+ * Outcome meaning "this was our own log line coming back; record nothing".
+ *
+ * Exported so the router matches a constant instead of a repeated string
+ * literal -- a typo there would silently reinstate the noise.
+ */
+export const LOG_ECHO = "log-echo";
+
 /** Split ids into messages that stay under the limit. */
 export function renderIdMessages(ids: string[], header?: string): string[] {
   if (ids.length === 0) {
@@ -65,7 +73,8 @@ async function reply(tg: Telegram, chatId: number | string, ids: string[],
  * ever includes a token or the full message text.
  */
 export async function handleUpdate(tg: Telegram, update: TgUpdate,
-                                   admins: Set<number>): Promise<string> {
+                                   admins: Set<number>,
+                                   logChatId?: string): Promise<string> {
   const msg: TgMessage | undefined = update.message ?? update.edited_message;
   if (msg) {
     const sender = msg.from?.id;
@@ -94,6 +103,12 @@ export async function handleUpdate(tg: Telegram, update: TgUpdate,
 
   const post = update.channel_post;
   if (post) {
+    // Both bots administer the log channel, so every line this Worker posts
+    // there comes straight back as a channel_post -- to BOTH of them. Handling
+    // it writes two more rows about a message we just wrote, and if channel
+    // handling ever grows a path that logs an ERROR, that is a feedback loop
+    // fed by its own output. Found by watching real traffic, not by reasoning.
+    if (logChatId && String(post.chat.id) === logChatId.trim()) return LOG_ECHO;
     const ids = extractCustomEmojiIds(post);
     if (ids.length === 0) return "channel:none";
     // Channel posts have no sender to authorise, so the answer goes to the

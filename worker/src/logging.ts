@@ -94,11 +94,68 @@ export function redact(s: string): string {
     : out;
 }
 
-/** The single rendered line. First token is always the bot. */
-export function formatLine(e: LogEntry): string {
-  const head = `[${e.bot}] ${e.level} ${e.event}`;
-  return e.detail ? `${head}\n${redact(e.detail)}` : head;
+const LEVEL_EMOJI: Record<LogLevel, string> = { INFO: "ℹ️", WARNING: "⚠️", ERROR: "❌" };
+
+/** Telegram's limit is 4096; a log line longer than this is not readable on a phone. */
+const MAX_CHANNEL_CHARS = 700;
+
+/**
+ * Telegram shows a channel's *internal* id (4211401345) in several places, but
+ * the Bot API only accepts the -100-prefixed form. Accepting the bare number
+ * means a copy-paste out of the Telegram UI works instead of failing later with
+ * a bare "chat not found". Borrowed from the Ad Timer Bot, which hit exactly
+ * that. Returns null when the value is unusable or logging is off.
+ */
+export function normalizeChatId(value: string | undefined | null): string | null {
+  const text = String(value ?? "").trim();
+  if (!text || text === "0") return null;
+  if (text.startsWith("@")) return text.length > 1 ? text : null;
+  if (!/^-?\d+$/.test(text)) return null;
+  if (text.startsWith("-")) return text;          // already a channel/group id
+  return `-100${text}`;
 }
+
+function utcStamp(atMs: number): string {
+  return new Date(atMs).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+}
+
+/**
+ * One rendered entry, in the Ad Timer Bot's log-channel shape.
+ *
+ *   [general]
+ *   ❌ ERROR webhook
+ *   update 42: sendMessage failed (400): chat not found
+ *   2026-08-19 00:45:12 UTC
+ *
+ * The bot tag is its own line by owner request: two bots share this channel and
+ * the tag is the first thing you look for when scanning it on a phone.
+ */
+export function formatLine(e: LogEntry, atMs: number = Date.now(),
+                           suppressed = 0): string {
+  const lines = [`[${e.bot}]`, `${LEVEL_EMOJI[e.level]} ${e.level} ${e.event}`];
+  if (e.detail) lines.push(redact(e.detail));
+  lines.push(utcStamp(atMs));
+  if (suppressed > 0) lines.push(`(+${suppressed} suppressed by rate limit)`);
+  const text = lines.join("\n");
+  return text.length > MAX_CHANNEL_CHARS
+    ? `${text.slice(0, MAX_CHANNEL_CHARS - 1)}…` : text;
+}
+
+/**
+ * Telegram allows roughly 20 messages a minute to one chat; stay well under it.
+ *
+ * Over budget the sink DROPS and counts rather than queueing -- an unbounded
+ * queue inside a Worker isolate outlives the request it belongs to and still
+ * loses the messages, just later and with the memory held. The dropped count
+ * rides along on the next message that gets through, so a burst is visible
+ * rather than silently swallowed. Also borrowed from the Ad Timer Bot.
+ *
+ * Honest limit: this state is per ISOLATE, not global. It bounds the realistic
+ * flood -- one isolate handling a burst of redeliveries -- not a fleet of them.
+ */
+const CHANNEL_MAX_PER_WINDOW = 12;
+const CHANNEL_WINDOW_MS = 60_000;
+const rate = { windowStartMs: 0, sentInWindow: 0, suppressed: 0 };
 
 async function writeToD1(env: Env, e: LogEntry): Promise<void> {
   if (!env.DB) return;
@@ -114,15 +171,30 @@ async function writeToD1(env: Env, e: LogEntry): Promise<void> {
   ]);
 }
 
-async function writeToChannel(env: Env, e: LogEntry): Promise<void> {
-  const chat = env.LOG_CHAT_ID?.trim();
+async function writeToChannel(env: Env, e: LogEntry, atMs: number): Promise<void> {
+  const chat = normalizeChatId(env.LOG_CHAT_ID);
   if (!chat) return;
   // The bot that produced the line posts it, so the channel shows the same
   // origin the line claims. Both bots are administrators of it.
   const token = e.bot === "general" ? env.GENERAL_BOT_TOKEN : env.COIN_BOT_TOKEN;
   if (!token) return;
+
+  if (atMs - rate.windowStartMs >= CHANNEL_WINDOW_MS) {
+    rate.windowStartMs = atMs;
+    rate.sentInWindow = 0;
+  }
+  if (rate.sentInWindow >= CHANNEL_MAX_PER_WINDOW) {
+    rate.suppressed += 1;
+    return;
+  }
+  rate.sentInWindow += 1;
+  // Claim the carried count BEFORE the send: if the send fails the count is
+  // lost, which is the right trade -- carrying it forever would make the next
+  // successful message claim suppressions that never happened.
+  const carried = rate.suppressed;
+  rate.suppressed = 0;
   const tg = new Telegram(token, env.TELEGRAM_API_BASE);
-  await tg.sendMessage(chat, formatLine(e));
+  await tg.sendMessage(chat, formatLine(e, atMs, carried));
 }
 
 /**
@@ -133,11 +205,12 @@ async function writeToChannel(env: Env, e: LogEntry): Promise<void> {
  */
 export function log(env: Env, e: LogEntry): Promise<void> {
   const toChannel = e.toChannel ?? e.level === "ERROR";
+  const atMs = Date.now();
   // console.log stays as well: it is the only sink that survives a D1 outage,
   // and `wrangler tail` reads it.
-  console.log(formatLine(e));
+  console.log(formatLine(e, atMs));
   const jobs = [writeToD1(env, e)];
-  if (toChannel) jobs.push(writeToChannel(env, e));
+  if (toChannel) jobs.push(writeToChannel(env, e, atMs));
   return Promise.allSettled(jobs).then((results) => {
     for (const r of results) {
       if (r.status === "rejected") {

@@ -19,7 +19,7 @@
  */
 
 import { parseAdmins, verifyBearer, verifyWebhook } from "./auth";
-import { announce, handleUpdate } from "./handle";
+import { announce, handleUpdate, LOG_ECHO } from "./handle";
 import { log } from "./logging";
 import { Telegram } from "./telegram";
 import type { BotName, Env, PublishRequest, TgUpdate } from "./types";
@@ -63,9 +63,13 @@ async function onWebhook(request: Request, env: Env, ctx: ExecutionContext,
   const tg = new Telegram(token, env.TELEGRAM_API_BASE);
   const admins = parseAdmins(env.ADMIN_USER_IDS);
   try {
-    const outcome = await handleUpdate(tg, update, admins);
-    ctx.waitUntil(log(env, { bot, level: "INFO", event: "webhook",
-                             detail: `update ${update.update_id}: ${outcome}` }));
+    const outcome = await handleUpdate(tg, update, admins, env.LOG_CHAT_ID);
+    // Our own log line coming back from the channel. Recording it would write a
+    // row about a row -- two of them, since both bots administer that channel.
+    if (outcome !== LOG_ECHO) {
+      ctx.waitUntil(log(env, { bot, level: "INFO", event: "webhook",
+                               detail: `update ${update.update_id}: ${outcome}` }));
+    }
   } catch (err) {
     // Swallow and return 200 on purpose. Telegram redelivers a failed update,
     // and every action this bot takes is a sendMessage -- a redelivery after a
