@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a stopped publish locked its own pack family for six hours
+
+- **A killed run could not be resumed.** The pack-family lock was only
+  reclaimable once it was six hours old *and* its process was gone. The liveness
+  check already refuses to touch a live holder at any age, so the six hours had
+  nothing left to protect — it only stood between the owner and resuming a
+  publish they had stopped themselves, with a lock file to delete by hand as the
+  workaround. The grace is now two minutes, which is all that is needed to cover
+  claiming being `O_CREAT|O_EXCL` followed by a separate write: in that window
+  the record is empty and its pid reads as 0, i.e. "dead".
+
+### Changed — the curate panel
+
+- **Animated is light violet** (`#c4b5fd`). The violet it started as sat too
+  close to the dark background for the thumbnail outline to read.
+- **The sticky header no longer blurs its backdrop.** `backdrop-filter` re-reads
+  and blurs everything behind the header on every scroll frame, across its full
+  width; with 201 cards scrolling under it that was the largest per-frame cost
+  left. The header background is opaque instead, which needs no blur to stay
+  readable. Off-screen cards were already free — they pause their video, swap an
+  animation for its first frame, and skip rendering entirely
+  (`content-visibility`).
+
 ### Added — reorder a pack that is already published
 
 - **`sync_order.py` makes a live pack match the curate panel** without
