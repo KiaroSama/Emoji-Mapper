@@ -841,10 +841,19 @@ class CliContract(_CatalogFixture):
         self.assertEqual(self._dry_run("--per-set", "201")[0], EXIT_USAGE)
 
     def test_dry_run_counts_the_brand_logo_slot(self):
-        # 198 planned + the 2 catalogued items = 200 emoji. With a logo in the
-        # first slot of every set that is two sets, not one.
-        bc.save_json(bc._plan_path(self.data, "pk"),
-                     {"static": [f"s:x{i:030d}" for i in range(198)]})
+        # 198 more catalogued items + the fixture's 2 = 200 emoji. With a logo
+        # in the first slot of every set that is two sets, not one.
+        #
+        # REAL catalog rows, not synthetic plan keys: the dry run counts what
+        # will actually publish (included, not already published, not skipped),
+        # so a plan key with no catalog row is correctly counted as zero -- it
+        # would not upload either.
+        with Catalog(self.data / "catalog.db") as cat:
+            for i in range(198):
+                img = self.data / "media" / "static" / f"x{i}.png"
+                _make_png(img, color=(i % 200, 40, 60, 255))
+                cat.add(content_key=f"s:x{i:030d}", fmt="static", file_path=img,
+                        emojis=["😀"], keywords=[f"x{i}"])
         logo = self.data / "logo.png"
         _make_png(logo)
         rc, out = self._dry_run("--formats", "static", "--brand-logo", str(logo))
@@ -1116,6 +1125,79 @@ class PackTitlesAreOneSequence(unittest.TestCase):
         block = src[src.index("if in_set >= per_set:"):]
         block = block[:block.index("time.sleep")]
         self.assertIn('fmt_sets[-1]["title"]', block)
+
+
+class MixedPublishesOneFamily(unittest.TestCase):
+    """--mixed puts every format in one family, in the panel's order.
+
+    The per-format split was a choice this tool made before Bot API 7.2 allowed
+    mixed sets, and it costs the curation: the panel's order runs ACROSS
+    formats, so splitting regroups a hand-arranged pack into format blocks and
+    throws the arrangement away.
+    """
+
+    def test_the_base_name_accepts_telegram_s_actual_rule(self):
+        # Underscores are legal in a set name; this used to reject them, which
+        # refused a perfectly valid name like GodVerify_Emoji_Packs.
+        self.assertEqual(bc.valid_base("GodVerify_Emoji_Packs"),
+                         "GodVerify_Emoji_Packs")
+        self.assertEqual(bc.valid_base("mypack"), "mypack")
+        for bad in ("bad__two", "_lead", "9start", "trail_", "has space", ""):
+            with self.assertRaises(SystemExit, msg=bad):
+                bc.valid_base(bad)
+
+    def test_a_base_too_long_for_the_64_char_name_is_refused_up_front(self):
+        """Not as a Bot API error after the plan is frozen and uploads began."""
+        bc.check_name_length("short", "GodVerifyEmojiMapperbot")      # fits
+        with self.assertRaises(SystemExit):
+            bc.check_name_length("x" * 50, "GodVerifyEmojiMapperbot")
+
+    def test_mixed_orders_across_formats_and_drops_the_format_letter(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        data = Path(tmp.name)
+        with Catalog(data / "catalog.db") as cat:
+            # Interleaved on purpose: a per-format plan would regroup these.
+            for i, fmt in enumerate(["static", "animated", "static", "video"]):
+                img = data / "media" / fmt / f"i{i}.png"
+                _make_png(img)
+                cat.add(content_key=f"{fmt[0]}:item{i:030d}", fmt=fmt,
+                        file_path=img, emojis=["😀"], keywords=[f"i{i}"])
+            cat.set_order([f"{f[0]}:item{i:030d}"
+                           for i, f in enumerate(["static", "animated",
+                                                  "static", "video"])])
+            plan = bc.freeze_plan(cat, data, "b", [bc.MIXED])
+
+        keys = plan[bc.MIXED]
+        self.assertEqual(len(keys), 4, "every format belongs to the one plan")
+        self.assertEqual([k[0] for k in keys], ["s", "a", "s", "v"],
+                         "the panel's interleaved order must survive")
+        # No format letter in the set name.
+        self.assertEqual(bc.FMT_TAG.get(bc.MIXED, ""), "")
+
+    def test_a_family_started_per_format_cannot_switch_to_mixed(self):
+        """state["sets"] and the plan are keyed by format.
+
+        Continuing a split family as one family would strand every set already
+        created -- invisible to resume and re-created under new names.
+        """
+        src = Path(bc.__file__).read_text(encoding="utf-8")
+        block = src[src.index("state = load_state(data_dir, base)"):]
+        block = block[:block.index("plan = freeze_plan(")]
+        self.assertIn("started", block)
+        self.assertIn("EXIT_USAGE", block)
+
+    def test_the_dry_run_counts_what_will_publish_not_the_plan(self):
+        """It reported 200 emoji and "2 sets" with one item deselected.
+
+        The real answer was 199 + logo = exactly one set, and one-pack-or-two is
+        the whole question a dry run is asked.
+        """
+        src = Path(bc.__file__).read_text(encoding="utf-8")
+        block = src[src.index('if args.dry_run:'):]
+        block = block[:block.index("return EXIT_OK")]
+        self.assertIn("it.included", block)
+        self.assertIn("cat.is_published(base, k)", block)
 
 
 if __name__ == "__main__":

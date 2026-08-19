@@ -663,19 +663,29 @@ class DragAndDropOrdering(unittest.TestCase):
         self.assertIn("PER_SET", p.PAGE)
         self.assertEqual(p.PER_SET, 200)
 
-    def test_the_card_header_is_a_row_not_three_stacked_corners(self):
+    def test_the_card_header_cannot_overlap_itself(self):
         """The badge, the number and the tick shared one ~120px strip.
 
         Absolutely positioned at left / centre / right, "animated" ran straight
-        under the number and both were unreadable. A flex row cannot overlap by
-        construction, and the badge is the only one allowed to shrink.
+        under the number and both were unreadable. They are now a centred
+        COLUMN -- number over format -- with only the tick pinned to the corner,
+        which is what keeps it from pushing the stack off centre. The badge is
+        still the only one allowed to shrink, and "animated" carries a short
+        label because it does not fit.
         """
         page = p.PAGE
-        self.assertIn(".hdr{display:flex", page)
-        for cls in (".badge{", ".pos{", ".tick{"):
-            rule = page[page.index(cls):]
-            self.assertNotIn("position:absolute", rule[:rule.index("}")], cls)
-        # "animated" does not fit; the badge carries a short label instead.
+        hdr = page[page.index(".hdr{"):]
+        rule = hdr[:hdr.index("}")]
+        self.assertIn("display:flex", rule)
+        self.assertIn("flex-direction:column", rule)
+        self.assertIn("align-items:center", rule)
+        # In the column flow, so they cannot be placed on top of each other.
+        for cls in (".badge{", ".pos{"):
+            r = page[page.index(cls):]
+            self.assertNotIn("position:absolute", r[:r.index("}")], cls)
+        # The tick is the one exception, and deliberately so.
+        tick = page[page.index(".tick{"):]
+        self.assertIn("position:absolute", tick[:tick.index("}")])
         self.assertIn("FMT = {animated: 'anim'", page)
 
     def test_the_scroll_loop_cannot_outlive_the_drag(self):
@@ -817,6 +827,38 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         over = over[:over.index("}")]
         for fmt, c in colours.items():
             self.assertNotIn(c, over, f"drop target uses the {fmt} colour")
+
+    def test_two_frames_answer_two_questions(self):
+        """Inner frame = the format, outer frame = whether it is selected.
+
+        One frame carrying both is what the owner rejected: a per-format card
+        border striped the whole dark grid.
+        """
+        page = p.PAGE
+        thumb = page[page.index(".thumb{"):]
+        self.assertIn("border:2px solid var(--fmt", thumb[:thumb.index("}")])
+        card_on = page[page.index(".card.on{"):]
+        self.assertIn("#22c55e", card_on[:card_on.index("}")],
+                      "the selected frame must be green")
+
+    def test_the_animation_control_is_a_switch(self):
+        """On/off state shown by the control itself, not only by its label."""
+        page = p.PAGE
+        self.assertIn('aria-pressed', page)
+        self.assertIn('#anim[aria-pressed="true"]  .knob{background:#22c55e}', page)
+        self.assertIn('#anim[aria-pressed="false"] .knob{background:#f43f5e}', page)
+        self.assertIn("--btn:#34ebc6", page)
+
+    def test_the_card_header_stacks_number_over_format(self):
+        page = p.PAGE
+        hdr = page[page.index(".hdr{"):]
+        rule = hdr[:hdr.index("}")]
+        self.assertIn("flex-direction:column", rule)
+        self.assertIn("align-items:center", rule)
+        # The number is appended before the format badge, so it sits on top.
+        markup = page[page.index("const hdr = el('div','hdr');"):]
+        markup = markup[:markup.index("card.appendChild(hdr);")]
+        self.assertLess(markup.index("'pos'"), markup.index("'badge'"))
 
     def test_only_save_selection_sits_outside_the_centre_group(self):
         page = p.PAGE
