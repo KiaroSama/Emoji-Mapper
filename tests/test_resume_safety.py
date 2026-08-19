@@ -372,12 +372,21 @@ class LinksDestination(unittest.TestCase):
             self.assertEqual(bp.links_chat_id(self.OWNER), -1001111111111)
 
     def test_every_publisher_resolves_the_same_destination(self):
-        """A publisher that still hardcoded the owner would fail here."""
+        """A publisher that still hardcoded the owner would fail here.
+
+        The shared thing is now ``announce_packs``, which resolves the
+        destination itself -- a stronger guarantee than sharing the resolver,
+        because a publisher can no longer call it and then send somewhere else.
+        The two collector-side modules deliberately do not import
+        ``links_chat_id`` any more: what they cannot reach, they cannot misuse.
+        """
         import build_collection
         import coins.rebuild_dedup as rd
         for module in (bp, build_collection, rd):
-            self.assertIs(module.links_chat_id, bp.links_chat_id,
-                          f"{module.__name__} must use the shared resolver")
+            self.assertIs(module.announce_packs, bp.announce_packs,
+                          f"{module.__name__} must use the shared announcer")
+        self.assertFalse(hasattr(build_collection, "links_chat_id"))
+        self.assertFalse(hasattr(rd, "links_chat_id"))
 
 
 class SafeConfigParsing(unittest.TestCase):

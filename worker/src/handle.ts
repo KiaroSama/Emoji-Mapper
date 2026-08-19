@@ -107,22 +107,61 @@ export async function handleUpdate(tg: Telegram, update: TgUpdate,
   return "ignored";
 }
 
-/** The announcement the local builder asks this Worker to post. */
-export function renderAnnouncement(req: PublishRequest): string {
-  const lines: string[] = [];
-  if (req.note) lines.push(escapeHtml(req.note), "");
+/**
+ * A title long enough to matter is a bug upstream, not something to render.
+ * Cut it rather than let one pack push a whole announcement over the limit.
+ */
+const TITLE_LIMIT = 200;
+
+/**
+ * The announcement(s) the local builder asks this Worker to post.
+ *
+ * Returns a LIST for the same reason renderIdMessages does: the coin rebuild
+ * announces its whole family in one call (30+ packs today) and a collector run
+ * can publish more, so a single message would eventually hit the 4096-character
+ * limit and Telegram would reject the entire announcement -- losing every link,
+ * not just the overflow. Packs are never split mid-entry: a half-written
+ * t.me/addemoji link is worse than a second message.
+ */
+export function renderAnnouncement(req: PublishRequest): string[] {
+  const blocks: string[] = [];
+  if (req.note) blocks.push(escapeHtml(req.note));
   for (const p of req.packs) {
-    const title = escapeHtml(p.title ?? p.name);
+    const title = escapeHtml((p.title ?? p.name).slice(0, TITLE_LIMIT));
     const count = p.count !== undefined ? ` — ${p.count}` : "";
     // addemoji is the install link for a custom-emoji set.
-    lines.push(`✅ <b>${title}</b>${count}\nhttps://t.me/addemoji/${encodeURIComponent(p.name)}`);
+    blocks.push(`✅ <b>${title}</b>${count}\nhttps://t.me/addemoji/${encodeURIComponent(p.name)}`);
   }
-  return lines.join("\n");
+
+  const out: string[] = [];
+  let buf = "";
+  for (const block of blocks) {
+    const candidate = buf ? `${buf}\n${block}` : block;
+    if (buf && candidate.length > TEXT_LIMIT) {
+      out.push(buf);
+      buf = block;
+    } else {
+      buf = candidate;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
 }
 
+/**
+ * Post the announcement and return every message id.
+ *
+ * Not transactional, and cannot be: if part 2 fails after part 1 landed, the
+ * caller's `state["sent"]` has not recorded the pack, so a re-run announces it
+ * again. That is the deliberate trade -- a duplicate link is visible and
+ * harmless, a silently missing one is not.
+ */
 export async function announce(tg: Telegram, chatId: number | string,
-                               req: PublishRequest): Promise<number> {
-  const text = renderAnnouncement(req);
-  const sent = await tg.sendMessage(chatId, text, { parse_mode: "HTML" });
-  return sent.message_id;
+                               req: PublishRequest): Promise<number[]> {
+  const ids: number[] = [];
+  for (const text of renderAnnouncement(req)) {
+    const sent = await tg.sendMessage(chatId, text, { parse_mode: "HTML" });
+    ids.push(sent.message_id);
+  }
+  return ids;
 }

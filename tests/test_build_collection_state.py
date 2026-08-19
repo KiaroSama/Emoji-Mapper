@@ -44,8 +44,9 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
+import build_pack as bp  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
-                        LiveStateUnknown, SetState, exclusive_lock)
+                        LiveStateUnknown, SetState, announce_packs, exclusive_lock)
 from emojikit import media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
@@ -150,7 +151,7 @@ class FakeTG:
                   expected_before=None):
         self.sets[name].append(self._new(name, path))
 
-    def send_message(self, chat_id, text):
+    def send_message(self, chat_id, text, *, disable_preview=False):
         self.sent.append(text)
 
 
@@ -1098,6 +1099,75 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class EveryPublisherSharesOneAnnouncer(unittest.TestCase):
+    """All three publishers announce through ``announce_packs``.
+
+    They used to carry three copies of "format the link and sendMessage", and
+    when the Worker arrived only the collector learned about it -- so a coin
+    rebuild or a single-pack build kept talking to Telegram from this machine
+    while the owner believed the bot was posting. These tests fail if any
+    publisher grows its own copy again.
+    """
+
+    WORKER = {"WORKER_PUBLISH_URL": "https://w.dev/publish",
+              "WORKER_PUBLISH_SECRET": "s"}
+
+    def test_the_single_pack_build_and_the_coin_rebuild_both_import_it(self):
+        import coins.rebuild_dedup as rd
+        for mod in (bc, bp, rd):
+            self.assertIs(mod.announce_packs, announce_packs,
+                          f"{mod.__name__} does not use the shared announcer")
+
+    def test_half_a_worker_config_takes_the_direct_path(self):
+        # URL without secret is a half-finished setup. Routing to it anyway
+        # would 401 every announcement; silently "succeeding" via the direct
+        # path at least still posts, and the missing secret stays visible.
+        tg = FakeTG()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
+                                          "WORKER_PUBLISH_SECRET": "",
+                                          "PACK_LINKS_CHAT_ID": ""}, clear=False), \
+             mock.patch.object(bp, "announce_via_worker") as worker:
+            dest = announce_packs(tg, 7, [{"name": "a_by_bot", "title": "A"}],
+                                  bot="general")
+        worker.assert_not_called()
+        self.assertEqual(len(tg.sent), 1)
+        self.assertEqual(dest, "7")
+
+    def test_the_direct_path_disables_link_previews(self):
+        # 30 addemoji links with a preview card each buries the list. The coin
+        # script used to do this with a private _call; losing it in the move to
+        # a shared announcer would be a silent regression.
+        seen = []
+        tg = mock.Mock()
+        tg.send_message.side_effect = lambda *a, **kw: seen.append(kw)
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "",
+                                          "PACK_LINKS_CHAT_ID": ""}, clear=False):
+            announce_packs(tg, 7, [{"name": "a_by_bot", "title": "A"}], bot="coin")
+        self.assertTrue(all(kw.get("disable_preview") for kw in seen), seen)
+
+    def test_a_whole_family_goes_in_ONE_worker_call(self):
+        # The Worker splits across messages when it passes 4096 characters; a
+        # per-pack call would defeat that and also post 30 separate messages.
+        tg = FakeTG()
+        packs = [{"name": f"p{i}_by_bot", "title": str(i)} for i in range(30)]
+        with mock.patch.dict(os.environ, self.WORKER, clear=False), \
+             mock.patch.object(bp, "announce_via_worker") as worker:
+            announce_packs(tg, 7, packs, bot="coin", note="all packs:")
+        worker.assert_called_once()
+        self.assertEqual(len(worker.call_args.args[0]), 30)
+        self.assertEqual(worker.call_args.kwargs["note"], "all packs:")
+        self.assertEqual(worker.call_args.kwargs["bot"], "coin")
+
+    def test_the_note_is_sent_too_on_the_direct_path(self):
+        tg = FakeTG()
+        with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "",
+                                          "PACK_LINKS_CHAT_ID": ""}, clear=False):
+            announce_packs(tg, 7, [{"name": "a_by_bot", "title": "A"}],
+                           bot="coin", note="header")
+        self.assertEqual(tg.sent[0], "header")
+        self.assertIn("t.me/addemoji/a_by_bot", tg.sent[1])
+
+
 class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
     """With a Worker configured, the BOT posts the link -- not this process.
 
@@ -1123,7 +1193,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bc, "announce_via_worker") as worker:
+             mock.patch.object(bp, "announce_via_worker") as worker:
             self._notify(tg)
         worker.assert_called_once()
         packs = worker.call_args.args[0]
@@ -1143,7 +1213,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bc, "announce_via_worker",
+             mock.patch.object(bp, "announce_via_worker",
                                side_effect=RuntimeError("worker down")):
             self._notify(tg)
         self.assertEqual(self.state["sent"], [])
@@ -1153,7 +1223,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bc, "announce_via_worker") as worker:
+             mock.patch.object(bp, "announce_via_worker") as worker:
             self._notify(tg)
         worker.assert_not_called()
         tg.send_message.assert_not_called()

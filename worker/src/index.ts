@@ -20,11 +20,14 @@
 
 import { parseAdmins, verifyBearer, verifyWebhook } from "./auth";
 import { announce, handleUpdate } from "./handle";
+import { log } from "./logging";
 import { Telegram } from "./telegram";
 import type { BotName, Env, PublishRequest, TgUpdate } from "./types";
 
 /** Telegram retries any non-2xx, so failures must be deliberate. */
 const OK = () => new Response("ok");
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function botConfig(env: Env, bot: BotName): { token: string; secret: string } {
   return bot === "general"
@@ -32,15 +35,21 @@ function botConfig(env: Env, bot: BotName): { token: string; secret: string } {
     : { token: env.COIN_BOT_TOKEN, secret: env.COIN_WEBHOOK_SECRET };
 }
 
-async function onWebhook(request: Request, env: Env, bot: BotName): Promise<Response> {
+async function onWebhook(request: Request, env: Env, ctx: ExecutionContext,
+                         bot: BotName): Promise<Response> {
   const { token, secret } = botConfig(env, bot);
   if (!verifyWebhook(request, secret)) {
     // 401, not 403: this is an authentication failure, and Telegram will not
     // retry a 4xx -- which is what we want for a request Telegram did not send.
+    // Recorded, but never forwarded to the channel: this URL is public, and a
+    // scanner walking the internet would otherwise flood it.
+    ctx.waitUntil(log(env, { bot, level: "WARNING", event: "unauthorized",
+                             detail: "webhook secret did not match" }));
     return new Response("unauthorized", { status: 401 });
   }
   if (!token) {
-    console.error(`${bot}: no bot token configured`);
+    ctx.waitUntil(log(env, { bot, level: "ERROR", event: "misconfigured",
+                             detail: "no bot token bound" }));
     return OK();          // 200: retrying will not conjure a token
   }
 
@@ -55,18 +64,21 @@ async function onWebhook(request: Request, env: Env, bot: BotName): Promise<Resp
   const admins = parseAdmins(env.ADMIN_USER_IDS);
   try {
     const outcome = await handleUpdate(tg, update, admins);
-    console.log(`${bot} ${update.update_id}: ${outcome}`);
+    ctx.waitUntil(log(env, { bot, level: "INFO", event: "webhook",
+                             detail: `update ${update.update_id}: ${outcome}` }));
   } catch (err) {
     // Swallow and return 200 on purpose. Telegram redelivers a failed update,
     // and every action this bot takes is a sendMessage -- a redelivery after a
-    // partial success posts the same reply twice. The error is logged instead.
-    console.error(`${bot} ${update.update_id} failed:`,
-                  err instanceof Error ? err.message : String(err));
+    // partial success posts the same reply twice. The error is logged instead,
+    // and this one IS worth a channel message: nothing else will report it.
+    ctx.waitUntil(log(env, { bot, level: "ERROR", event: "webhook",
+                             detail: `update ${update.update_id}: ${errText(err)}` }));
   }
   return OK();
 }
 
-async function onPublish(request: Request, env: Env): Promise<Response> {
+async function onPublish(request: Request, env: Env,
+                         ctx: ExecutionContext): Promise<Response> {
   if (!verifyBearer(request, env.PUBLISH_SECRET)) {
     return new Response("unauthorized", { status: 401 });
   }
@@ -99,12 +111,16 @@ async function onPublish(request: Request, env: Env): Promise<Response> {
 
   const tg = new Telegram(token, env.TELEGRAM_API_BASE);
   try {
-    const messageId = await announce(tg, chat, body);
-    console.log(`announced ${body.packs.length} pack(s) as ${bot}`);
-    return Response.json({ ok: true, message_id: messageId });
+    const messageIds = await announce(tg, chat, body);
+    ctx.waitUntil(log(env, {
+      bot, level: "INFO", event: "publish",
+      detail: `${body.packs.length} pack(s) in ${messageIds.length} message(s): ` +
+              body.packs.map((p) => p.name).join(", "),
+    }));
+    return Response.json({ ok: true, message_ids: messageIds });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("announce failed:", msg);
+    const msg = errText(err);
+    ctx.waitUntil(log(env, { bot, level: "ERROR", event: "publish", detail: msg }));
     // Reported, never retried here: sendMessage is not idempotent, so the
     // caller decides -- and it can see from the channel whether it landed.
     return Response.json({ ok: false, error: msg }, { status: 502 });
@@ -112,18 +128,20 @@ async function onPublish(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true });
+      // Reports whether the log store is bound, so a missing binding is
+      // visible without waiting for a log line that will never arrive.
+      return Response.json({ ok: true, log_db: Boolean(env.DB) });
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
     }
     switch (url.pathname) {
-      case "/tg/general": return onWebhook(request, env, "general");
-      case "/tg/coin":    return onWebhook(request, env, "coin");
-      case "/publish":    return onPublish(request, env);
+      case "/tg/general": return onWebhook(request, env, ctx, "general");
+      case "/tg/coin":    return onWebhook(request, env, ctx, "coin");
+      case "/publish":    return onPublish(request, env, ctx);
       default:            return new Response("not found", { status: 404 });
     }
   },

@@ -429,6 +429,10 @@ class LinkMessagesAreBounded(RebuildCase):
         self.assertEqual(len(tg.messages), 1)
         self.assertEqual(tg.message_retries, [2],
                          "the default retry count multiplies accepted posts")
+        self.assertEqual(tg.message_previews, [True],
+                         "a preview card per addemoji link buries the list; "
+                         "the coin path had this before the shared announcer "
+                         "and must not have lost it")
 
 
 class OwnerIdIsParsedSafely(unittest.TestCase):
