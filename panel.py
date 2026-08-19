@@ -27,7 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from build_collection import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
+from build_collection import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
+                              PER_SET)
 from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.media import (PREVIEW_FPS, lottie_preview_webp,
@@ -283,7 +284,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 with lock:
                     items = _json_for_script(view)
                 page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
-                            .replace("__PREVIEW_FPS__", str(preview_fps)))
+                            .replace("__PREVIEW_FPS__", str(preview_fps))
+                            .replace("__PER_SET__", str(PER_SET)))
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -494,9 +496,24 @@ h1 .dot{color:var(--neon)}
 .hright{display:flex;justify-content:flex-end}
 /* The hint is the first thing that may go: it is a reminder, not a control. */
 .hint{color:#8aa0b8}
+/* Not a toast: "your selection cannot be one pack" must stay on screen. */
+.warn{color:#fbbf24;font-weight:600}
 @media (max-width:1500px){ .hint{display:none} }
 .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
 .actions .sep{width:1px;height:20px;background:var(--line);margin:0 2px}
+/* One accent per control, so the header is scannable instead of seven
+   identical grey pills. Two variables each: the text colour and a darkened
+   border of the same hue, because a border cannot be dimmed with opacity
+   without taking the label with it. */
+.actions button{color:var(--btn);border-color:var(--btnLine)}
+.actions button:hover{border-color:var(--btn);
+  box-shadow:0 0 0 1px var(--btnLine),0 0 12px var(--btnLine)}
+#undo,#redo{--btn:#cbd5e1;--btnLine:#3a4657}
+#all       {--btn:#4ade80;--btnLine:#1d5133}
+#none      {--btn:#fb7185;--btnLine:#5c2330}
+#inv       {--btn:#fbbf24;--btnLine:#5a4415}
+#bg        {--btn:#38bdf8;--btnLine:#1c4257}
+#anim      {--btn:#a78bfa;--btnLine:#382a5c}
 button:disabled{opacity:.4;cursor:default;border-color:var(--line);box-shadow:none}
 button:disabled:hover{border-color:var(--line);box-shadow:none}
 /* Explicit line-height: the undo/redo arrow glyphs have a taller line box
@@ -517,7 +534,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   /* Skip layout/paint for off-screen cards. This is what keeps thousands of
      emoji scrolling smoothly; the size hint stops the scrollbar jumping. */
   content-visibility:auto;contain-intrinsic-size:auto 238px}
-.card:hover{border-color:var(--neon2);box-shadow:0 0 0 1px #38bdf855,0 0 18px #38bdf833}
+.card:hover{border-color:var(--neon2)}
 .card:active{transform:scale(.985)}
 /* One accent per format. Set as variables so the border, the glow, the badge
    and the tick all follow from a single value per format instead of four rules
@@ -530,8 +547,11 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
                    --fmtInk:#d6c7ff;--fmtBg:#120c1f;--fmtLine:#382a5c}
 .card.fmt-video   {--fmt:#34d399;--fmtRing:#34d39966;--fmtGlow:#34d3992e;
                    --fmtInk:#a7f3d0;--fmtBg:#04170f;--fmtLine:#1b4a38}
-.card.on{border-color:var(--fmt,var(--neon));
-  box-shadow:0 0 0 1px var(--fmtRing,#22d3ee66),0 0 16px var(--fmtGlow,#22d3ee2e)}
+/* One border colour for every card. Per-format borders turned the whole grid
+   into stripes on a dark background; the badge is where the format belongs.
+   No blurred glow either: a 16px shadow on 200 cards is the most expensive
+   thing the browser paints here, and it bought nothing but noise. */
+.card.on{border-color:#2b6f7d;box-shadow:inset 0 0 0 1px #22d3ee22}
 .card.off{opacity:.42;filter:grayscale(.9)}
 .thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
@@ -558,23 +578,21 @@ body.bg-gray  .thumb{background:#808a96}
   border-radius:6px;padding:2px 5px}
 .card{cursor:grab}
 .card.drag{opacity:.5;cursor:grabbing}
-.card.over{border-color:#f472b6;box-shadow:0 0 0 2px #f472b688,0 0 18px #f472b655}
-.card.logo{cursor:default;border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2455,0 0 16px #fbbf2433}
-.card.logo:hover{border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2477,0 0 18px #fbbf2455}
+.card.over{border-color:#f472b6;box-shadow:inset 0 0 0 2px #f472b688}
+.card.logo{cursor:default;border-color:#6b5316}
+.card.logo:hover{border-color:#fbbf24}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
 .card.logo .lbl{color:#fbbf24}
 .tick{flex:0 0 auto;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a}
-.card.on .tick{background:var(--fmt,var(--neon));border-color:var(--fmt,var(--neon));
-  box-shadow:0 0 10px var(--fmtRing,#22d3ee88)}
+.card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
 .pos{flex:0 0 auto;margin-left:auto;
   font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;
-  color:var(--fmtInk,var(--neon2));background:var(--fmtBg,#08131f);
-  border:1px solid var(--fmtLine,#1c3a44);
+  color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
   border-radius:6px;padding:2px 6px;min-width:24px;text-align:center;pointer-events:none}
 .card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
@@ -597,7 +615,8 @@ body.bg-gray  .thumb{background:#808a96}
     <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
     <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
     <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
-      <span class="hint">· click = toggle · drag = reorder · click the id = copy</span></span>
+      <span class="hint">· click = toggle · drag = reorder · click the id = copy</span>
+      <span id="capWarn" class="warn" style="display:none"></span></span>
   </div>
   <div class="actions">
     <button id="undo" title="Undo the last reorder or selection change (Ctrl+Z)" disabled>&#8630; Undo</button>
@@ -622,6 +641,7 @@ body.bg-gray  .thumb{background:#808a96}
 const ITEMS = JSON.parse(document.getElementById('items-data').textContent);
 const TOKEN = "__TOKEN__";
 const PREVIEW_FPS = __PREVIEW_FPS__;
+const PER_SET = __PER_SET__;
 const grid = document.getElementById('grid');
 const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const cards = new Map();          // key -> card element
@@ -694,12 +714,10 @@ function makeCard(it){
   // A shorter word beats an ellipsis and beats a smaller font.
   const FMT = {animated: 'anim', static: 'static', video: 'video'};
   hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : (FMT[it.fmt] || it.fmt)));
-  if(!it.isLogo){
-    // Filled by renumber(), never here: a number written at build time is right
-    // exactly once, and wrong from the first drag onwards.
-    hdr.appendChild(el('span','pos',''));
-    hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
-  }
+  // Filled by renumber(), never here: a number written at build time is right
+  // exactly once, and wrong from the first drag onwards.
+  hdr.appendChild(el('span','pos',''));
+  if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
   const lbl = el('div','lbl', it.label || '');
@@ -722,10 +740,13 @@ function makeCard(it){
 // The publish position, recomputed from ITEMS rather than tracked alongside it
 // -- ITEMS *is* the order, so anything else is a second copy that can drift.
 // Cheap enough to run on every reorder: 200 text writes, no layout thrash.
+// The brand logo is the FIRST emoji of every set it leads, so it costs a real
+// slot -- build_collection reserves it (capacity = per_set - 1). Numbering it
+// away made the panel disagree with what actually ships: the owner read "200"
+// and the pack was 201.
 function renumber(){
   let n = 0;
   for(const it of ITEMS){
-    if(it.isLogo) continue;
     n++;
     const card = cards.get(it.key);
     const pos = card && card.querySelector('.pos');
@@ -807,9 +828,25 @@ function render(){
   updateCount();
 }
 function updateCount(){
+  // The logo ships in every set, so it counts. It is not toggleable, hence
+  // always included.
+  const logo = ITEMS.filter(x=>x.isLogo).length;
   const real = ITEMS.filter(x=>!x.isLogo);
-  document.getElementById('selCount').textContent = real.filter(x=>x.included).length;
-  document.getElementById('totCount').textContent = real.length;
+  const included = real.filter(x=>x.included).length + logo;
+  document.getElementById('selCount').textContent = included;
+  document.getElementById('totCount').textContent = real.length + logo;
+  // Telegram's hard cap is 200 stickers per set and the logo takes one of them,
+  // so 200 chosen emoji plus the logo is 201 and CANNOT be one pack. Say so
+  // here rather than let it be discovered as a surprise second set.
+  const warn = document.getElementById('capWarn');
+  if(included > PER_SET){
+    const sets = Math.ceil(included / PER_SET);
+    warn.textContent = `· ${included} > ${PER_SET} per set, so this publishes as `
+                     + `${sets} packs (each led by the logo)`;
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
 }
 // In-place update: never rebuild the grid just to flip a selection.
 function setCard(it){
