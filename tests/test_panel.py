@@ -663,5 +663,69 @@ class DragAndDropOrdering(unittest.TestCase):
         self.assertIn("cancelAnimationFrame", page)
 
 
+class LosingTheServerIsNeverSilent(MutationGuard):
+    """An owner reordered a pack for three hours against a dead panel.
+
+    The page looked fine, every drag "worked", nothing reached the catalog, and
+    the only signal was a toast that fades in 2.6 seconds. These pin the parts
+    that make that impossible to miss.
+    """
+
+    def test_ping_answers_without_a_token_and_touches_nothing(self):
+        """The page polls this constantly; it must be cheap and unguarded.
+
+        A liveness probe that needed the mutation token could not distinguish
+        "server gone" from "token stale", and one that took the catalog lock
+        would report a healthy panel as dead while a publish held it.
+        """
+        with request.urlopen(f"http://127.0.0.1:{self.port}/api/ping",
+                             timeout=10) as r:
+            self.assertEqual(r.status, 200)
+            self.assertEqual(json.loads(r.read()), {"ok": True})
+
+    def test_a_rejected_order_is_an_error_status_not_a_200(self):
+        """The page decides success from the HTTP status.
+
+        A 200 carrying {"ok": false} would be reported to the owner as
+        "Order saved ✓" while nothing was written.
+        """
+        status, _ = self._post("/api/order", {"order": ["s:" + "0" * 30]})
+        self.assertEqual(status, 400)
+
+    def test_the_page_polls_and_keeps_the_warning_up(self):
+        page = p.PAGE
+        self.assertIn("/api/ping", page)
+        self.assertIn("setInterval(", page)
+        # A banner, not a toast: the toast auto-hides after 2600ms.
+        self.assertIn("id=\"alert\"", page)
+        self.assertNotIn("setTimeout(()=>a.classList.remove('show')", page)
+
+    def test_unsaved_work_is_remembered_and_retried(self):
+        page = p.PAGE
+        self.assertIn("pendingOrder", page)
+        # The heartbeat flushes it, so recovery needs no action from the owner.
+        beat = page[page.index("setInterval(async ()=>{"):]
+        self.assertIn("flushOrder(pendingOrder)", beat[:600])
+
+    def test_a_restarted_panel_does_not_strand_the_page(self):
+        """The token is per run, so a restart 403s the page's saves.
+
+        Re-reading it from "/" is same-origin -- exactly the boundary the token
+        protects -- so this weakens nothing, and it is the difference between
+        "restart the panel and lose your afternoon" and "it catches up".
+        """
+        page = p.PAGE
+        api = page[page.index("async function apiPost("):]
+        body = api[:api.index("async function flushOrder")]
+        self.assertIn("r.status === 403", body)
+        self.assertIn("const TOKEN =", body)     # re-parsed from a fresh "/"
+
+    def test_the_browser_asks_before_closing_on_unsaved_work(self):
+        page = p.PAGE
+        self.assertIn("beforeunload", page)
+        guard = page[page.index("addEventListener('beforeunload'"):]
+        self.assertIn("if(pendingOrder)", guard[:200])
+
+
 if __name__ == "__main__":
     unittest.main()
