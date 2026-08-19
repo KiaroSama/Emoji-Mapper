@@ -34,6 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 8766          # never 8765: that is where a real panel lives
+TMP_PREFIX = "panel-sandbox-"
 
 
 def clone_catalog(source: Path, dest: Path) -> int:
@@ -77,6 +78,29 @@ def clone_catalog(source: Path, dest: Path) -> int:
     return n
 
 
+def sweep_stale() -> int:
+    """Delete clones a previous run left behind, before making another.
+
+    ``atexit`` does not run when the process is killed, and this server is
+    normally ended by killing it. Seven abandoned clones at ~2.4 MB each were
+    found in one session. Cleaning at START rather than only at exit is the
+    only cleanup that survives the way the thing is actually stopped.
+
+    A clone in use is protected by its own lock: a directory that is still
+    being served refuses to delete on Windows, and that failure is ignored.
+    """
+    removed = 0
+    for old in Path(tempfile.gettempdir()).glob(f"{TMP_PREFIX}*"):
+        if not old.is_dir():
+            continue
+        before = old.exists()
+        shutil.rmtree(old, ignore_errors=True)
+        removed += before and not old.exists()
+    if removed:
+        print(f"cleaned {removed} abandoned sandbox clone(s)", flush=True)
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default="collection",
@@ -88,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("refusing port 8765: that is the real panel's port")
 
     source = (ROOT / args.source).resolve()
-    tmp = Path(tempfile.mkdtemp(prefix="panel-sandbox-"))
+    sweep_stale()
+    tmp = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))
     atexit.register(shutil.rmtree, tmp, True)
 
     n = clone_catalog(source, tmp)
