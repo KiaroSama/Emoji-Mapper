@@ -643,6 +643,11 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 Interactions: **click** a card to toggle include/exclude, **click the
 `premium-id:` label** to copy that id to the clipboard (it stops there and does
 not toggle the card), **drag** a card to reorder (this is the publish order).
+Each card shows its **publish position** at the top; the numbers are recomputed
+from the order on every drop, never stored on the card. Dragging to the top or
+bottom edge of the window scrolls the page, so an item can be carried across
+the whole catalog in one motion. Releasing anywhere that is not a card cancels
+— it used to mean "move to the end".
 Animated *and* video emoji play on their own while near the viewport; hover
 plays a video only under `prefers-reduced-motion`, where nothing autoplays.
 Animated emoji play on their own while near the viewport; the header's

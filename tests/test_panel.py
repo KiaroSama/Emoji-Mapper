@@ -575,5 +575,75 @@ class CopyTheEmojiId(unittest.TestCase):
         self.assertIn("if (RM) {", page)
 
 
+class DragAndDropOrdering(unittest.TestCase):
+    """Two reported bugs, pinned at the only level available: the served page.
+
+    The reorder itself lives in a drop handler, so there is no Python function
+    to call. What these assert is exactly what regressed.
+    """
+
+    def test_a_drop_outside_a_card_never_reorders(self):
+        """It used to fall back to the LAST position.
+
+        `to = card ? indexOf(card) : ITEMS.length-1` meant releasing over a grid
+        gap -- and the gaps between cards are a large target -- silently threw
+        the emoji to the end of the pack.
+        """
+        page = p.PAGE
+        self.assertNotIn("card ? ITEMS.findIndex(x=>x.key===card.dataset.key) "
+                         ": ITEMS.length-1", page)
+        drop = page[page.index("addEventListener('drop'"):]
+        guard = drop.index("if(!card){ endDrag(); return; }")
+        seek = drop.index("ITEMS.findIndex(x=>x.key===card.dataset.key)")
+        self.assertLess(guard, seek,
+                        "the no-card guard must run before any index is chosen")
+
+    def test_dragging_to_an_edge_scrolls_the_page(self):
+        """Without this the drag is trapped in the current viewport.
+
+        With 200 cards there is otherwise no way to carry #200 up to #10.
+        """
+        page = p.PAGE
+        self.assertIn("function edgeScroll(", page)
+        self.assertIn("requestAnimationFrame", page)
+        # On the document: at the top of the window the pointer sits over the
+        # sticky header, where a grid-only listener never fires.
+        doc_over = page.index("document.addEventListener('dragover'")
+        self.assertIn("edgeScroll(e.clientY)", page[doc_over:doc_over + 300])
+
+    def test_the_position_number_is_recomputed_not_stored(self):
+        """A number written at build time is right once and wrong after a drag.
+
+        renumber() walks ITEMS, which IS the order, so there is no second copy
+        to drift. It has to run both after the first render and after a drop.
+        """
+        page = p.PAGE
+        self.assertIn("function renumber(", page)
+        self.assertNotIn("el('span','pos', n", page)   # never filled at build time
+        render = page[page.index("function render(){"):]
+        self.assertIn("renumber();", render[:render.index("function updateCount")])
+        # Up to saveOrder(), not to the first endDrag() -- that one is the
+        # no-card early return, which sits BEFORE any reordering happens.
+        drop = page[page.index("addEventListener('drop'"):]
+        self.assertIn("renumber();", drop[:drop.index("saveOrder();")])
+
+    def test_the_logo_card_is_not_numbered(self):
+        """It is fixed first and never published, so it holds no slot."""
+        self.assertIn("if(!it.isLogo) card.appendChild(el('span','pos',''));",
+                      p.PAGE)
+
+    def test_the_scroll_loop_cannot_outlive_the_drag(self):
+        """A drag released outside the window fires no drop.
+
+        An unguarded rAF loop would then scroll the page forever.
+        """
+        page = p.PAGE
+        step = page[page.index("function stepEdge("):]
+        self.assertIn("if(dragKey === null || !edgeSpeed) return;",
+                      step[:step.index("}")+400])
+        self.assertIn("function stopEdgeScroll(", page)
+        self.assertIn("cancelAnimationFrame", page)
+
+
 if __name__ == "__main__":
     unittest.main()

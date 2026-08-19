@@ -225,7 +225,9 @@ npx wrangler deploy
 `panel.py` opens a local dark neon-blue web panel showing every emoji in the
 catalog as a large labelled card. All cards are selected by default; click one
 to toggle it (deselected = excluded from the next publish), Shift+click for a
-range, **drag** to set the publish order. **Click the `premium-id:` label
+range, **drag** to set the publish order — each card shows its position,
+and dragging to the top or bottom edge scrolls the page so you can move an
+item across the whole catalog in one go. **Click the `premium-id:` label
 to copy that id** to the clipboard — it does not toggle the card. Visually similar emoji start out next
 to each other so look-alikes are quick to deselect. Click **Save**, then
 `build_collection.py` only publishes the included items.
