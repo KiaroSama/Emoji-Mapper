@@ -236,7 +236,8 @@ compositor with no animation library in the page. Only cards near the viewport
 carry the animated frames; the rest hold a still. The header's **Animation:
 On/Off** button stops that everywhere (remembered across reloads), and
 `--preview-fps` sets the frame rate, which is the real lever on how heavy the
-grid feels. Video cards still play on hover only.
+grid feels. Video plays the same way — on its own while near the viewport,
+not on hover, since a grid of stills cannot be curated.
 
 ```powershell
 .venv\Scripts\python.exe panel.py        # or run.ps1 -> B4

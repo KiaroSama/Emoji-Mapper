@@ -642,8 +642,9 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 
 Interactions: **click** a card to toggle include/exclude, **click the
 `premium-id:` label** to copy that id to the clipboard (it stops there and does
-not toggle the card), **drag** a card to reorder (this is the publish order),
-**hover** a *video* emoji to play it.
+not toggle the card), **drag** a card to reorder (this is the publish order).
+Animated *and* video emoji play on their own while near the viewport; hover
+plays a video only under `prefers-reduced-motion`, where nothing autoplays.
 Animated emoji play on their own while near the viewport; the header's
 **Animation: On/Off** button stops that everywhere and is remembered in
 `localStorage`.
@@ -1274,14 +1275,18 @@ Front-end:
   Header buttons: Select all / Deselect all / Invert / Animation: On|Off / Save.
 - **Static and animated are both plain `<img loading="lazy">`** — the browser
   owns decoding and compositing, and there are no player objects to build or
-  tear down. Video is `<video preload="metadata">` with `#t=0.001` (muted,
-  looping, **not** autoplaying); it plays on hover, because a grid of
-  simultaneously playing videos was the original CPU sink.
-- Animated cards swap `src` between a still (`?still=1`) and the animated WebP
-  via one `IntersectionObserver` (300-px margin), so only what is near the
-  viewport holds frame buffers. `content-visibility:auto` is set as well but
-  does not by itself stop an off-screen animation from costing its buffers.
-- `prefers-reduced-motion` is respected (hover never starts video playback).
+  tear down. Video is `<video preload="metadata">` (muted, looping,
+  `playsinline`), started by the observer rather than by the `autoplay`
+  attribute, so playback is bounded the same way everything else is.
+- **One `IntersectionObserver` (300-px margin) drives all of it**: it swaps an
+  animated card's `src` between the still (`?still=1`) and the animated WebP,
+  and plays/pauses `<video>`. A grid of *everything* playing was the original
+  CPU sink; the fix is the viewport bound, not hover — a grid of frozen stills
+  cannot be curated, which is why hover-only was rejected for both.
+  `content-visibility:auto` is set as well but does not by itself stop an
+  off-screen animation from costing its decoded buffers.
+- `prefers-reduced-motion` is respected: nothing plays by itself, and hover
+  becomes the only way to play a video, which is what those handlers are for.
 
 The panel ships no animation library: animated emoji are rasterised to WebP by
 `rlottie-python` on the server, so the page needs nothing from a CDN and works
