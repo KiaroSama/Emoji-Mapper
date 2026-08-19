@@ -43,9 +43,37 @@ would mean a leak from either bot could forge updates for the other.
 
 ## Logs
 
+The channel line follows the Ad Timer Bot's log format, with the bot tag on its
+own first line:
+
+```
+[general]
+❌ ERROR webhook
+update 42: sendMessage failed (400): chat not found
+2026-08-19 00:45:12 UTC
+```
+
 Every line starts with the bot that produced it — `[general]` or `[coin]` —
 because both bots share this Worker, one log table and one channel, and a line
 that does not say which one wrote it is not worth keeping.
+
+The channel is capped at **12 messages a minute**. Over budget it drops and
+*counts* rather than queueing — a queue inside a Worker isolate outlives the
+request it belongs to and loses the messages anyway, just later and holding the
+memory — and the dropped count rides on the next message that gets through, so
+a burst is visible instead of silently swallowed. That budget is per isolate,
+not global: it bounds one isolate handling a burst of redeliveries, not a fleet.
+
+`LOG_CHAT_ID` accepts a channel id copied bare out of the Telegram UI
+(`4211401345`) and adds the `-100` prefix the Bot API needs. Without that, the
+failure is a bare "chat not found" far away from the setting that caused it.
+
+**A channel post from the log channel is ignored.** Both bots administer it, so
+every line posted there returns as a `channel_post` to both, and handling it
+wrote another row about a message we had just written. Not a loop today — a
+plain-text log line carries no custom emoji, so the handler returns before
+sending — but it becomes one the moment channel handling grows a path that logs
+an ERROR.
 
 **D1**, capped at 10 MB, oldest evicted first. The insert and the eviction go in
 one `batch()`, so a row can never be stored without its budget check. The cap
