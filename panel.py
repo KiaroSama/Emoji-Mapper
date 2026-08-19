@@ -511,8 +511,12 @@ body{margin:0;background:radial-gradient(1200px 800px at 70% -10%,#0b1a2b 0%,var
    the hint text is far wider than one Save button. With 1fr auto 1fr the
    actions sit on the window's centre line whatever the sides weigh. */
 header{display:grid;grid-template-columns:1fr auto 1fr;
-  position:sticky;top:0;z-index:5;backdrop-filter:blur(10px);
-  background:linear-gradient(180deg,#0a0f1aee,#0a0f1abb);border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:5;
+  /* Opaque instead of translucent+blurred. backdrop-filter re-reads and blurs
+     everything behind the header on EVERY scroll frame, across its full width;
+     with 201 cards scrolling under it that was the largest per-frame cost left
+     once the card shadows were gone. Opaque needs no blur to stay readable. */
+  background:linear-gradient(180deg,#0a0f1a,#0b1120);border-bottom:1px solid var(--line);
   padding:14px 20px;gap:12px;align-items:center}
 .brand{border-radius:8px;flex:none;filter:drop-shadow(0 0 8px #22d3ee55)}
 h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px;
@@ -582,8 +586,11 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
    drag-over target. */
 .card.fmt-static  {--fmt:#22d3ee;--fmtRing:#22d3ee66;--fmtGlow:#22d3ee2e;
                    --fmtInk:#9fe8f5;--fmtBg:#06121b;--fmtLine:#1c3a44}
-.card.fmt-animated{--fmt:#fb923c;--fmtRing:#fb923c66;--fmtGlow:#fb923c2e;
-                   --fmtInk:#fed7aa;--fmtBg:#1c1008;--fmtLine:#5c3a1a}
+/* Light violet, not the #a78bfa violet it started as: that one sat too close
+   to the dark background to read as a frame. Lightening it keeps the colour the
+   owner wanted and gives the outline something to contrast against. */
+.card.fmt-animated{--fmt:#c4b5fd;--fmtRing:#c4b5fd66;--fmtGlow:#c4b5fd2e;
+                   --fmtInk:#ede9fe;--fmtBg:#140f28;--fmtLine:#4c3f7a}
 .card.fmt-video   {--fmt:#34d399;--fmtRing:#34d39966;--fmtGlow:#34d3992e;
                    --fmtInk:#a7f3d0;--fmtBg:#04170f;--fmtLine:#1b4a38}
 /* One border colour for every card. Per-format borders turned the whole grid
