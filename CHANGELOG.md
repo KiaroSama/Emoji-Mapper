@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a single-frame video had no content key at all
+
+- **`_video_content_digest` resamples at a fixed `fps=10`, and a single-frame
+  video is shorter than one sampling interval** — the filter emitted nothing and
+  the digest fell through to hashing the container bytes. That is not a content
+  key: two such stickers differing only in container framing did not dedup, and
+  re-encoding one under owner rule 1 moved its primary key, orphaning the
+  catalog row and the media file, both of which are named after it. WebM also
+  randomises its SegmentUID, so the "identity" of such a file changed on every
+  remux. An empty resample now retries at the file's own frames; raw bytes
+  remain only for a file ffmpeg cannot render at all.
+- **`fingerprint()` carried its own copy of that ffmpeg call.** Fixing the
+  digest alone made the two disagree — the same file getting one key from
+  `content_key()` and another from `fingerprint()`. They now share one decode.
+- **A hung ffmpeg no longer becomes a byte hash.** `fingerprint()` caught the
+  failure and returned a key anyway; a timeout is "I could not look", and
+  turning it into a valid-looking key hid it. `MediaError` propagates, and the
+  bounded-subprocess test now covers `fingerprint()` and the shared helper too.
+  Every ingest site already fails that one item and counts it.
+
 ### Added
 
 - **`worker/` — both bots in one Cloudflare Worker (TypeScript).** Webhook
