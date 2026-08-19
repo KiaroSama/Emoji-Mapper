@@ -884,6 +884,52 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         self.assertIn("grid-template-columns:1fr auto 1fr", page)
 
 
+class OffScreenCostsNothing(unittest.TestCase):
+    """A card you cannot see must not be decoding frames.
+
+    Two hundred cards, 147 of them animated: if leaving the viewport did not
+    stop them the grid would decode every one of them forever, which is what
+    "the page is heavy" actually meant.
+    """
+
+    def test_leaving_the_viewport_stops_video_AND_animation(self):
+        io_block = p.PAGE[p.PAGE.index("const animIO"):]
+        io_block = io_block[:io_block.index("}, {root:")]
+        # One flag decides both media kinds, and it is driven by intersection.
+        self.assertIn("e.isIntersecting", io_block)
+        self.assertIn("setPlaying(t, live)", io_block,
+                      "video must be paused when it scrolls away, not muted")
+        self.assertIn("t.dataset.still", io_block,
+                      "an animated image must fall back to its single frame")
+        # Coming back must restore it -- a one-way stop would leave a dead grid.
+        self.assertIn("t.dataset.anim", io_block)
+
+    def test_every_card_is_observed_once_the_grid_is_built(self):
+        """render() creates every node, so it is what must start observing.
+
+        Reordering does NOT rebuild: undo/redo and drag move the existing
+        nodes, and appending a node already in the document relocates it. That
+        is why observation survives a reorder -- and why the check that matters
+        is on the one function that makes the nodes in the first place.
+        """
+        body = p.PAGE[p.PAGE.index("function render("):]
+        body = body[:body.index("function updateCount(")]
+        self.assertIn("observeAnimated()", body,
+                      "a freshly built grid nobody observes never pauses")
+
+    def test_the_sticky_header_does_not_blur_its_backdrop(self):
+        """backdrop-filter re-blurs everything behind it on every scroll frame.
+
+        It is the most expensive thing a sticky bar can do, and over an opaque
+        background it buys nothing.
+        """
+        header = p.PAGE[p.PAGE.index("header{"):]
+        # Strip CSS comments first. Twice now a check like this has passed or
+        # failed on the COMMENT explaining the rule rather than the rule.
+        rule = re.sub(r"/\*.*?\*/", "", header[:header.index("}")], flags=re.S)
+        self.assertNotIn("backdrop-filter", rule)
+
+
 class RefreshMustActuallyRefresh(MutationGuard):
     """Reloading the page has to show the current catalog, not a snapshot.
 
