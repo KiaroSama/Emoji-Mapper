@@ -2,6 +2,13 @@ name = "emoji-mapper-bots"
 main = "src/index.ts"
 compatibility_date = "2026-08-18"
 
+# workers.dev on, preview URLs OFF. Both default to ON, and a preview URL would
+# publish /tg/general, /tg/coin and /publish on a second hostname per deployed
+# version. The secrets still guard them, but an endpoint nothing points at is
+# surface with no upside.
+workers_dev = true
+preview_urls = false
+
 # No [vars]. Everything the Worker reads -- both bot tokens, both webhook
 # secrets, the publish bearer, the admin list AND the channel -- is a secret set
 # with `wrangler secret put`, so none of it appears in this file or in git.
@@ -17,5 +24,5 @@ compatibility_date = "2026-08-18"
 [[d1_databases]]
 binding = "DB"
 database_name = "emoji-mapper-logs"
-database_id = ""
+database_id = "e9a95a21-5952-4fe4-88f8-27047652a375"
 migrations_dir = "migrations"

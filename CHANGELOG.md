@@ -27,11 +27,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   webhook stops `emoji_bot.py` receiving anything on that token. `emoji_bot.py`
   is unchanged and still works; `deleteWebhook` hands the token back.
   17 vitest tests with `fetch` stubbed, `tsc --noEmit` clean.
+- **All three publishers now announce through one `build_pack.announce_packs`.**
+  `build_pack.py`, `build_collection.py` and `coins/rebuild_dedup.py` each
+  carried their own copy of "format the link and sendMessage", and when the
+  Worker arrived only the collector learned about it — so a coin rebuild kept
+  talking to Telegram from the build machine while the owner believed the bot
+  was posting. A test asserts all three share the function. It routes to the
+  Worker only when URL *and* secret are both set, keeps link previews off on the
+  direct path (which the coin script used to do through a private `_call`), and
+  the coin family now goes in one call so the Worker can split it.
+- **`renderAnnouncement` returns a list.** 30+ packs in one message eventually
+  passes Telegram's 4096-character limit, and the rejection costs *every* link,
+  not just the overflow. Entries are never split from their own link.
 - **`build_collection.notify()` routes through the Worker** when
   `WORKER_PUBLISH_URL` *and* `WORKER_PUBLISH_SECRET` are both set; the original
   direct path runs unchanged otherwise. `state["sent"]` still owns duplicate
   suppression, and a failed announcement is deliberately **not** recorded as
   sent — recording it would make the guard skip that pack forever.
+- **Worker logs: a 10 MB D1 table plus an errors-only Telegram channel.** Every
+  line starts with the bot that wrote it, in both sinks — the two bots share one
+  Worker, one table and one channel. The insert and the oldest-first eviction go
+  in one `batch()`, so a row cannot be stored without its budget check, and the
+  eviction is recomputed from the table rather than tracked in a counter that
+  could drift after a failed write. The cap counts stored *text*, not the
+  database file: D1 exposes no cheap reliable file size. Only ERRORs reach the
+  channel; an unauthorised hit on a public webhook URL is a WARNING and
+  level-based routing would let a scanner flood it. Logging runs in
+  `ctx.waitUntil()` and swallows every sink failure, so it can neither delay a
+  webhook response nor take a bot down. `GET /health` now reports `log_db`.
+- **`worker/scripts/set-webhooks.ps1`** — registers one webhook per bot from the
+  same `.env` the secrets came from, so a registration and its deployed secret
+  cannot drift apart. That mismatch is silent: Telegram accepts `setWebhook`
+  and every delivery is then rejected 401, which looks exactly like a dead bot.
+  `-Status`, `-Delete`, and a refusal to replace a webhook pointing elsewhere
+  without `-Force`.
+- **Preview URLs disabled** (`preview_urls = false`). They default to on and
+  would publish `/tg/general`, `/tg/coin` and `/publish` on a second hostname
+  per deployed version.
 - **`worker/scripts/put-secrets.ps1`** — pushes every Worker secret straight
   from `.env` to `wrangler secret put` through **stdin**, so no value is
   printed, kept in shell history, or passed as an argument (arguments are
