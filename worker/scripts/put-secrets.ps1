@@ -49,8 +49,11 @@ foreach ($line in [System.IO.File]::ReadAllLines($EnvFile, [System.Text.Encoding
 # where the list fails closed and the bot just stops answering someone.
 $source = if ($env_['ADMIN_USER_IDS']) { 'ADMIN_USER_IDS (explicit)' }
           else { 'PACK_OWNER_USER_ID + BOT_ALLOWED_USER_IDS' }
-$raws = if ($env_['ADMIN_USER_IDS']) { $env_['ADMIN_USER_IDS'] -split ',' }
-        else { @($env_['PACK_OWNER_USER_ID']) + ($env_['BOT_ALLOWED_USER_IDS'] -split ',') }
+# Split on commas, semicolons OR whitespace. A human writing a list of ids
+# should not have to guess the separator - and guessing wrong here is silent,
+# because the list fails closed and the bots simply stop answering.
+$raws = if ($env_['ADMIN_USER_IDS']) { $env_['ADMIN_USER_IDS'] -split '[\s,;]+' }
+        else { @($env_['PACK_OWNER_USER_ID']) + ($env_['BOT_ALLOWED_USER_IDS'] -split '[\s,;]+') }
 $ids = [System.Collections.Generic.List[string]]::new()
 $rejected = 0
 foreach ($raw in $raws) {

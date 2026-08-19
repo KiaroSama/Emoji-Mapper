@@ -12,7 +12,7 @@ import worker from "../src/index";
 import { parseAdmins, verifyBearer, verifyWebhook } from "../src/auth";
 import { extractCustomEmojiIds } from "../src/emoji";
 import { renderAnnouncement, renderIdMessages } from "../src/handle";
-import { formatLine, log, redact } from "../src/logging";
+import { formatLine, log, normalizeChatId, redact } from "../src/logging";
 import type { Env, TgMessage } from "../src/types";
 
 const ENV: Env = {
@@ -301,11 +301,41 @@ describe("publishing a finished pack", () => {
 });
 
 describe("logging", () => {
-  it("names the bot first, in D1 and in the channel alike", async () => {
-    expect(formatLine({ bot: "coin", level: "ERROR", event: "publish" }))
-      .toBe("[coin] ERROR publish");
-    expect(formatLine({ bot: "general", level: "INFO", event: "webhook", detail: "x" }))
-      .toBe("[general] INFO webhook\nx");
+  it("puts the bot on its own line, then level+event, detail, UTC stamp", async () => {
+    const at = Date.UTC(2026, 7, 19, 0, 45, 12);
+    expect(formatLine({ bot: "coin", level: "ERROR", event: "publish" }, at))
+      .toBe("[coin]\n❌ ERROR publish\n2026-08-19 00:45:12 UTC");
+    expect(formatLine({ bot: "general", level: "INFO", event: "webhook", detail: "x" }, at))
+      .toBe("[general]\nℹ️ INFO webhook\nx\n2026-08-19 00:45:12 UTC");
+    expect(formatLine({ bot: "coin", level: "WARNING", event: "unauthorized" }, at, 3))
+      .toContain("(+3 suppressed by rate limit)");
+  });
+
+  it("accepts a channel id copied bare out of the Telegram UI", () => {
+    // Telegram shows the internal id in several places; the Bot API only takes
+    // the -100 form, and the failure is a bare "chat not found" much later.
+    expect(normalizeChatId("4211401345")).toBe("-1004211401345");
+    expect(normalizeChatId("-1001998461602")).toBe("-1001998461602");
+    expect(normalizeChatId("@logs")).toBe("@logs");
+    expect(normalizeChatId("")).toBeNull();
+    expect(normalizeChatId("0")).toBeNull();
+    expect(normalizeChatId("not an id")).toBeNull();
+  });
+
+  it("drops over the per-minute budget and carries the count forward", async () => {
+    const calls = stubApi();
+    const env = { ...ENV, LOG_CHAT_ID: "-1001" };
+    // 12 is the budget; the 13th and 14th are dropped, not queued -- a queue in
+    // a Worker isolate outlives its request and loses them anyway.
+    for (let i = 0; i < 14; i++) {
+      await log(env, { bot: "general", level: "ERROR", event: `e${i}` });
+    }
+    expect(calls).toHaveLength(12);
+    // The next window reports what was suppressed rather than hiding it.
+    vi.setSystemTime(new Date(Date.now() + 61_000));
+    await log(env, { bot: "general", level: "ERROR", event: "after" });
+    expect(String(calls[12].body.text)).toContain("(+2 suppressed by rate limit)");
+    vi.useRealTimers();
   });
 
   it("keeps a bot token out of a line even when an API error echoes one", () => {
@@ -349,7 +379,8 @@ describe("logging", () => {
               { bot: "general", level: "ERROR", event: "webhook", detail: "boom" });
     expect(calls).toHaveLength(1);
     expect(calls[0].body.chat_id).toBe("-1001");
-    expect(String(calls[0].body.text)).toBe("[general] ERROR webhook\nboom");
+    expect(String(calls[0].body.text)).toMatch(
+      /^\[general\]\n❌ ERROR webhook\nboom\n\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
   });
 
   it("posts a bot's own lines with that bot's token", async () => {
@@ -383,6 +414,39 @@ describe("logging", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("ignores its own log-channel posts instead of logging about them", async () => {
+    // Both bots administer the log channel, so every line posted there returns
+    // as a channel_post to both. Observed on the live deployment.
+    const calls = stubApi();
+    const { db, runs } = stubDb();
+    await worker.fetch(webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET, {
+      update_id: 11,
+      channel_post: {
+        message_id: 1, chat: { id: -1001998461602, type: "channel", title: "Logs" },
+        text: "[coin] ERROR webhook",
+        entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "123" }],
+      },
+    }), { ...ENV, LOG_CHAT_ID: "-1001998461602", DB: db }, CTX);
+    await settle();
+    // No DM to the admins, and no row about a message we just wrote ourselves.
+    expect(calls).toHaveLength(0);
+    expect(runs).toHaveLength(0);
+  });
+
+  it("still reads a normal channel's posts", async () => {
+    const calls = stubApi();
+    await worker.fetch(webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET, {
+      update_id: 12,
+      channel_post: {
+        message_id: 1, chat: { id: -100777, type: "channel", title: "Real" },
+        entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "456" }],
+      },
+    }), { ...ENV, LOG_CHAT_ID: "-1001998461602" }, CTX);
+    await settle();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(String(calls[0].body.text)).toContain("456");
+  });
+
   it("a handler failure IS broadcast, because nothing else reports it", async () => {
     const calls: { method: string; body: Record<string, unknown> }[] = [];
     let first = true;
@@ -404,7 +468,7 @@ describe("logging", () => {
     await settle();
     expect(calls).toHaveLength(1);
     expect(calls[0].body.chat_id).toBe("-1001");
-    expect(String(calls[0].body.text)).toMatch(/^\[general\] ERROR webhook/);
+    expect(String(calls[0].body.text)).toMatch(/^\[general\]\n❌ ERROR webhook\n/);
   });
 });
 
