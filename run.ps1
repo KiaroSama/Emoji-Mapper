@@ -124,8 +124,23 @@ function Show-Banner {
 # command that happened to print something.
 function Invoke-Py ($py, [string[]]$Argv) {
     Write-Log 'INFO' ("run: python " + ($Argv -join ' '))
-    & $py @Argv | Out-Host
-    $code = [int]$LASTEXITCODE
+    # Ctrl+C must stop the CHILD and drop back to the menu, not take the
+    # launcher down with it. Stopping a long-running tool -- the panel, the bot
+    # -- is the normal way to finish with it, and losing the whole launcher
+    # every time meant reopening it just to pick the next item.
+    #
+    # The console delivers CTRL_C_EVENT to every process attached to it, so
+    # python still receives it and exits through its own KeyboardInterrupt
+    # handler. Cancel = $true only stops OUR process from being terminated by
+    # that same event.
+    $onCancel = [System.ConsoleCancelEventHandler] { param($sender, $e) $e.Cancel = $true }
+    [Console]::add_CancelKeyPress($onCancel)
+    try {
+        & $py @Argv | Out-Host
+        $code = [int]$LASTEXITCODE
+    } finally {
+        [Console]::remove_CancelKeyPress($onCancel)
+    }
     Write-Log 'INFO' ("exit $code (" + $Argv[0] + ")")
     return $code
 }
