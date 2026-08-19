@@ -88,4 +88,15 @@ export interface PublishRequest {
   packs: PublishedPack[];
   /** Optional free-text line placed above the list. */
   note?: string;
+  /**
+   * How the packs are laid out.
+   *
+   * "cards" (default) gives each pack a bold title line and its link below --
+   * right for announcing one or two finished packs.
+   * "list" is one line per pack, `title. url`, which is what a whole family of
+   * 29 looks readable as. Explicit rather than inferred from the pack count:
+   * the caller knows which it is announcing, and a rule like "more than five
+   * means list" would silently change the look of a real post.
+   */
+  style?: "cards" | "list";
 }

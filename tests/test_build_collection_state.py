@@ -1095,6 +1095,29 @@ class VideoBlankCheck(unittest.TestCase):
         self.assertTrue(self._media_ok(b""))
 
 
+class PackTitlesAreOneSequence(unittest.TestCase):
+    """Titles read "<title> 1, 2, 3" across every format, not per format.
+
+    They used to be "<title> Animated 1" / "<title> Static 1" -- three separate
+    sequences, so two packs both called "1". The number now counts every set
+    already created, which also makes it resumable: a restarted run continues
+    the count instead of restarting it.
+    """
+
+    def test_the_number_counts_all_formats_not_just_this_one(self):
+        src = Path(bc.__file__).read_text(encoding="utf-8")
+        self.assertIn("len(state['sets']) + 1", src)
+        self.assertNotIn("FMT_WORD", src,
+                         "a format word in the title reintroduces the split")
+
+    def test_the_announcement_uses_the_recorded_title(self):
+        """Rebuilding the title at announce time is how it drifts from the set."""
+        src = Path(bc.__file__).read_text(encoding="utf-8")
+        block = src[src.index("if in_set >= per_set:"):]
+        block = block[:block.index("time.sleep")]
+        self.assertIn('fmt_sets[-1]["title"]', block)
+
+
 if __name__ == "__main__":
     unittest.main()
 
