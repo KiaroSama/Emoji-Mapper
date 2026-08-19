@@ -178,7 +178,18 @@ class LockBusy(RuntimeError):
 
 
 LOCK_DIR = ROOT / ".locks"
-LOCK_STALE_AFTER = 6 * 3600
+# How old a lock must be before a run whose holder is PROVABLY GONE may take it.
+# Both conditions are required, and the liveness check is the one carrying the
+# safety: a live holder is never stolen from at any age. This grace exists only
+# to cover claiming being two steps -- O_CREAT|O_EXCL, then a separate write --
+# because during that window the record is empty and its pid parses as 0, which
+# reads as "dead". Seconds cover a window measured in microseconds.
+#
+# It was six hours, which had nothing left to protect once the liveness check
+# was added, and which locked the owner out of resuming a publish they had just
+# stopped themselves: the holder was dead, the work was half done, and the only
+# way forward was to wait or to delete a lock file by hand.
+LOCK_STALE_AFTER = 120
 
 
 def pack_family_lock_path(base: str) -> Path:
@@ -247,8 +258,12 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
     long but healthy run could have its lock "reclaimed" as stale by a second
     process, and would then delete the *replacement* holder's lock on the way
     out, leaving both free to mutate. A stale lock is only taken over when its
-    recorded process is genuinely gone, and a long-running holder refreshes the
-    mtime so age alone never condemns it.
+    recorded process is genuinely gone: age alone never condemns a lock, however
+    long its holder has been running.
+
+    Yields a ``heartbeat`` callable that refreshes the mtime. No caller uses it
+    -- liveness, not age, is what protects a long run -- so do not build on it
+    without checking that it is actually being called.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
