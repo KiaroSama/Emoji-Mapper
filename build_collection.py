@@ -49,7 +49,6 @@ log = logging.getLogger("build_collection")
 
 PER_SET = 200                       # Telegram custom-emoji set hard cap
 FMT_TAG = {"static": "s", "video": "v", "animated": "a"}
-FMT_WORD = {"static": "Static", "video": "Video", "animated": "Animated"}
 DEFAULT_EMOJI = "\U0001F600"
 
 # --- Brand logo (first emoji of every set built with the Emoji Mapper bot) --- #
@@ -816,7 +815,12 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 before = {}             # the create below starts from nothing
                 set_index += 1
                 set_name = f"{base}{FMT_TAG[fmt]}{set_index}_by_{bot}"
-                set_title = f"{title} {FMT_WORD[fmt]} {set_index}"
+                # Numbered across ALL formats in creation order, so the
+                # owner sees "<title> 1, 2, 3" and not three separate
+                # sequences with a format word in each. state["sets"]
+                # holds every set already created, so a resumed run
+                # continues the count instead of restarting it.
+                set_title = f"{title} {len(state['sets']) + 1}"
                 logo_png = logo.static_png() if logo else None
                 adopted = False
                 try:
@@ -914,8 +918,10 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         if n % 20 == 0:
             save_json(_state_path(data_dir, base), state)
         if in_set >= per_set:
+            # The RECORDED title, not a rebuilt one: rebuilding it here is how
+            # the announcement and the actual set name drift apart.
             notify(tg, user_id, state, data_dir, base, set_name,
-                   f"{title} {FMT_WORD[fmt]} {set_index}")
+                   fmt_sets[-1]["title"])
             in_set = 0
         time.sleep(0.1)
 

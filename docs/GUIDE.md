@@ -609,6 +609,15 @@ emoji.
 
 ### 12.5 `build_collection.py` — publish the catalog into new packs
 
+**Set titles are one sequence across every format.** `--title "@GodVerify Emoji
+Packs"` produces `@GodVerify Emoji Packs 1`, `2`, `3` … in creation order,
+whatever format each set holds. They used to carry the format word and count
+per format (`… Animated 1`, `… Static 1`), so two different packs were both
+called "1". The number counts every set already recorded, which is also what
+makes it resumable: a restarted run continues the count instead of restarting
+it. Set **names** are unchanged — `<base>s<n>` / `<base>v<n>` / `<base>a<n>`
+remain the identity, and only the human title moved.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--base` | *(required)* | Set-name base (letters/digits only). |

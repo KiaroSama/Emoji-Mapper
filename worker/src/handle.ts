@@ -140,12 +140,15 @@ const TITLE_LIMIT = 200;
  */
 export function renderAnnouncement(req: PublishRequest): string[] {
   const blocks: string[] = [];
+  const list = req.style === "list";
   if (req.note) blocks.push(escapeHtml(req.note));
   for (const p of req.packs) {
     const title = escapeHtml((p.title ?? p.name).slice(0, TITLE_LIMIT));
     const count = p.count !== undefined ? ` — ${p.count}` : "";
     // addemoji is the install link for a custom-emoji set.
-    blocks.push(`✅ <b>${title}</b>${count}\nhttps://t.me/addemoji/${encodeURIComponent(p.name)}`);
+    const url = `https://t.me/addemoji/${encodeURIComponent(p.name)}`;
+    blocks.push(list ? `${title}. ${url}`
+                     : `✅ <b>${title}</b>${count}\n${url}`);
   }
 
   const out: string[] = [];

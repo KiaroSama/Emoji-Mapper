@@ -420,7 +420,8 @@ def worker_publish_url() -> str:
 
 
 def announce_via_worker(packs: list[dict], *, note: str = "",
-                        bot: str = "coin", timeout: int = 30) -> None:
+                        bot: str = "coin", style: str = "cards",
+                        timeout: int = 30) -> None:
     """Ask the Worker to announce finished packs. Raises on any failure.
 
     ``packs`` is a list of ``{"name", "title", "count"}`` -- the Worker builds
@@ -437,7 +438,7 @@ def announce_via_worker(packs: list[dict], *, note: str = "",
     secret = os.environ.get("WORKER_PUBLISH_SECRET", "")
     if not url or not secret:
         raise RuntimeError("WORKER_PUBLISH_URL and WORKER_PUBLISH_SECRET must both be set")
-    body = {"bot": bot, "packs": packs}
+    body = {"bot": bot, "packs": packs, "style": style}
     if note:
         body["note"] = note
     resp = requests.post(url, json=body, timeout=timeout,
@@ -449,7 +450,7 @@ def announce_via_worker(packs: list[dict], *, note: str = "",
 
 
 def announce_packs(tg: "Telegram", owner_id: int, packs: list[dict], *,
-                   bot: str, note: str = "") -> str:
+                   bot: str, note: str = "", style: str = "cards") -> str:
     """Post finished packs' add-links. Returns where they went, for the log.
 
     ONE function, because this project had three publishers -- the single-pack
@@ -468,11 +469,20 @@ def announce_packs(tg: "Telegram", owner_id: int, packs: list[dict], *,
     their ``state["sent"]`` guard; this function has no memory.
     """
     if worker_publish_url() and os.environ.get("WORKER_PUBLISH_SECRET", "").strip():
-        announce_via_worker(packs, bot=bot, note=note)
+        announce_via_worker(packs, bot=bot, note=note, style=style)
         return "the worker"
     dest = links_chat_id(owner_id)
     # Previews off: these messages are mostly addemoji URLs, and one preview
     # card per link buries them. The Worker route does the same by default.
+    #
+    # The direct path renders exactly what the Worker renders. If it did not,
+    # switching the Worker on would silently change how a real post looks.
+    if style == "list":
+        lines = [note, ""] if note else []
+        lines += [f"{p.get('title') or p['name']}. "
+                  f"https://t.me/addemoji/{p['name']}" for p in packs]
+        tg.send_message(dest, "\n".join(lines), disable_preview=True)
+        return str(dest)
     if note:
         tg.send_message(dest, note, disable_preview=True)
     for p in packs:
