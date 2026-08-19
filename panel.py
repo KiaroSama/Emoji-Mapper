@@ -582,8 +582,8 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
    drag-over target. */
 .card.fmt-static  {--fmt:#22d3ee;--fmtRing:#22d3ee66;--fmtGlow:#22d3ee2e;
                    --fmtInk:#9fe8f5;--fmtBg:#06121b;--fmtLine:#1c3a44}
-.card.fmt-animated{--fmt:#a78bfa;--fmtRing:#a78bfa66;--fmtGlow:#a78bfa2e;
-                   --fmtInk:#d6c7ff;--fmtBg:#120c1f;--fmtLine:#382a5c}
+.card.fmt-animated{--fmt:#fb923c;--fmtRing:#fb923c66;--fmtGlow:#fb923c2e;
+                   --fmtInk:#fed7aa;--fmtBg:#1c1008;--fmtLine:#5c3a1a}
 .card.fmt-video   {--fmt:#34d399;--fmtRing:#34d39966;--fmtGlow:#34d3992e;
                    --fmtInk:#a7f3d0;--fmtBg:#04170f;--fmtLine:#1b4a38}
 /* One border colour for every card. Per-format borders turned the whole grid
@@ -595,9 +595,9 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 .card.off{opacity:.42;filter:grayscale(.9)}
 /* Inner frame = the FORMAT. Outer frame (the card) = whether it is selected.
    Two questions, two frames -- one frame carrying both was the complaint. */
-.thumb{width:108px;height:108px;margin:0 auto;border-radius:10px;display:flex;
+.thumb{width:108px;height:108px;margin:3px auto 4px;border-radius:10px;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
-  border:2px solid var(--fmt,#2b6f7d);
+  outline:2px solid var(--fmt,#2b6f7d);outline-offset:2px;
   box-shadow:inset 0 0 0 1px #00000026}
 /* Backdrops so black / hollow / faint emoji are all visible. Default = checker.
    Dark-friendly mid-slate checker: light enough to reveal black/hollow emoji,
@@ -757,14 +757,14 @@ function makeCard(it){
   // tick at the right of a ~120px strip -- so "animated" ran straight under the
   // number and both were unreadable. A row cannot overlap by construction.
   const hdr = el('div','hdr');
-  // "animated" needs 67px in a 48px strip, so it rendered as "anima…".
-  // A shorter word beats an ellipsis and beats a smaller font.
-  const FMT = {animated: 'anim', static: 'static', video: 'video'};
+  // The FULL word. It was shortened to 'anim' when the header was a single
+  // ~48px strip shared with the number and the tick; the header is a centred
+  // column now, so the badge has the whole card width and 'animated' fits.
   // Number first, format under it -- both centred, per owner request.
   // Filled by renumber(), never here: a number written at build time is right
   // exactly once, and wrong from the first drag onwards.
   hdr.appendChild(el('span','pos',''));
-  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : (FMT[it.fmt] || it.fmt)));
+  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
   if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
@@ -815,7 +815,7 @@ const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
     const want = live ? t.dataset.anim : t.dataset.still;
     if (want && t.getAttribute('src') !== want) t.src = want;
   }
-}, {root: null, rootMargin: '300px'}) : null;
+}, {root: null, rootMargin: '120px'}) : null;
 
 // play() rejects when the element is detached or the browser refuses; that is
 // not an error worth surfacing, but it MUST be caught or it becomes an
@@ -838,6 +838,22 @@ function observeAnimated(){
     grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, ANIM_ON));
   }
 }
+
+// Switching to another tab or window used to change nothing: 147 animated
+// WebPs and every visible video kept decoding for a page nobody was looking at.
+// The browser throttles rAF for a hidden tab but not image animation, so this
+// has to be explicit. Coming back re-evaluates visibility rather than assuming
+// what was on screen before.
+document.addEventListener('visibilitychange', ()=>{
+  if (document.hidden) {
+    grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, false));
+    grid.querySelectorAll('img[data-anim]').forEach(img => {
+      if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still;
+    });
+  } else {
+    applyAnim();
+  }
+});
 
 // Master switch. Off = every card holds frame 0 and nothing decodes at all,
 // which is the lightest the grid can be; the observer stops swapping so it
