@@ -629,8 +629,26 @@ class DragAndDropOrdering(unittest.TestCase):
 
     def test_the_logo_card_is_not_numbered(self):
         """It is fixed first and never published, so it holds no slot."""
-        self.assertIn("if(!it.isLogo) card.appendChild(el('span','pos',''));",
-                      p.PAGE)
+        page = p.PAGE
+        hdr = page[page.index("const hdr = el('div','hdr');"):]
+        block = hdr[:hdr.index("card.appendChild(hdr);")]
+        self.assertIn("if(!it.isLogo){", block)
+        self.assertIn("hdr.appendChild(el('span','pos',''));", block)
+
+    def test_the_card_header_is_a_row_not_three_stacked_corners(self):
+        """The badge, the number and the tick shared one ~120px strip.
+
+        Absolutely positioned at left / centre / right, "animated" ran straight
+        under the number and both were unreadable. A flex row cannot overlap by
+        construction, and the badge is the only one allowed to shrink.
+        """
+        page = p.PAGE
+        self.assertIn(".hdr{display:flex", page)
+        for cls in (".badge{", ".pos{", ".tick{"):
+            rule = page[page.index(cls):]
+            self.assertNotIn("position:absolute", rule[:rule.index("}")], cls)
+        # "animated" does not fit; the badge carries a short label instead.
+        self.assertIn("FMT = {animated: 'anim'", page)
 
     def test_the_scroll_loop_cannot_outlive_the_drag(self):
         """A drag released outside the window fires no drop.

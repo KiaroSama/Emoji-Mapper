@@ -9,6 +9,44 @@ permissions:
   contents: read
 
 jobs:
+  # The Worker is TypeScript with its own vitest suite. Its own job rather than
+  # a step in `build`: it shares nothing with the Python matrix, needs Node
+  # instead of Python + ffmpeg, and running it twice (once per Python version)
+  # would be pure waste. A separate job also means a Worker failure is legible
+  # as a Worker failure.
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      # `npm ci`, never `npm install`: it installs exactly the committed
+      # lockfile and fails if package.json and the lock disagree, so CI cannot
+      # quietly test a different dependency tree than the one committed.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      # vitest stubs fetch, so nothing here can reach Telegram -- the same rule
+      # the Python suite enforces with its hermetic guard, for the same reason:
+      # a test once reached live Telegram and replaced a sticker in a published
+      # pack. `--run` is explicit so a CI runner can never land in watch mode
+      # and hang until the job timeout.
+      - name: Unit tests (vitest)
+        run: npx vitest run
+
   build:
     runs-on: ubuntu-latest
     strategy:

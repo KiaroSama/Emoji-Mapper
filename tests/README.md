@@ -80,12 +80,15 @@ does. Run it yourself after touching `worker/`:
 
 ```powershell
 cd worker
+npm ci               # exactly the committed lockfile, like CI
 npm run typecheck    # tsc --noEmit
-npm test             # vitest
+npx vitest run       # 34 tests
 ```
 
 Same hermetic rule, enforced the same way: the tests stub `fetch`, so nothing in
-them can reach Telegram. Wiring this suite into CI is an open item.
+them can reach Telegram. CI runs these in a dedicated `worker:` job — separate
+from the Python matrix, which needs Python and ffmpeg and would otherwise run
+this suite once per Python version.
 
 ## Fixtures
 

@@ -398,18 +398,24 @@ environment and refuses non-loopback sockets — never runs.
 `tests.test_entry_points.SuiteIsHermetic` fails loudly when the suite is started
 without it. Details in [`tests/README.md`](../tests/README.md).
 
-**The Worker suite is separate and is not in `check.ps1` or CI yet.** `worker/`
-is TypeScript with its own vitest suite; running it needs Node, which nothing
-else in this project does, so `check.ps1` stayed Python-only rather than
-demanding a Node toolchain from every contributor. Run it yourself after
-touching `worker/`:
+**The Worker suite runs in CI, in its own job.** `worker/` is TypeScript with
+its own vitest suite. It is a separate `worker:` job rather than a step in
+`build:` because it shares nothing with the Python matrix — it needs Node, not
+Python and ffmpeg — and running it once per Python version would be pure waste.
+A separate job also makes a Worker failure legible as a Worker failure.
+
+`check.ps1` stays Python-only: it is the command a developer runs constantly,
+and requiring a Node toolchain for it would tax everyone who never touches
+`worker/`. Run the Worker's own checks after changing it:
 
 ```bash
-cd worker && npm run typecheck && npm test
+cd worker && npm ci && npm run typecheck && npx vitest run
 ```
 
-Wiring it into CI is an open item — do it together with the npm entry
-`dependabot.yml` is also missing for `/worker`.
+CI uses `npm ci`, never `npm install`: it installs exactly the committed
+lockfile and fails if `package.json` and the lock disagree, so CI cannot quietly
+test a different dependency tree than the one committed. `dependabot.yml` has an
+`npm` entry for `/worker` so that tree gets updates like every other one.
 
 CI (`.github/workflows/ci.yml`, Python 3.11 **and** 3.12): installs both
 dependency manifests + ruff + ffmpeg, runs `ruff check .`, the import smoke

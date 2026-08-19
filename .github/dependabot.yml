@@ -9,6 +9,18 @@ updates:
     labels:
       - "dependencies"
 
+  # The Cloudflare Worker's own npm tree (typescript, vitest, wrangler).
+  # A separate entry because it lives in /worker with its own lockfile; the
+  # "/" pip entry never saw it.
+  - package-ecosystem: "npm"
+    directory: "/worker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "worker"
+
   # GitHub Actions used in workflows
   - package-ecosystem: "github-actions"
     directory: "/"
