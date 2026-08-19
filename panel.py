@@ -530,6 +530,11 @@ body.bg-gray  .thumb{background:#808a96}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
+.pos{position:absolute;top:8px;left:50%;transform:translateX(-50%);
+  font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;
+  color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
+  border-radius:6px;padding:2px 7px;min-width:26px;pointer-events:none}
+.card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
 .lbl.copyable:hover{color:var(--neon)}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(40px);
@@ -623,6 +628,9 @@ function makeCard(it){
   card.dataset.key = it.key;
   if(!it.isLogo) card.draggable = true;
   card.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
+  // Filled by renumber(), never here: a number written at build time is right
+  // exactly once, and wrong from the first drag onwards.
+  if(!it.isLogo) card.appendChild(el('span','pos',''));
   if(!it.isLogo) card.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(makeThumb(it));
   const lbl = el('div','lbl', it.label || '');
@@ -635,6 +643,20 @@ function makeCard(it){
     : it.key.slice(0,10) + '…'));
   cards.set(it.key, card);
   return card;
+}
+
+// The publish position, recomputed from ITEMS rather than tracked alongside it
+// -- ITEMS *is* the order, so anything else is a second copy that can drift.
+// Cheap enough to run on every reorder: 200 text writes, no layout thrash.
+function renumber(){
+  let n = 0;
+  for(const it of ITEMS){
+    if(it.isLogo) continue;
+    n++;
+    const card = cards.get(it.key);
+    const pos = card && card.querySelector('.pos');
+    if(pos && pos.textContent !== String(n)) pos.textContent = n;
+  }
 }
 
 // Only the cards you can actually see animate. Everything else holds frame 0,
@@ -707,6 +729,7 @@ function render(){
   grid.appendChild(frag);
   observeAnimated();
   applyAnim();
+  renumber();
   updateCount();
 }
 function updateCount(){
@@ -791,9 +814,14 @@ grid.addEventListener('dragover',e=>{
 grid.addEventListener('drop',e=>{
   if(dragKey===null) return;
   e.preventDefault();
+  stopEdgeScroll();
+  // A drop that is not ON a card is not an instruction. This used to fall back
+  // to ITEMS.length-1, so releasing over a grid gap -- and the gaps between
+  // cards are a large target -- silently threw the emoji to the very end.
   const card=e.target.closest('.card');
+  if(!card){ endDrag(); return; }
   const from = ITEMS.findIndex(x=>x.key===dragKey);
-  let to = card ? ITEMS.findIndex(x=>x.key===card.dataset.key) : ITEMS.length-1;
+  let to = ITEMS.findIndex(x=>x.key===card.dataset.key);
   const firstMovable = ITEMS.findIndex(x=>!x.isLogo);
   if(to < firstMovable) to = firstMovable;            // never before the logo
   if(from>=0 && to>=0 && to!==from){
@@ -804,14 +832,68 @@ grid.addEventListener('drop',e=>{
     const node = cards.get(moved.key);
     const ref = cards.get(ITEMS[to+1] ? ITEMS[to+1].key : null);
     grid.insertBefore(node, ref || null);
+    renumber();
     saveOrder();
   }
-  dragKey=null;
+  endDrag();
 });
-grid.addEventListener('dragend',()=>{
+grid.addEventListener('dragend',endDrag);
+
+function endDrag(){
   dragKey=null;
+  stopEdgeScroll();
   if(overCard){ overCard.classList.remove('over'); overCard=null; }
   grid.querySelectorAll('.card.drag').forEach(c=>c.classList.remove('drag'));
+}
+
+// --- Auto-scroll while dragging near an edge ----------------------------
+// Without this the drag is trapped in the current viewport: with 200 cards
+// there is no way to carry #200 up to #10, because the page will not follow
+// the pointer. Speed rises the deeper into the edge band you go, so a nudge
+// creeps and a hard push travels.
+const EDGE_BAND = 100;      // px from the top/bottom edge where scrolling starts
+const EDGE_MAX  = 42;       // px per frame at the very edge
+let edgeSpeed = 0, edgeFrame = null;
+
+function edgeScroll(y){
+  const over = EDGE_BAND - y;                       // >0 once inside the top band
+  const under = y - (innerHeight - EDGE_BAND);      // >0 once inside the bottom band
+  const depth = over > 0 ? -over : (under > 0 ? under : 0);
+  edgeSpeed = Math.max(-EDGE_MAX, Math.min(EDGE_MAX,
+                       Math.round(depth / EDGE_BAND * EDGE_MAX)));
+  if(edgeSpeed && edgeFrame === null) stepEdge();
+}
+
+function stepEdge(){
+  edgeFrame = requestAnimationFrame(()=>{
+    edgeFrame = null;
+    // Guarded on dragKey as well: a drag that ends outside the window never
+    // fires drop, and an unguarded loop would scroll the page forever.
+    if(dragKey === null || !edgeSpeed) return;
+    scrollBy(0, edgeSpeed);
+    stepEdge();
+  });
+}
+
+function stopEdgeScroll(){
+  edgeSpeed = 0;
+  if(edgeFrame !== null){ cancelAnimationFrame(edgeFrame); edgeFrame = null; }
+}
+
+// On the DOCUMENT, not the grid. Grid events bubble here anyway, and at the top
+// of the window the pointer is over the sticky header -- where the grid's own
+// handler never fires, which is exactly when scrolling up is wanted.
+document.addEventListener('dragover',e=>{
+  if(dragKey===null) return;
+  e.preventDefault();
+  edgeScroll(e.clientY);
+});
+document.addEventListener('dragend',endDrag);
+// A drop anywhere outside the grid: cancel rather than reorder by guesswork.
+document.addEventListener('drop',e=>{
+  if(dragKey===null) return;
+  e.preventDefault();
+  if(!e.target.closest('#grid')) endDrag();
 });
 
 document.getElementById('all').onclick=()=>setAll(()=>true);
