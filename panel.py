@@ -491,7 +491,7 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
   transition:border-color .18s,box-shadow .18s,opacity .18s,transform .05s;
   /* Skip layout/paint for off-screen cards. This is what keeps thousands of
      emoji scrolling smoothly; the size hint stops the scrollbar jumping. */
-  content-visibility:auto;contain-intrinsic-size:auto 186px}
+  content-visibility:auto;contain-intrinsic-size:auto 238px}
 .card:hover{border-color:var(--neon2);box-shadow:0 0 0 1px #38bdf855,0 0 18px #38bdf833}
 .card:active{transform:scale(.985)}
 .card.on{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee66,0 0 16px #22d3ee2e}
@@ -513,9 +513,11 @@ body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
 .thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
-.badge{position:absolute;top:8px;left:8px;font-size:10px;letter-spacing:.5px;
+.hdr{display:flex;align-items:center;gap:5px;margin:0 0 6px;min-height:22px}
+.badge{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:10px;letter-spacing:.5px;
   text-transform:uppercase;color:#9fd; background:#06121b;border:1px solid #1c3a44;
-  border-radius:6px;padding:2px 6px}
+  border-radius:6px;padding:2px 5px}
 .card{cursor:grab}
 .card.drag{opacity:.5;cursor:grabbing}
 .card.over{border-color:#a78bfa;box-shadow:0 0 0 2px #a78bfa88,0 0 18px #a78bfa55}
@@ -523,17 +525,17 @@ body.bg-gray  .thumb{background:#808a96}
 .card.logo:hover{border-color:#fbbf24;box-shadow:0 0 0 1px #fbbf2477,0 0 18px #fbbf2455}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
 .card.logo .lbl{color:#fbbf24}
-.tick{position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:7px;
+.tick{flex:0 0 auto;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a}
 .card.on .tick{background:var(--neon);border-color:var(--neon);box-shadow:0 0 10px #22d3ee88}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
-.pos{position:absolute;top:8px;left:50%;transform:translateX(-50%);
+.pos{flex:0 0 auto;margin-left:auto;
   font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;
   color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
-  border-radius:6px;padding:2px 7px;min-width:26px;pointer-events:none}
+  border-radius:6px;padding:2px 6px;min-width:24px;text-align:center;pointer-events:none}
 .card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
 .lbl.copyable:hover{color:var(--neon)}
@@ -627,20 +629,36 @@ function makeCard(it){
   const card = el('div', it.isLogo ? 'card logo' : 'card ' + (it.included ? 'on' : 'off'));
   card.dataset.key = it.key;
   if(!it.isLogo) card.draggable = true;
-  card.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
-  // Filled by renumber(), never here: a number written at build time is right
-  // exactly once, and wrong from the first drag onwards.
-  if(!it.isLogo) card.appendChild(el('span','pos',''));
-  if(!it.isLogo) card.appendChild(el('span','tick', it.included ? '✓' : '✕'));
+  // One flex row, not three absolutely-positioned corners. Absolute placement
+  // put the format badge at the left, the position pill at the centre and the
+  // tick at the right of a ~120px strip -- so "animated" ran straight under the
+  // number and both were unreadable. A row cannot overlap by construction.
+  const hdr = el('div','hdr');
+  // "animated" needs 67px in a 48px strip, so it rendered as "anima…".
+  // A shorter word beats an ellipsis and beats a smaller font.
+  const FMT = {animated: 'anim', static: 'static', video: 'video'};
+  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : (FMT[it.fmt] || it.fmt)));
+  if(!it.isLogo){
+    // Filled by renumber(), never here: a number written at build time is right
+    // exactly once, and wrong from the first drag onwards.
+    hdr.appendChild(el('span','pos',''));
+    hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
+  }
+  card.appendChild(hdr);
   card.appendChild(makeThumb(it));
   const lbl = el('div','lbl', it.label || '');
   // copyId is decided server-side (panel.copy_id_for) so it is unit-tested.
   if(it.copyId){ lbl.classList.add('copyable'); lbl.dataset.copy = it.copyId;
                  lbl.title = 'Click to copy ' + it.copyId; }
   card.appendChild(lbl);
-  card.appendChild(el('div','sub', it.isLogo
+  const sub = el('div','sub', it.isLogo
     ? 'always first, not part of the catalog'
-    : it.key.slice(0,10) + '…'));
+    : it.key.slice(0,10) + '…');
+  // It is the catalog's content key, not anything Telegram issued. People read
+  // "a:65e766…" as an emoji id and it is not one -- it is our own hash of the
+  // picture, which is what dedup and the media filename are keyed on.
+  if(!it.isLogo) sub.title = 'Catalog content key (our hash of the picture): ' + it.key;
+  card.appendChild(sub);
   cards.set(it.key, card);
   return card;
 }
