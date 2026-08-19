@@ -686,7 +686,9 @@ class DragAndDropOrdering(unittest.TestCase):
         # The tick is the one exception, and deliberately so.
         tick = page[page.index(".tick{"):]
         self.assertIn("position:absolute", tick[:tick.index("}")])
-        self.assertIn("FMT = {animated: 'anim'", page)
+        # The full word fits now that the header is a column, so the
+        # abbreviation that the single-strip layout forced is gone.
+        self.assertNotIn("FMT = {animated: 'anim'", page)
 
     def test_the_scroll_loop_cannot_outlive_the_drag(self):
         """A drag released outside the window fires no drop.
@@ -833,10 +835,19 @@ class UndoRedoAndFormatColours(unittest.TestCase):
 
         One frame carrying both is what the owner rejected: a per-format card
         border striped the whole dark grid.
+
+        The format frame is an OUTLINE, not a border. A border is drawn inside
+        the box, so it ate two pixels off every thumbnail and sat flush against
+        the artwork; an outline is painted outside and resizes nothing.
         """
         page = p.PAGE
         thumb = page[page.index(".thumb{"):]
-        self.assertIn("border:2px solid var(--fmt", thumb[:thumb.index("}")])
+        rule = thumb[:thumb.index("}")]
+        self.assertIn("outline:2px solid var(--fmt", rule)
+        self.assertIn("outline-offset:", rule,
+                      "without an offset the frame still touches the artwork")
+        self.assertNotIn("border:2px solid var(--fmt", rule,
+                         "an inner border shrinks the thumbnail it frames")
         card_on = page[page.index(".card.on{"):]
         self.assertIn("#22c55e", card_on[:card_on.index("}")],
                       "the selected frame must be green")
