@@ -1038,6 +1038,14 @@ The ffmpeg filter used for video:
 `fps=30,scale=100:100:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=100:100:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=yuva420p`,
 encoded with `libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0`.
 
+A **`.webm` input is decoded with `-c:v libvpx-vp9`**, named explicitly before
+`-i`. VP9 keeps alpha in a separate WebM layer that ffmpeg's default vp9 decoder
+drops without a word, so the filter chain would see no alpha and the transparent
+pad would land on an opaque frame — a re-encoded transparent emoji came out a
+black square. GIF/PNG inputs are unaffected and get no decoder override. The
+same flag is needed to *inspect* one: probing a VP9 emoji with the default
+decoder reports every one of them as opaque, correct ones included.
+
 ### 14.2 `emojikit.catalog.Catalog`
 
 ```python
