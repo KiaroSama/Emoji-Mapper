@@ -36,6 +36,7 @@ import argparse
 import contextlib
 import csv
 import json
+import logging
 import os
 import re
 import secrets
@@ -50,6 +51,13 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parent
+# This module had no logger, so every wait and retry the Bot API client made was
+# printed to the console and nowhere else. A publish that stalled 269 s on a
+# flood wait left the log file silent for the whole pause, which reads exactly
+# like a hung process. Every tool here shares this client, so they all went
+# blind together. Console output stays -- it is the live feedback -- and the
+# same lines now also reach whatever log the entry point set up.
+log = logging.getLogger("build_pack")
 
 
 # Exit codes shared by every CLI entry point, so a launcher or CI job can tell
@@ -659,6 +667,7 @@ class Telegram:
                 if "retry after" in desc.lower():
                     wait = int(payload.get("parameters", {}).get("retry_after", 5))
                     print(f"  flood wait {wait}s ({method})", flush=True)
+                    log.warning("flood wait %ss (%s)", wait, method)
                     time.sleep(wait + 1)
                     continue
                 if "stickerset_invalid" in desc.lower():
@@ -668,6 +677,8 @@ class Telegram:
                     wait = min(30 * attempt, 90, remaining)
                     print(f"  stickerset_invalid; name not released yet, "
                           f"wait {wait:.0f}s ({method})", flush=True)
+                    log.warning("stickerset_invalid; name not released yet, "
+                                "wait %.0fs (%s)", wait, method)
                     time.sleep(wait)
                     continue
                 raise BotApiError(f"{method} failed: {desc}")
@@ -678,6 +689,8 @@ class Telegram:
                     if applied is True:
                         print(f"  {method}: network error but the change is "
                               f"verified live; not re-sending", flush=True)
+                        log.warning("%s: network error but the change is "
+                                    "verified live; not re-sending", method)
                         return {"verified_applied": True}
                     if applied is None:
                         raise AmbiguousUploadError(
@@ -689,6 +702,8 @@ class Telegram:
                 wait = min(3 * attempt, 20)
                 print(f"  net retry {attempt}/{retries} ({method}): "
                       f"{self._safe(exc)} (wait {wait}s)", flush=True)
+                log.warning("net retry %d/%d (%s): %s (wait %ss)",
+                            attempt, retries, method, self._safe(exc), wait)
                 time.sleep(wait)
         raise RuntimeError(f"{method} failed after {retries} attempts")
 

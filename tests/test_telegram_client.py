@@ -487,3 +487,47 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitsReachTheLogFile(unittest.TestCase):
+    """Every pause this client takes must leave a trace in the run's log.
+
+    `build_pack` had no logger at all, so flood waits, name-lock waits and
+    network retries were printed to the console and nowhere else. A publish
+    that stalled 269 s on a flood wait wrote NOTHING to its log for the whole
+    pause -- which reads exactly like a hung process, and leaves nothing to
+    read afterwards. Every tool in the project shares this client, so they were
+    all blind together.
+    """
+
+    TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def test_a_flood_wait_is_logged_not_only_printed(self):
+        tg = bp.Telegram(self.TOKEN)
+        busy, ok = mock.Mock(), mock.Mock()
+        busy.json.return_value = {
+            "ok": False, "description": "Too Many Requests: retry after 7",
+            "parameters": {"retry_after": 7}}
+        ok.json.return_value = {"ok": True, "result": {"done": True}}
+        with mock.patch.object(tg.s, "post", side_effect=[busy, ok]), \
+             mock.patch.object(bp.time, "sleep", lambda s: None), \
+             self.assertLogs("build_pack", level="WARNING") as caught:
+            self.assertEqual(tg._call("addStickerToSet"), {"done": True})
+        line = "\n".join(caught.output)
+        self.assertIn("flood wait", line)
+        self.assertIn("7", line, "the log must say HOW LONG the pause is")
+        self.assertIn("addStickerToSet", line, "and which call is waiting")
+
+    def test_a_network_retry_is_logged_with_the_token_redacted(self):
+        """New log output must not become a new way to leak the token."""
+        tg = bp.Telegram(self.TOKEN)
+        boom = requests.ConnectionError(f"conn to /bot{self.TOKEN}/getMe reset")
+        with mock.patch.object(tg.s, "post", side_effect=boom), \
+             mock.patch.object(bp.time, "sleep", lambda s: None), \
+             self.assertLogs("build_pack", level="WARNING") as caught:
+            with self.assertRaises(RuntimeError):
+                tg._call("getMe", retries=2)
+        line = "\n".join(caught.output)
+        self.assertIn("net retry", line)
+        self.assertNotIn(self.TOKEN, line)
+        self.assertIn("[REDACTED]", line)
