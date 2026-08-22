@@ -75,6 +75,8 @@ state_*.json
 rebuild_state.json
 rebuild_dedup_state.json
 rebuild_dedup_plan.json
+# dated copies of the same runtime state, kept beside it before a repair
+rebuild_dedup_state.*.bak.json
 paprika_matches.json
 pack_audit*.json
 pack_audit*_report.txt
