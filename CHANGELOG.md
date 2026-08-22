@@ -30,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — an unpublishable .tgs was accepted at ingest and retried forever
+
+- **`validate_tgs` now refuses a subtract mask**, naming the offending layer.
+  Telegram's uploader rejects `masksProperties[].mode == "s"` while its player
+  renders it, so a sticker can be live in a published pack and still be refused
+  when the same bytes are uploaded — confirmed by downloading one from a live
+  pack and sending it back untouched, which Telegram also refused. The file is
+  otherwise entirely valid, so nothing local caught it and it only failed deep
+  inside a publish with a message naming neither the item nor the reason. Masks
+  hide inside precomposition assets, which is where the real one was, so the
+  scan walks those too. Checked against the 146 animated files Telegram did
+  accept: no false positives.
+- **A permanent refusal is recorded as a skip, not retried.** "Bad Request:
+  wrong file type" describes the bytes, not the moment, so `will retry` meant
+  retrying on every future run forever and exiting non-zero for it. The match
+  list is deliberately narrow — a skip is permanent, and mislabelling a
+  transient error would lose an emoji.
+
 ### Fixed — a publish logged nothing while it worked
 
 - **`build_pack.py` had no logger at all.** Every wait and retry the Bot API
