@@ -878,6 +878,14 @@ deliberately not recorded as sent, or the guard would skip it forever.
 Pack names are validated against `[A-Za-z0-9_]{1,64}` before they reach a public
 `t.me/addemoji/` link.
 
+**A trailing set is announced only by a run that finished cleanly** — no failed
+upload and no item skipped. A channel link says "this pack is done", and the
+end-of-run announcement used to be unconditional, so a run that ended 199 of 200
+still posted it. Nothing is lost by withholding it: `state["sent"]` never
+records it, so the next clean run announces it, and the log says why it was
+held back. A set that filled to capacity *during* the run is announced as it
+completes — that one is finished by definition.
+
 ```powershell
 cd worker; npm install
 npm run typecheck                    # tsc --noEmit
