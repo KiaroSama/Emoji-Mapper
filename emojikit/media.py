@@ -315,10 +315,19 @@ def to_video_webm(src: Path, out: Path, *, max_bytes: int = WEBM_MAX_BYTES) -> P
     """
     ff = ffmpeg_path()
     out.parent.mkdir(parents=True, exist_ok=True)
+    # VP9 stores alpha as a SEPARATE WebM layer, and ffmpeg's default vp9
+    # decoder drops it silently -- the filter chain then never sees an alpha
+    # channel and the transparent-pad colour lands on an opaque frame. Naming
+    # the libvpx decoder is what carries transparency through a re-encode.
+    # Missed for so long because every video emoji so far arrived as a download
+    # that owner rule 1 remuxes with `-c copy`, so this path had never had to
+    # re-encode a transparent source. It flattened a cue-ball emoji to a black
+    # square before anyone noticed.
+    decoder = ["-c:v", "libvpx-vp9"] if src.suffix.lower() == ".webm" else []
     last_size = -1
     for crf in (32, 40, 48, 56, 63):
         cmd = [
-            ff, "-y", "-t", str(WEBM_MAX_SECONDS), "-i", str(src),
+            ff, "-y", "-t", str(WEBM_MAX_SECONDS), *decoder, "-i", str(src),
             "-an", "-vf", _VF,
             "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
             "-b:v", "0", "-crf", str(crf),
