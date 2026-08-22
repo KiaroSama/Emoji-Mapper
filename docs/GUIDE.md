@@ -1738,3 +1738,87 @@ DUPLICATE image groups: 0 (extra duplicate stickers: 0)
 
 *This guide is the single source of truth for how Emoji Mapper works. If code
 and guide disagree, fix whichever is wrong and re-sync.*
+
+---
+
+## Appendix D — Building the next pack: the fast path
+
+Distilled from the first full 200-emoji pack. The steps are the short version of
+§6; the traps below each cost real time, and every one of them is now either
+prevented by code or answerable in seconds if you know to look.
+
+### The order that works
+
+```powershell
+$PY fetch_emoji_ids.py --ids-file ids.txt      # or fetch_pack.py / add_media.py
+$PY panel.py                                   # curate + order, then Save selection
+# check the header: it warns when the total exceeds one pack
+$PY build_collection.py --base <Base> --title "<Title>" --mixed --dry-run
+$PY build_collection.py --base <Base> --title "<Title>" --mixed
+$PY sync_order.py --base <Base>                # report; --apply to place them
+```
+
+### Count the brand logo
+
+It is the first emoji of every set and occupies one of Telegram's 200. **200
+catalog items + the logo = 201, which publishes as TWO sets.** For a single
+pack, include 199. The panel numbers the logo #1 and warns in the header, so
+trust the header, not your own count of the grid.
+
+### Probe a suspect file before a 45-minute run
+
+`uploadStickerFile` runs the **same validator** as `addStickerToSet` and touches
+no pack, so it answers "will Telegram take this file?" in one call. Worth doing
+for anything unusual before starting a long publish — a single refused emoji
+cost a whole run here.
+
+**A `.tgs` Telegram happily *plays* can still be refused on *upload*.** The
+uploader's Lottie validator is stricter than the player: a **subtract mask**
+(`mode: "s"`) is rejected, while add masks pass. Proven by sending Telegram's
+own untouched original back and having it refused. Our re-encode is innocent.
+
+The way out is to stop asking the Lottie validator at all: **render the
+animation and ship it as a VIDEO emoji.** The mask is applied by the renderer,
+so the artwork is unchanged, and `format=video` never goes near the `.tgs` path.
+
+### Expect flood waits, and read the log
+
+A 200-emoji publish takes roughly 45 minutes, most of it in Telegram's flood
+waits (240–270 s each). The log records every wait and every successful upload
+(`uploaded <key> -> <set> #<n> (n/total this run)`), so a quiet log now means
+stopped, not slow.
+
+### Stopping is safe; resuming is automatic
+
+Every upload commits its own flag, so a killed run loses nothing. The lock its
+process left behind frees itself **120 seconds** after the process dies — just
+re-run the same command. `reconcile_set` attributes anything that landed without
+being recorded.
+
+### The channel link waits for a clean run
+
+A trailing pack is announced only by a run with **no failure and no skip**. If
+one is withheld, the log says so, and the next clean run posts it.
+
+### Order is not frozen at publish time
+
+`sync_order.py` moves stickers with `setStickerPositionInSet`: no re-upload, and
+`file_id` **and** `custom_emoji_id` survive, so nobody using the emoji is
+affected. Run it report-only first; it refuses a set holding any sticker the
+catalog cannot identify.
+
+### Two things that will mislead a measurement
+
+- **Telegram re-encodes what it stores.** Never confirm an upload by exact
+  content key — compare against the file you just sent (2304 of 16384 normalised
+  bytes changed on a real sticker, yet the perceptual distance was 1 bit of 64).
+- **VP9 keeps alpha in a separate layer.** Probing a video emoji without
+  `-c:v libvpx-vp9` reports every one of them as opaque, correct ones included.
+  The same flag is required when re-encoding, or transparency is silently lost.
+
+### Keeping a copy
+
+The published files are already on disk under `collection/media/<format>/`,
+named by content key, with `collection/manifests/<set>.md` listing what went
+where. There is no export command; ask for one if you want the pack zipped in
+pack order with an index.
