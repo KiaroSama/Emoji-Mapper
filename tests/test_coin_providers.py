@@ -770,6 +770,32 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
         # this rather than carrying a second copy to drift.
         self.assertIs(fetch_cmc.publish_logos, fp.publish_logos)
 
+    def test_every_set_record_the_providers_write_carries_live(self):
+        """One file, two writers -- and only one of them filled in `live`.
+
+        rebuild_dedup subscripts ``state["sets"][-1]["live"]`` directly when it
+        picks the set to continue. A record without the key only survives
+        because an earlier loop refreshes every set from Telegram first, so the
+        two writers agreeing is what makes that safe rather than lucky. Twelve
+        sets written by the provider path had no `live`, and the state file was
+        wrong about them until someone read Telegram by hand.
+        """
+        # A set record is a dict literal keyed by "index" -- one is appended
+        # directly, the other is built as `last` and then appended, so scanning
+        # for the append alone would miss half of them.
+        src = Path(fp.__file__).read_text(encoding="utf-8")
+        records = src.split('{"index":')[1:]
+        self.assertEqual(len(records), 2,
+                         "the set-record writers moved; re-check this test")
+        for i, block in enumerate(records, 1):
+            record = block[:block.index("}")]
+            self.assertIn('"live"', record,
+                          f'set record #{i} in fetch_paprika omits "live"')
+        # And a record shaped like theirs must satisfy the rebuild's validator.
+        state = {"sets": [{"index": 1, "name": "s1", "title": "T", "live": 1}],
+                 "order": [], "cursor": 0, "in_flight": None}
+        self.assertEqual(rd._state_problem(state, None), "")
+
     def test_the_provider_intent_cannot_collide_with_the_rebuild_s(self):
         """One file, two writers, two intents -- so two distinct keys.
 
