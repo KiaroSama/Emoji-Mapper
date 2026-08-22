@@ -911,17 +911,26 @@ def write_manifest(data_dir: Path, cat: Catalog, s: dict, base: str) -> None:
         return
     md = data_dir / "manifests"
     md.mkdir(parents=True, exist_ok=True)
+    # The brand logo is the set's first sticker but not a catalog item, so
+    # len(keys) is one short of what is actually in the pack. Reporting the
+    # short number here made the manifest say 199 for a 200-emoji pack, which
+    # is the internal row count and not what anyone opening this file wants.
+    logo = 1 if s.get("logo") else 0
     lines = [f"# {s.get('title', s['name'])}", "",
-             f"Pack: https://t.me/addemoji/{s['name']}  |  format: {s['fmt']}  |  {len(keys)} emoji",
+             f"Pack: https://t.me/addemoji/{s['name']}  |  format: {s['fmt']}"
+             f"  |  {len(keys) + logo} emoji",
              "", "| # | Name | Emoji ID |", "|---|------|----------|"]
-    for i, key in enumerate(keys, 1):
+    if logo:
+        lines.append("| 1 | brand logo | |")
+    for i, key in enumerate(keys, 1 + logo):
         it = cat.get(key)
         name = ", ".join(it.keywords[:2]) if it and it.keywords else (
             it.sources[0] if it and it.sources else key)
         cid = (cat.custom_emoji_id_for(base, key) if it else "") or ""
         lines.append(f"| {i} | {name} | {cid} |")
     (md / f"{s['name']}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log.info("manifest written: manifests/%s.md (%d emoji)", s["name"], len(keys))
+    log.info("manifest written: manifests/%s.md (%d emoji)",
+             s["name"], len(keys) + logo)
 
 
 def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str],

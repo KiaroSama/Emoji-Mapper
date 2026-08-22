@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — the manifest reported the catalog's row count, not the pack's size
+
+- **It said "199 emoji" for a 200-emoji pack.** The brand logo is the set's
+  first sticker but not a catalog item, so the key list is one short of what is
+  live. The manifest is the file someone opens to see what a pack contains, and
+  it now counts the pack: the logo is row 1 and the catalog items follow from 2.
+  A set published without a logo is unaffected.
+
 ### Added — a preflight that asks Telegram before anything is published
 
 - **`build_collection.py --preflight`** offers every queued file to

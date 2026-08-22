@@ -1056,6 +1056,38 @@ class PublishThroughMain(_CatalogFixture):
             self.assertNotIn(queued[0],
                              bc.pending_keys(cat, plan, "static", "pk", set()))
 
+    def test_the_manifest_counts_the_pack_not_the_catalog_rows(self):
+        """It said "199 emoji" for a 200-emoji pack.
+
+        The brand logo is the set's first sticker but not a catalog item, so
+        the key list is one short of what is in the pack. The manifest is a
+        thing people open to see what a pack contains; reporting the internal
+        row count there is reporting the wrong number.
+        """
+        with Catalog(self.data / "catalog.db") as cat:
+            keys = [it.content_key for it in cat.all_items()]
+            rec = {"name": "pks1_by_bot", "title": "Pack 1", "fmt": "static",
+                   "keys": keys, "logo": True}
+            bc.write_manifest(self.data, cat, rec, "pk")
+            text = (self.data / "manifests" / "pks1_by_bot.md").read_text(
+                encoding="utf-8")
+        self.assertIn(f"{len(keys) + 1} emoji", text)
+        self.assertNotIn(f"{len(keys)} emoji", text)
+        self.assertIn("| 1 | brand logo |", text, "the logo is sticker 1")
+        # ...and the catalog items start at 2, not at 1.
+        self.assertIn("| 2 |", text)
+
+    def test_a_set_without_a_logo_still_counts_plainly(self):
+        with Catalog(self.data / "catalog.db") as cat:
+            keys = [it.content_key for it in cat.all_items()]
+            rec = {"name": "nologo_by_bot", "title": "No logo", "fmt": "static",
+                   "keys": keys}
+            bc.write_manifest(self.data, cat, rec, "pk")
+            text = (self.data / "manifests" / "nologo_by_bot.md").read_text(
+                encoding="utf-8")
+        self.assertIn(f"{len(keys)} emoji", text)
+        self.assertNotIn("brand logo", text)
+
     def test_preflight_refuses_early_and_publishes_nothing(self):
         """A file Telegram will not take must stop the run before it starts.
 
