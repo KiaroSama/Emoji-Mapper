@@ -453,8 +453,15 @@ def _recover_in_flight(tg: Telegram, state: dict,
         if intent.get("operation") == "create" and name not in names:
             # The set exists but was never recorded: without this every later
             # add targets the previous, already-full set.
+            # "live" belongs in every set record: rebuild_dedup subscripts it
+            # directly when it picks the set to continue, and only survives a
+            # record without it because an earlier loop happens to refresh every
+            # set from Telegram first. Twelve sets written here were missing the
+            # field, and the state file on disk was wrong about them until
+            # someone read Telegram by hand. A create leaves exactly one
+            # sticker; anything already in the set is corrected by that refresh.
             state["sets"].append({"index": intent.get("set_index"), "name": name,
-                                  "title": intent.get("title", "")})
+                                  "title": intent.get("title", ""), "live": 1})
         # Every live sticker in this family must be accounted for by SOME
         # record: that is the invariant rebuild_dedup's consistency gate
         # enforces before it will touch the packs. Its own `order` cannot hold
@@ -656,7 +663,10 @@ def publish_logos(tg: Telegram, tickers: list[str],
                     # Record the set only once it is verifiably live: a phantom
                     # entry sends every later add to a set that does not exist.
                     set_index, set_name = index, name
-                    last = {"index": index, "name": name, "title": title}
+                    # live=1: a create places exactly one sticker. See the
+                    # note on the other append -- every reader expects the field.
+                    last = {"index": index, "name": name, "title": title,
+                            "live": 1}
                     state["sets"].append(dict(last))
                 _record_provider_add(state, tk)
                 ticker_to_id[tk] = cid
