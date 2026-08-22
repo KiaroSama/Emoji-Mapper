@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — an incomplete pack announced itself in the channel
+
+- **The end-of-run announcement was unconditional**, so a run that finished 199
+  of 200 — one emoji refused by Telegram — still posted the pack link as if it
+  were done. It now goes out only from a run with no failure and no skip. A skip
+  counts as incomplete just like a failure: with permanent-refusal
+  classification an unpublishable file no longer raises, and without that the
+  very case behind this bug would have become a silent success. Nothing is lost
+  — `state["sent"]` never records it, so the next clean run announces it, and
+  the log says why it was held back.
+
 ### Fixed — an unpublishable .tgs was accepted at ingest and retried forever
 
 - **`validate_tgs` now refuses a subtract mask**, naming the offending layer.
