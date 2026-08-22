@@ -965,6 +965,23 @@ class Telegram:
         )
         return res["file_id"]
 
+    def check_uploadable(self, user_id: int, path: Path, fmt: str) -> None:
+        """Ask Telegram to accept a sticker FILE, touching no set.
+
+        ``uploadStickerFile`` runs the same validator as ``addStickerToSet``, so
+        this answers "will this file be refused?" in one call and without
+        mutating a pack. Raises ``BotApiError`` when Telegram refuses it.
+
+        Worth its own method because the refusal it catches is not one any local
+        check can predict: Telegram's uploader is stricter than its player, and
+        a `.tgs` it happily renders in a published pack can still be rejected on
+        the way in. One such file cost a 46-minute publish.
+        """
+        self._call("uploadStickerFile",
+                   data={"user_id": user_id, "sticker_format": fmt},
+                   files={"sticker": (path.name, path.read_bytes(),
+                                      _mime_for_path(path))})
+
     def create_set(self, user_id: int, name: str, title: str, png: Path,
                    emoji: str, keywords: str) -> None:
         # Upload the image inline via attach:// (1 request instead of 2).

@@ -30,6 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Added — a preflight that asks Telegram before anything is published
+
+- **`build_collection.py --preflight`** offers every queued file to
+  `uploadStickerFile`, which runs the same validator as `addStickerToSet` and
+  touches no set. A file Telegram will refuse is now found in about a minute
+  instead of at whatever point of the publish it happens to reach — one `.tgs`
+  surfaced 46 minutes in, after 99 uploads and two flood waits. A refusal stops
+  the run, so nothing is left half-published.
+- Launcher **B3** runs it between the dry run and the upload, so the default
+  path is covered without anyone having to remember the flag.
+- A transport failure is reported as "could not check", never as a bad file:
+  a dropped connection must not send someone editing artwork that was fine.
+- The publisher, the dry run and the preflight now share one `pending_keys`
+  filter, so all three answer "what is queued" the same way.
+
 ### Fixed — re-encoding a transparent WEBM flattened it to an opaque square
 
 - **`to_video_webm` did not name the alpha-capable decoder on the way in.** VP9
