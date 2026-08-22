@@ -6,6 +6,7 @@ those tools are unavailable.
 
 from __future__ import annotations
 
+import copy
 import gzip
 import json
 import shutil
@@ -185,6 +186,64 @@ class TestAnimated(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_FFMPEG, "ffmpeg/ffprobe not available")
+class SubtractMasksAreRefusedBeforeTelegramRefusesThem(unittest.TestCase):
+    """Telegram's UPLOADER rejects a subtract mask; its player does not.
+
+    A real sticker proved it: downloaded from a live pack, sent straight back
+    untouched, and refused with "Bad Request: wrong file type". Nothing local
+    could see it -- 512x512, 30 fps, 2 s, valid gzip, valid JSON -- so it entered
+    the catalog and only failed deep inside a publish, where the message names
+    neither the item nor the reason.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.lottie = json.loads(
+            (FIXTURES / "lottie" / "red_circle_512.json").read_text(encoding="utf-8"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _tgs(self, doc) -> Path:
+        out = self.tmp / "x.tgs"
+        raw = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+        with open(out, "wb") as fh:
+            with gzip.GzipFile(filename="", fileobj=fh, mode="wb", mtime=0) as gz:
+                gz.write(raw)
+        return out
+
+    def _masked(self, mode: str, *, inside_precomp: bool):
+        doc = copy.deepcopy(self.lottie)
+        layer = {"ty": 4, "nm": "masked", "ip": 0, "op": 10,
+                 "masksProperties": [{"mode": mode, "nm": "m"}]}
+        if inside_precomp:
+            doc["assets"] = [{"id": "comp_0", "layers": [layer]}]
+            doc["layers"] = [{"ty": 0, "nm": "precomp", "refId": "comp_0",
+                              "ip": 0, "op": 10}]
+        else:
+            doc["layers"] = list(doc.get("layers") or []) + [layer]
+        return self._tgs(doc)
+
+    def test_a_subtract_mask_is_rejected(self):
+        with self.assertRaises(media.MediaError) as cm:
+            media.validate_tgs(self._masked("s", inside_precomp=False))
+        self.assertIn("SUBTRACT", str(cm.exception))
+
+    def test_a_subtract_mask_INSIDE_A_PRECOMP_is_rejected(self):
+        """Where the real one was hiding.
+
+        A top-level scan sees one innocent precomp layer and passes the file.
+        """
+        with self.assertRaises(media.MediaError) as cm:
+            media.validate_tgs(self._masked("s", inside_precomp=True))
+        self.assertIn("SUBTRACT", str(cm.exception))
+
+    def test_an_ADD_mask_is_still_allowed(self):
+        """Two accepted stickers use add masks: refusing those loses real work."""
+        media.validate_tgs(self._masked("a", inside_precomp=True))
+        media.validate_tgs(self._masked("a", inside_precomp=False))
+
+
 class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
     """One decode must produce EXACTLY what two decodes produced.
 

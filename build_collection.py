@@ -422,6 +422,26 @@ def _set_is_open(s: dict) -> bool:
     return s.get("live", 0) == (1 if s.get("logo") else 0) + len(s.get("keys") or [])
 
 
+# Telegram messages that describe the FILE, not the moment. They do not become
+# true on a later run, so an item that earns one must stop being retried: the
+# publisher logged "will retry" and did exactly that on every future run, for a
+# file that can never be accepted -- and exited non-zero forever because of it.
+# Deliberately narrow: a skip is permanent, and mislabelling a transient error
+# loses an emoji. Only messages proven deterministic belong here.
+#
+# "wrong file type" was earned by a real .tgs whose only fault was a SUBTRACT
+# mask (masksProperties[].mode == "s"). Telegram's uploader refuses those while
+# its player shows them happily -- the same file downloaded from a live pack and
+# sent back untouched is refused too, so it is not something this project broke.
+_PERMANENT_FILE_REJECTIONS = ("wrong file type",)
+
+
+def _file_is_permanently_rejected(exc: Exception) -> bool:
+    """True when Telegram's complaint is about the bytes, not the moment."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _PERMANENT_FILE_REJECTIONS)
+
+
 class Unresolvable(Exception):
     """The sticker could not be looked at -- which is not "it is not ours".
 
@@ -1014,6 +1034,11 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         except RuntimeError as exc:
             if not placed and in_set == 0:
                 set_index -= 1
+            if _file_is_permanently_rejected(exc):
+                # Not a bad moment -- a bad FILE. The same bytes fail every run,
+                # so "will retry" means retrying forever and never finishing.
+                skip(key, f"Telegram refuses this file: {redact(str(exc))}")
+                continue
             # Transient/non-blank failure: log and retry on a later run (NOT
             # added to skipped), while the catalog flag keeps it dup-proof.
             log.warning("[%s] upload failed for %s (will retry): %s", fmt, key, redact(str(exc)))

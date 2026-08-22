@@ -988,6 +988,59 @@ class PublishThroughMain(_CatalogFixture):
         self.assertTrue(all("pk" in ln for ln in uploads),
                         "the set name belongs in the line")
 
+    def test_a_file_telegram_will_never_accept_stops_being_retried(self):
+        """"Will retry" on a permanent refusal means retrying forever.
+
+        A real .tgs earned "Bad Request: wrong file type" because of a subtract
+        mask. Nothing about that changes on a later run, yet every future publish
+        re-attempted it and exited non-zero for it. A refusal aimed at the BYTES
+        is recorded as a skip; a transient one still retries.
+        """
+        tg = FakeTG()
+        original = tg.add_emoji
+        calls = []
+
+        def refuse_the_first(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise bp.BotApiError(
+                    "addStickerToSet failed: Bad Request: wrong file type")
+            return original(*a, **kw)
+
+        tg.add_emoji = refuse_the_first
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self._run(tg)
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(len(state.get("skipped", [])), 1,
+                         "the refused file must be recorded, not left pending")
+
+        # A SECOND run must not touch it again.
+        before = list(calls)
+        with redirect_stdout(io.StringIO()):
+            self._run(tg)
+        self.assertEqual(len(calls), len(before),
+                         "a permanently refused file was retried on the next run")
+
+    def test_a_transient_failure_is_still_retried(self):
+        """The narrow rule must not swallow ordinary failures."""
+        tg = FakeTG()
+        original = tg.add_emoji
+        calls = []
+
+        def flaky(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("addStickerToSet failed after 5 attempts")
+            return original(*a, **kw)
+
+        tg.add_emoji = flaky
+        with redirect_stdout(io.StringIO()):
+            self._run(tg)
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(state.get("skipped", []), [],
+                         "a transient failure must stay retryable")
+
     def test_a_run_where_every_upload_failed_exits_non_zero(self):
         tg = FakeTG(fail_after=0)
         with redirect_stdout(io.StringIO()):
