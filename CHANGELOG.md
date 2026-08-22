@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — the provider path wrote set records without their live count
+
+- **`coins/fetch_paprika.py` appended set records with no `live` key**, while
+  `rebuild_dedup.py` always writes one. Twelve of the 29 coin sets were recorded
+  that way, so the state file on disk was wrong about them. Nothing crashed only
+  because the rebuild refreshes every set from Telegram before it subscripts
+  `state["sets"][-1]["live"]` — the two writers agreeing is what makes that safe
+  rather than lucky. Both provider writers now record `live`.
+- A test scans the set-record literals in the provider and fails if one omits
+  the field.
+
 ### Fixed — the manifest reported the catalog's row count, not the pack's size
 
 - **It said "199 emoji" for a 200-emoji pack.** The brand logo is the set's
