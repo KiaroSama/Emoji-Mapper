@@ -967,6 +967,27 @@ class PublishThroughMain(_CatalogFixture):
             self.assertEqual(self._run(tg, "--per-set", "1"), EXIT_PARTIAL)
 
     # ----- H-10: a run that uploaded nothing is not a success ------------- #
+    def test_each_successful_upload_is_logged(self):
+        """A healthy run used to write its plan and then nothing at all.
+
+        Only FAILURES were logged, so an hour-long publish left a log file that
+        stopped at "N pending" -- indistinguishable from a hung process while it
+        ran, and useless afterwards for asking when a given emoji went in.
+        """
+        tg = FakeTG()
+        out = io.StringIO()
+        with redirect_stdout(out),                 self.assertLogs("build_collection", level="INFO") as caught:
+            self.assertEqual(self._run(tg), EXIT_OK)
+        uploads = [ln for ln in caught.output if "] uploaded " in ln]
+        self.assertEqual(len(uploads), 2,
+                         f"one line per sticker that landed; got {caught.output}")
+        # The line has to say WHERE it went and how far along the run is, or it
+        # answers none of the questions you open a log to answer.
+        self.assertIn("1/2", uploads[0])
+        self.assertIn("2/2", uploads[1])
+        self.assertTrue(all("pk" in ln for ln in uploads),
+                        "the set name belongs in the line")
+
     def test_a_run_where_every_upload_failed_exits_non_zero(self):
         tg = FakeTG(fail_after=0)
         with redirect_stdout(io.StringIO()):
