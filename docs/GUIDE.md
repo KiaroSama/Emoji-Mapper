@@ -254,7 +254,10 @@ Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>` (video),
 `<base>a<n>` (animated) — split by format for organization (since Bot API 7.2 a
 set *may* mix formats, so this is a choice, not a requirement). Each finished
 pack DMs the owner its `t.me/addemoji/...` link, and a per-pack manifest
-(`collection/manifests/<set>.md`: name + emoji ID) is written.
+(`collection/manifests/<set>.md`: name + emoji ID) is written. The manifest
+counts the **pack**, not the catalog rows: when a brand logo leads the set it is
+row 1 and the catalog items follow from 2, because the logo is a sticker in the
+pack even though it is not a catalog item.
 
 ---
 
