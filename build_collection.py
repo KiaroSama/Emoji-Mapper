@@ -921,6 +921,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         save_json(_state_path(data_dir, base), state)
 
     n = failed = 0
+    skipped_at_start = len(skipped)   # only THIS run's skips block the link
     for key in pending:
         item = cat.get(key)
         if item is None or cat.is_published(base, key):
@@ -1082,9 +1083,27 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     for s in fmt_sets:
         write_manifest(data_dir, cat, s, base)
 
-    if fmt_sets:
+    # The trailing set is announced ONLY by a run that finished cleanly. This
+    # used to be unconditional, so a run that ended 199 of 200 -- one emoji
+    # refused by Telegram -- still posted the pack link to the channel as if it
+    # were finished. A link means "this pack is done"; publishing one for a pack
+    # that is still missing an emoji, or that hit an error, is a false claim.
+    #
+    # A skip counts as incomplete just like a failure: with permanent-refusal
+    # classification an unpublishable file no longer raises, and without this it
+    # would turn the very case that caused the complaint into a silent success.
+    #
+    # Nothing is lost by withholding it -- `state["sent"]` never records it, so
+    # the next clean run announces it. A set that filled to capacity mid-run was
+    # already announced above, and that one IS complete by definition.
+    incomplete = failed + (len(skipped) - skipped_at_start)
+    if fmt_sets and not incomplete:
         last = fmt_sets[-1]
         notify(tg, user_id, state, data_dir, base, last["name"], last["title"])
+    elif fmt_sets:
+        log.warning("[%s] not announcing %s: %d item(s) did not make it into "
+                    "this run. The link is posted once a run completes cleanly.",
+                    fmt, fmt_sets[-1]["name"], incomplete)
     return n, failed
 
 
