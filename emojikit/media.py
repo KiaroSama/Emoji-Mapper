@@ -555,6 +555,20 @@ def to_animated_tgs(src: Path, out: Path) -> Path:
     return out
 
 
+def _all_layers(lottie: dict) -> list[dict]:
+    """Every layer in a Lottie, including those inside precomposition assets.
+
+    Scanning only ``lottie["layers"]`` misses most of them: the real rejected
+    sticker kept its masked layers inside a precomp, so a top-level scan saw a
+    single innocent precomp layer and nothing else.
+    """
+    layers = list(lottie.get("layers") or ())
+    for asset in lottie.get("assets") or ():
+        if isinstance(asset, dict):
+            layers.extend(asset.get("layers") or ())
+    return [x for x in layers if isinstance(x, dict)]
+
+
 def validate_tgs(path: Path) -> None:
     """Raise MediaError unless a .tgs satisfies Telegram's animated contract.
 
@@ -594,6 +608,21 @@ def validate_tgs(path: Path) -> None:
                          f"op={lottie['op']})")
     if duration > TGS_MAX_SECONDS + 0.01:
         raise MediaError(f"{path.name}: {duration:.2f}s > {TGS_MAX_SECONDS}s")
+
+    # Telegram's UPLOADER refuses a subtract mask; its player shows one happily.
+    # A sticker can therefore be live in a published pack for years and still be
+    # rejected when you try to upload the same bytes -- verified by downloading
+    # one from a live pack and sending it straight back, untouched. Without this
+    # check the file passes every local test, enters the catalog, and only fails
+    # deep inside a publish with "Bad Request: wrong file type", which says
+    # nothing about which of the 200 items is at fault or why.
+    for layer in _all_layers(lottie):
+        for mask in layer.get("masksProperties") or ():
+            if mask.get("mode") == "s":
+                raise MediaError(
+                    f"{path.name}: layer {layer.get('nm', '?')!r} uses a "
+                    f"SUBTRACT mask, which Telegram refuses on upload "
+                    f"(add masks are fine). Re-export without it.")
 
 
 # --------------------------------------------------------------------------- #
