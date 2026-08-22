@@ -1022,6 +1022,44 @@ class PublishThroughMain(_CatalogFixture):
         self.assertEqual(len(calls), len(before),
                          "a permanently refused file was retried on the next run")
 
+    def test_a_run_that_lost_an_emoji_does_not_announce_the_pack(self):
+        """A channel link says "this pack is done". It must not lie.
+
+        The end-of-run announcement was unconditional, so a run that finished
+        199 of 200 -- one emoji refused by Telegram -- still posted the link.
+        """
+        tg = FakeTG()
+        original = tg.add_emoji
+        calls = []
+
+        def refuse_the_first(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise bp.BotApiError(
+                    "addStickerToSet failed: Bad Request: wrong file type")
+            return original(*a, **kw)
+
+        tg.add_emoji = refuse_the_first
+        with redirect_stdout(io.StringIO()):
+            self._run(tg)
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(state.get("sent", []), [],
+                         "an incomplete pack must not be announced")
+
+        # The NEXT run has nothing left to lose, so the link goes out then.
+        with redirect_stdout(io.StringIO()):
+            self._run(tg)
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(len(state.get("sent", [])), 1,
+                         "a clean run must still announce the pack")
+
+    def test_a_clean_run_announces_normally(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual(len(state.get("sent", [])), 1)
+
     def test_a_transient_failure_is_still_retried(self):
         """The narrow rule must not swallow ordinary failures."""
         tg = FakeTG()
