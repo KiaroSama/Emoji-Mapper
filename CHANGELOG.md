@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — a publish logged nothing while it worked
+
+- **`build_pack.py` had no logger at all.** Every wait and retry the Bot API
+  client makes -- flood waits, name-lock waits, network retries, and the
+  "network error but the change is verified live" case -- was printed to the
+  console and reached no log file. A publish that stalled 269 s on a flood wait
+  left its log silent for the whole pause, which reads exactly like a hung
+  process. Every tool in the project shares this client, so they were all blind
+  together. The console output stays; the same lines now also reach the log.
+- **A successful upload logged nothing.** Only failures were logged, so a
+  healthy run wrote its plan and then went quiet for an hour -- and afterwards
+  the log could not answer when a given emoji went in. There is now one line per
+  sticker that lands, with its set and how far along the run is.
+
 ### Added — reorder a pack that is already published
 
 - **`sync_order.py` makes a live pack match the curate panel** without
