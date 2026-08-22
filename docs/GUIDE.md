@@ -528,6 +528,7 @@ Examples:
 | `--limit` / `--start` | `0` / `0` | Process a slice of the source. |
 | `--state` | `state_<base>.json` | Resume file (per pack, never clobbered). |
 | `--dry-run` | off | Validate inputs without calling Telegram. |
+| `--preflight` | off | Ask Telegram to validate every queued file, then stop. Publishes nothing; non-zero exit if any file is refused. |
 
 Resumable: progress is saved to `state_<base>.json`; an interrupted/flood-limited
 run continues without recreating existing sets. Use `--dry-run` first.
@@ -1764,6 +1765,14 @@ It is the first emoji of every set and occupies one of Telegram's 200. **200
 catalog items + the logo = 201, which publishes as TWO sets.** For a single
 pack, include 199. The panel numbers the logo #1 and warns in the header, so
 trust the header, not your own count of the grid.
+
+### Preflight runs automatically
+
+Launcher **B3** now runs `--preflight` between the dry run and the upload: every
+queued file is offered to Telegram's validator first, and a refusal stops the
+run before a single sticker is published. About a minute for a 200-emoji queue,
+against the 46 it cost to discover the same file mid-publish. Run it by hand
+with `$PY build_collection.py --base <Base> --title "<T>" --preflight`.
 
 ### Probe a suspect file before a 45-minute run
 

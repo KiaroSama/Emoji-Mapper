@@ -81,6 +81,16 @@ class FakeTG:
         # file_unique_ids whose fetch FAILS -- "I could not look", as distinct
         # from "I looked and it is not ours".
         self.undownloadable: set[str] = set()
+        # preflight: every file it validated, and the names it must refuse
+        self.checked: list[str] = []
+        self.refuse: set[str] = set()
+
+    # ----- preflight probe (uploadStickerFile: validates, touches no set) --- #
+    def check_uploadable(self, user_id, path, fmt):
+        self.checked.append(path.name)
+        if path.name in self.refuse:
+            raise bp.BotApiError(
+                "uploadStickerFile failed: Bad Request: wrong file type")
 
     def probe_set_state(self, name):
         if name in self.unknown:
@@ -1022,6 +1032,71 @@ class PublishThroughMain(_CatalogFixture):
         self.assertEqual(len(calls), len(before),
                          "a permanently refused file was retried on the next run")
 
+    def test_the_dry_run_counts_what_will_publish_not_the_plan(self):
+        """It reported 200 emoji and "2 sets" with one item deselected.
+
+        The real answer was 199 + logo = exactly one set, and one-pack-or-two is
+        the whole question a dry run is asked.
+
+        Asserted on behaviour, not on the source of the dry-run branch: that
+        text check broke the moment the filter was factored into
+        ``pending_keys`` and shared with the publisher and the preflight, which
+        is exactly the change that makes the three agree.
+        """
+        with Catalog(self.data / "catalog.db") as cat:
+            keys = [it.content_key for it in cat.all_items()]
+            cat.set_inclusion({keys[0]})            # deselect one
+            plan = bc.freeze_plan(cat, self.data, "pk", ["static"])
+            queued = bc.pending_keys(cat, plan, "static", "pk", set())
+            self.assertNotIn(keys[0], queued, "a deselected item is not queued")
+            self.assertEqual(len(queued), len(keys) - 1)
+
+            # And an item already published to this base drops out too.
+            cat.mark_uploaded(queued[0], "1", base="pk", set_name="pks1")
+            self.assertNotIn(queued[0],
+                             bc.pending_keys(cat, plan, "static", "pk", set()))
+
+    def test_preflight_refuses_early_and_publishes_nothing(self):
+        """A file Telegram will not take must stop the run before it starts.
+
+        The whole point: one `.tgs` with a subtract mask surfaced 46 minutes
+        into a publish, after 99 uploads and two flood waits.
+        """
+        tg = FakeTG()
+        tg.refuse = {p.name for p in
+                     sorted((self.data / "media" / "static").glob("*"))[:1]}
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertNotEqual(self._run(tg, "--preflight"), EXIT_OK)
+        self.assertIn("REFUSED", out.getvalue())
+        self.assertEqual(tg.uploaded, [], "preflight must publish nothing")
+        self.assertFalse(tg.sets, "preflight must not create a set")
+
+    def test_preflight_passes_a_clean_queue_and_still_uploads_nothing(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self._run(tg, "--preflight"), EXIT_OK)
+        self.assertEqual(len(tg.checked), 2, "every queued file is checked")
+        self.assertIn("acceptable", out.getvalue())
+        self.assertEqual(tg.uploaded, [])
+        self.assertFalse(tg.sets)
+
+    def test_a_transport_error_is_not_reported_as_a_bad_file(self):
+        """"I could not ask" is not "Telegram said no".
+
+        Reporting a dropped connection as a refusal would send someone editing
+        artwork that was never the problem.
+        """
+        tg = FakeTG()
+
+        def boom(user_id, path, fmt):
+            tg.checked.append(path.name)
+            raise RuntimeError("uploadStickerFile failed after 5 attempts")
+
+        tg.check_uploadable = boom
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self._run(tg, "--preflight"), EXIT_OK)
+        self.assertNotIn("REFUSED", out.getvalue())
+
     def test_a_run_that_lost_an_emoji_does_not_announce_the_pack(self):
         """A channel link says "this pack is done". It must not lie.
 
@@ -1323,18 +1398,6 @@ class MixedPublishesOneFamily(unittest.TestCase):
                       "title": "T", "live": 0, "keys": []}]})
         with self.assertRaises(bc.StateError):
             bc.load_state(data, "c")
-
-    def test_the_dry_run_counts_what_will_publish_not_the_plan(self):
-        """It reported 200 emoji and "2 sets" with one item deselected.
-
-        The real answer was 199 + logo = exactly one set, and one-pack-or-two is
-        the whole question a dry run is asked.
-        """
-        src = Path(bc.__file__).read_text(encoding="utf-8")
-        block = src[src.index('if args.dry_run:'):]
-        block = block[:block.index("return EXIT_OK")]
-        self.assertIn("it.included", block)
-        self.assertIn("cat.is_published(base, k)", block)
 
 
 if __name__ == "__main__":

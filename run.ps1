@@ -441,6 +441,13 @@ function Action-PublishCollection ($py) {
           if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
                                '--token-env',$st.tokenEnv,'--dry-run')) -ne 0) {
               Write-Err "Dry-run failed (run a collect/add step first?)."; return 'ok' }
+          # Ask Telegram about every queued file BEFORE the upload starts. A
+          # single file it refuses used to surface at whatever minute of a
+          # 45-minute publish it happened to reach; this finds it in about one.
+          Write-Step "Preflight: asking Telegram to validate every queued file ..."
+          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+                               '--token-env',$st.tokenEnv,'--preflight')) -ne 0) {
+              Write-Err "Preflight refused a file. Nothing was published."; return 'ok' }
           if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
                                '--token-env',$st.tokenEnv)) -eq 0) {
               Write-Ok "Collection published." } else { Write-Err "Publish failed." }
