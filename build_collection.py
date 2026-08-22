@@ -1034,6 +1034,13 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None,
                           base=base, set_name=set_name)
         n += 1
+        # One line per sticker that actually landed. Only FAILURES used to be
+        # logged, so a healthy run wrote its plan and then nothing for the next
+        # hour -- indistinguishable from a hung process, and useless afterwards
+        # for answering "when did this emoji go in". The count is bounded by the
+        # work itself, and this is the record that makes a resume auditable.
+        log.info("[%s] uploaded %s -> %s #%d (%d/%d this run)",
+                 fmt, key, set_name, in_set, n, len(pending))
         if n % 20 == 0:
             save_json(_state_path(data_dir, base), state)
         if in_set >= per_set:
