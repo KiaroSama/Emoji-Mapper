@@ -48,6 +48,21 @@ def _make_anim_gif(path: Path, size=(64, 64), frames=6) -> Path:
     return path
 
 
+
+def _clear_pixels(webm: Path) -> int:
+    """Fully transparent pixels in frame 0, read with the ALPHA-AWARE decoder.
+
+    ffmpeg's default vp9 decoder silently drops the separate alpha layer, so a
+    naive probe reports every VP9 emoji as opaque -- including the ones that are
+    fine. Measuring with the wrong decoder is how this bug hid.
+    """
+    raw = subprocess.run(
+        [media.ffmpeg_path(), "-v", "error", "-c:v", "libvpx-vp9", "-i", str(webm),
+         "-frames:v", "1", "-vf", "format=rgba", "-f", "rawvideo",
+         "-pix_fmt", "rgba", "-"],
+        capture_output=True, check=True).stdout
+    return sum(1 for i in range(3, len(raw), 4) if raw[i] == 0)
+
 class TestDetection(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -279,6 +294,39 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
                          "frame 0 of the digest stream is not the frame the "
                          "separate call hashed")
         self.assertTrue(key.startswith("v:"))
+
+    def test_a_transparent_webm_survives_a_re_encode(self):
+        """VP9 keeps alpha in a SEPARATE layer that the default decoder drops.
+
+        Without naming the libvpx decoder on the way IN, the filter chain never
+        sees an alpha channel and the transparent pad lands on an opaque frame:
+        a cue-ball emoji came out a black square. Every video emoji until then
+        had arrived as a download that owner rule 1 remuxes with `-c copy`, so
+        this path had never re-encoded a transparent source.
+        """
+        # NON-SQUARE on purpose: the 100x100 output pads a 2:1 frame with
+        # transparent bars, and those bars are exactly what got flattened.
+        # A square source scales edge to edge and would pass either way.
+        png = _make_png(self.tmp / "dot.png", (10, 200, 90, 255), size=(80, 40))
+        src = media.to_video_webm(png, self.tmp / "src.webm")
+        again = media.to_video_webm(src, self.tmp / "again.webm")
+        self.assertGreater(_clear_pixels(again), 0,
+                           "re-encoding a transparent webm flattened it")
+
+    def test_only_a_webm_input_names_the_alpha_decoder(self):
+        """A GIF or PNG input must not be handed a vp9 decoder."""
+        seen = []
+
+        def fake_run(cmd, *a, **kw):
+            seen.append(cmd)
+            (self.tmp / "o.webm").write_bytes(b"x")     # tiny -> loop stops
+
+        with mock.patch.object(media, "_run", fake_run):
+            for name in ("a.webm", "a.gif"):
+                media.to_video_webm(self.tmp / name, self.tmp / "o.webm")
+        webm_cmd, gif_cmd = seen[0], seen[-1]
+        self.assertIn("libvpx-vp9", webm_cmd[:webm_cmd.index("-i")])
+        self.assertNotIn("libvpx-vp9", gif_cmd[:gif_cmd.index("-i")])
 
     def test_video_runs_ffmpeg_once_not_twice(self):
         gif = _make_anim_gif(self.tmp / "anim.gif")

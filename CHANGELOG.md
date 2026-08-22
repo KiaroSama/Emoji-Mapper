@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Fixed — re-encoding a transparent WEBM flattened it to an opaque square
+
+- **`to_video_webm` did not name the alpha-capable decoder on the way in.** VP9
+  stores alpha as a SEPARATE WebM layer and ffmpeg's default vp9 decoder drops
+  it silently, so the filter chain never saw an alpha channel and the
+  transparent pad landed on an opaque frame. The path had never had to
+  re-encode a transparent source before — owner rule 1 remuxes every downloaded
+  `.webm` with `-c copy` — so it flattened a cue-ball emoji to a black square
+  before anyone noticed. A GIF or PNG input is unaffected and is not handed a
+  vp9 decoder.
+- Measuring this needs the same flag: probing a VP9 emoji with the default
+  decoder reports every one of them as opaque, including the correct ones.
+
 ### Fixed — an incomplete pack announced itself in the channel
 
 - **The end-of-run announcement was unconditional**, so a run that finished 199
