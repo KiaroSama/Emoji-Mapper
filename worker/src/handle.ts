@@ -45,8 +45,12 @@ export function renderIdMessages(ids: string[], header?: string,
   let buf = header ? `${header}\n` : "";
   for (const id of ids) {
     // <tg-emoji> renders the emoji itself; the <code> block is what you copy.
-    // The sticker's OWN emoji when we know it: that is what anyone without
-    // Premium actually sees, and a row of identical stars tells them nothing.
+    // The sticker's OWN emoji when we know it. This text is the FALLBACK the
+    // tag carries: it is what shows up wherever the custom emoji cannot be
+    // rendered -- notification previews, copied-out text, older clients, and
+    // the pack being deleted later. A column of identical stars says nothing
+    // in any of those places. (Viewing custom emoji does NOT need Premium;
+    // only sending them does.)
     const glyph = escapeHtml(glyphs?.get(id) ?? "⭐");
     const line = `<tg-emoji emoji-id="${id}">${glyph}</tg-emoji> <code>${id}</code>\n`;
     if (buf.length + line.length > TEXT_LIMIT) {

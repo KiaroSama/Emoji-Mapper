@@ -55,8 +55,10 @@ Ids are resolved with `getCustomEmojiStickers` before anything is rendered.
 A `<tg-emoji>` tag falls back to its placeholder glyph when the id does not
 exist, so rendering an unchecked id makes a typo indistinguishable from a hit;
 anything Telegram cannot resolve is named instead. Resolving also yields each
-sticker's own emoji, which is what a viewer without Premium actually sees —
-better than a column of identical stars.
+sticker's own emoji, which is the tag's fallback text: what shows up wherever
+the custom emoji cannot be rendered - notification previews, copied-out text,
+older clients - and better there than a column of identical stars. Viewing
+custom emoji does not require Premium; only sending them does.
 
 `emoji_bot.py` carries the same behaviour (`parse_id_list`, `answer_typed_ids`)
 so the poller and the Worker do not drift.
