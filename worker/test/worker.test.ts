@@ -10,7 +10,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import worker from "../src/index";
 import { parseAdmins, verifyBearer, verifyWebhook } from "../src/auth";
-import { extractCustomEmojiIds } from "../src/emoji";
+import { extractCustomEmojiIds, parseIdList } from "../src/emoji";
 import { renderAnnouncement, renderIdMessages } from "../src/handle";
 import { formatLine, log, normalizeChatId, redact } from "../src/logging";
 import type { Env, TgMessage } from "../src/types";
@@ -480,5 +480,77 @@ describe("bearer check", () => {
     expect(verifyBearer(mk({ Authorization: "s" }), "s")).toBe(false);
     expect(verifyBearer(mk({ Authorization: "Bearer wrong" }), "s")).toBe(false);
     expect(verifyBearer(mk({ Authorization: "Bearer s" }), "s")).toBe(true);
+  });
+});
+
+describe("the reverse lookup: ids in, emoji out", () => {
+  const ID_A = "5893098741073715471";
+  const ID_B = "5893098741073715472";
+
+  it("accepts every shape people actually paste", () => {
+    expect(parseIdList(ID_A)).toEqual([ID_A]);
+    expect(parseIdList(`${ID_A}\n${ID_B}`)).toEqual([ID_A, ID_B]);
+    expect(parseIdList(`${ID_A}, ${ID_B}`)).toEqual([ID_A, ID_B]);
+    expect(parseIdList(`${ID_A},${ID_B}`)).toEqual([ID_A, ID_B]);
+    // the same id twice is one answer, as in the forward direction
+    expect(parseIdList(`${ID_A} ${ID_A}`)).toEqual([ID_A]);
+  });
+
+  it("ignores prose that merely contains a long number", () => {
+    // Otherwise a pasted chat id or timestamp gets answered with placeholders.
+    expect(parseIdList(`my chat id is ${ID_A} ok`)).toEqual([]);
+    expect(parseIdList("hello")).toEqual([]);
+    expect(parseIdList("42")).toEqual([]);
+    expect(parseIdList("")).toEqual([]);
+  });
+
+  it("resolves the ids and answers with the emoji in ONE message", async () => {
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      const method = String(url).split("/").pop() ?? "";
+      const body = JSON.parse(String(init.body));
+      calls.push({ method, body });
+      const result = method === "getCustomEmojiStickers"
+        ? [{ custom_emoji_id: ID_A, emoji: "✅" },
+           { custom_emoji_id: ID_B, emoji: "⚡" }]
+        : { message_id: 1, chat: { id: 1 } };
+      return new Response(JSON.stringify({ ok: true, result }),
+                          { headers: { "Content-Type": "application/json" } });
+    });
+    const env = ENV;
+    await worker.fetch(webhookReq("/tg/general", "general-hook-secret", {
+      message: { ...msgFrom(42), text: `${ID_A}, ${ID_B}` },
+    }), env, CTX);
+    expect(calls.some((c) => c.method === "getCustomEmojiStickers")).toBe(true);
+    const sends = calls.filter((c) => c.method === "sendMessage");
+    expect(sends).toHaveLength(1);
+    const text = String(sends[0].body.text);
+    // the id AND the emoji, and the sticker's own glyph -- not a fixed star
+    expect(text).toContain(`<code>${ID_A}</code>`);
+    expect(text).toContain(`<code>${ID_B}</code>`);
+    expect(text).toContain("✅");
+    expect(text).toContain("⚡");
+    expect(text).not.toContain("⭐");
+  });
+
+  it("names an id Telegram does not know instead of faking it", async () => {
+    // A <tg-emoji> tag with a bad id renders the placeholder, so an unreported
+    // typo comes back looking exactly like a success.
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      const method = String(url).split("/").pop() ?? "";
+      calls.push({ method, body: JSON.parse(String(init.body)) });
+      const result = method === "getCustomEmojiStickers"
+        ? [{ custom_emoji_id: ID_A, emoji: "✅" }]
+        : { message_id: 1, chat: { id: 1 } };
+      return new Response(JSON.stringify({ ok: true, result }),
+                          { headers: { "Content-Type": "application/json" } });
+    });
+    await worker.fetch(webhookReq("/tg/general", "general-hook-secret", {
+      message: { ...msgFrom(42), text: `${ID_A} ${ID_B}` },
+    }), ENV, CTX);
+    const text = String(calls.filter((c) => c.method === "sendMessage")[0].body.text);
+    expect(text).toContain("does not know");
+    expect(text).toContain(`<code>${ID_B}</code>`);
   });
 });

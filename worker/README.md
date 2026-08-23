@@ -41,6 +41,26 @@ messages.
 Each bot has its **own** path and its **own** webhook secret. One shared secret
 would mean a leak from either bot could forge updates for the other.
 
+## The two directions
+
+Send the bot **premium emoji** and it replies with their ids. Send it **ids**
+and it replies with the emoji — one per line, comma-separated, `, `-separated,
+or a single id.
+
+The whole message has to be ids and separators for the reverse direction to
+trigger. A long number inside a sentence is far more likely to be a chat id or
+a timestamp than something to look up.
+
+Ids are resolved with `getCustomEmojiStickers` before anything is rendered.
+A `<tg-emoji>` tag falls back to its placeholder glyph when the id does not
+exist, so rendering an unchecked id makes a typo indistinguishable from a hit;
+anything Telegram cannot resolve is named instead. Resolving also yields each
+sticker's own emoji, which is what a viewer without Premium actually sees —
+better than a column of identical stars.
+
+`emoji_bot.py` carries the same behaviour (`parse_id_list`, `answer_typed_ids`)
+so the poller and the Worker do not drift.
+
 ## Logs
 
 The channel line follows the Ad Timer Bot's log format, with the bot tag on its
