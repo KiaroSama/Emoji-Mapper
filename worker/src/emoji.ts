@@ -57,3 +57,31 @@ export function extractCustomEmojiIds(message: TgMessage): string[] {
   }
   return ids;
 }
+
+/**
+ * The reverse direction: ids typed as plain text rather than sent as emoji.
+ *
+ * The WHOLE message has to be ids and separators. A long number inside a
+ * sentence is far more likely to be a chat id, a timestamp or a price than
+ * something to look up, and answering prose with a wall of placeholder glyphs
+ * is worse than ignoring it. Newline, comma, "comma space" and a bare single
+ * id all parse; they are the shapes people actually paste.
+ *
+ * Kept in step with `emoji_bot.parse_id_list`.
+ */
+const ID_LIST = /^\d{15,25}(?:[\s,;]+\d{15,25})*$/;
+const ID_SEP = /[\s,;]+/;
+
+export function parseIdList(text: string): string[] {
+  const body = (text ?? "").trim();
+  if (!ID_LIST.test(body)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of body.split(ID_SEP)) {
+    if (part && !seen.has(part)) {
+      seen.add(part);
+      out.push(part);
+    }
+  }
+  return out;
+}

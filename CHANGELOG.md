@@ -48,6 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install -r requirements-coins.txt` fail outright
   (`No matching distribution found for numpy>=2.5.2`).
 
+### Added — the bot answers in both directions
+
+- **Send ids, get the emoji.** The bot already turned premium emoji into ids;
+  it now takes ids as plain text and replies with the emoji beside each one, in
+  one message. A single id, newline-separated, comma-separated and
+  `, `-separated all parse, and a repeated id is answered once.
+- The whole message must be ids and separators, so prose containing a long
+  number — a chat id, a timestamp — is ignored rather than answered.
+- Ids are resolved with `getCustomEmojiStickers` before rendering: a
+  `<tg-emoji>` tag shows its placeholder for an id that does not exist, so an
+  unchecked id would make a typo look exactly like a success. Unresolvable ids
+  are named. Resolving also supplies each sticker's own emoji as the tag's
+  fallback, replacing the fixed star a non-Premium viewer used to see.
+- Implemented in both the Worker (live) and `emoji_bot.py`, which the Worker's
+  extractor is documented as a faithful port of.
+
 ### Fixed — the provider path wrote set records without their live count
 
 - **`coins/fetch_paprika.py` appended set records with no `live` key**, while

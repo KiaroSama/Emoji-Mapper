@@ -238,6 +238,58 @@ class TestCopyButtonLimit(unittest.TestCase):
         self._assert_covers(["111111111"])
 
 
+class TestIdsTypedAsText(unittest.TestCase):
+    """The reverse direction: send ids, get the emoji back."""
+
+    A = "5893098741073715471"
+    B = "5893098741073715472"
+
+    def test_every_shape_people_actually_paste(self):
+        self.assertEqual(b.parse_id_list(self.A), [self.A])
+        self.assertEqual(b.parse_id_list(f"{self.A}\n{self.B}"), [self.A, self.B])
+        self.assertEqual(b.parse_id_list(f"{self.A}, {self.B}"), [self.A, self.B])
+        self.assertEqual(b.parse_id_list(f"{self.A},{self.B}"), [self.A, self.B])
+        self.assertEqual(b.parse_id_list(f"{self.A} {self.A}"), [self.A],
+                         "a repeat is one answer, as in the forward direction")
+
+    def test_prose_holding_a_long_number_is_not_a_lookup(self):
+        """Otherwise a pasted chat id or timestamp gets answered with glyphs."""
+        for text in (f"my chat id is {self.A} ok", "hello", "42", "", "  "):
+            self.assertEqual(b.parse_id_list(text), [], repr(text))
+
+    def test_it_resolves_the_ids_rather_than_trusting_them(self):
+        """A <tg-emoji> tag with a bad id renders the placeholder.
+
+        So an unresolvable id must be NAMED; rendering it anyway makes a typo
+        look exactly like a success.
+        """
+        tg = mock.Mock()
+        calls = []
+
+        def fake(method, **kw):
+            calls.append((method, kw))
+            if method == "getCustomEmojiStickers":
+                return [{"custom_emoji_id": self.A, "emoji": "✅"}]
+            return {"message_id": 1}
+
+        tg._call.side_effect = fake
+        b.answer_typed_ids(tg, 900, [self.A, self.B])
+        sent = " ".join(str(kw) for m, kw in calls if m == "sendMessage")
+        self.assertIn("does not know", sent, "the unresolved id must be reported")
+        self.assertIn(self.B, sent)
+        self.assertIn(self.A, sent)
+
+    def test_when_nothing_resolves_it_says_so_once(self):
+        tg = mock.Mock()
+        calls = []
+        tg._call.side_effect = lambda m, **kw: (
+            calls.append((m, kw)) or ([] if m == "getCustomEmojiStickers" else {}))
+        b.answer_typed_ids(tg, 900, [self.A])
+        sends = [kw for m, kw in calls if m == "sendMessage"]
+        self.assertEqual(len(sends), 1)
+        self.assertIn("does not know", str(sends[0]))
+
+
 class TestAccessControl(unittest.TestCase):
     """The bot is private: only listed user ids may use it."""
 

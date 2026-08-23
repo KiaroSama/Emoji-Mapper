@@ -826,6 +826,15 @@ instance at a time (two pollers cause Telegram 409 Conflict). Each reply is a
 **single** collapsed quote of `emoji + ID` (per-ID tap-to-copy via `<code>`)
 plus `copy_text` “Copy” button(s) underneath — not two quotes (see §8/§19).
 
+**It also runs in reverse: send it ids and it shows you the emoji.** One per
+line, comma-separated, `, `-separated, or a single id — all parse. The whole
+message must be ids and separators, so a long number inside a sentence (a chat
+id, a timestamp) is ignored rather than answered with a wall of placeholders.
+Ids are resolved through `getCustomEmojiStickers` first: a `<tg-emoji>` tag
+renders the placeholder glyph for an id that does not exist, so an unreported
+typo would come back looking exactly like a success. Anything Telegram cannot
+resolve is named in the reply.
+
 ### 12.8 `coins/` commands
 
 | Command | Purpose |
