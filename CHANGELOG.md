@@ -30,6 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   animation for its first frame, and skip rendering entirely
   (`content-visibility`).
 
+### Changed — dependency upgrades (four merged, one rejected)
+
+- **TypeScript 5.9 -> 7.0.2** and **vitest 2.1 -> 4.1.11** in `worker/`. Both
+  verified locally: `tsc --noEmit` clean and all 34 worker tests pass on the new
+  pair. Vitest 4 drops the `basic` reporter, which the project never used —
+  `npm test` and the CI job both run a plain `vitest run`.
+- **`actions/setup-node` v4 -> v7.** Its three breaking changes do not touch
+  this workflow: the action now runs on Node 24 (fine on `ubuntu-latest`),
+  automatic caching is limited to npm (npm is what we use), and the dummy
+  `NODE_AUTH_TOKEN` export is gone (no registry publish here, and no
+  `registry-url`). `node-version: "22"` is unaffected.
+- **`rlottie-python >=1.3 -> >=1.3.8`** — the pinned floor now matches the
+  version the suite has been running against all along.
+- **`numpy >=1.26 -> >=2.5.2` was NOT merged: that release does not exist.**
+  The newest published numpy is 2.4.6, so the bump would have made
+  `pip install -r requirements-coins.txt` fail outright
+  (`No matching distribution found for numpy>=2.5.2`).
+
 ### Fixed — the provider path wrote set records without their live count
 
 - **`coins/fetch_paprika.py` appended set records with no `live` key**, while
