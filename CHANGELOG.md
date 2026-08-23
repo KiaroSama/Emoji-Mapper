@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install -r requirements-coins.txt` fail outright
   (`No matching distribution found for numpy>=2.5.2`).
 
+### Fixed — reordering a pack left it unpublishable
+
+- **`sync_order.py` moved the live stickers but never rewrote the order the
+  publisher recorded.** That record is checked position by position, by
+  identity, before anything is added to a set, so a reorder made the whole
+  family unpublishable: the next publish stopped on "position 117 now holds a
+  sticker this publisher cannot identify". The record now follows the reorder.
+- It is rewritten **even when nothing needs moving**, because a set can already
+  be in the right order while the record of that order is stale — which is
+  exactly the state an earlier reorder leaves behind, and the one that blocks
+  publishing. A report-only run still writes nothing.
+
 ### Added — the bot answers in both directions
 
 - **Send ids, get the emoji.** The bot already turned premium emoji into ids;

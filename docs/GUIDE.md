@@ -705,6 +705,13 @@ Two refusals, both about identity:
 It takes the same pack-family lock as the publisher: reordering while a publish
 appends would move stickers out from under it.
 
+**It also rewrites the order the publisher recorded** (`state["sets"][n]["keys"]`)
+to match what it just made live, and does so even when nothing needed moving.
+The publisher verifies every recorded position by identity before adding to a
+set, so a reorder that left the record behind made the family unpublishable:
+`position N now holds a sticker this publisher cannot identify`. A report-only
+run writes nothing.
+
 ### 12.6 `panel.py` — curate web panel
 
 | Flag | Default | Meaning |
