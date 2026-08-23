@@ -51,6 +51,22 @@ export class Telegram {
     return body.result as T;
   }
 
+  /**
+   * Resolve custom-emoji ids to their stickers.
+   *
+   * The reverse lookup needs this rather than rendering an id straight into a
+   * <tg-emoji> tag: Telegram falls back to the placeholder glyph for an id
+   * that does not exist, so a typo would come back looking exactly like a
+   * success. It also yields each sticker's own emoji, which is a far better
+   * placeholder than a fixed star for anyone without Premium.
+   *
+   * Telegram caps one call at 200 ids; callers chunk.
+   */
+  getCustomEmojiStickers(ids: string[]): Promise<TgCustomEmojiSticker[]> {
+    return this.call<TgCustomEmojiSticker[]>("getCustomEmojiStickers",
+                                             { custom_emoji_ids: ids });
+  }
+
   sendMessage(chatId: number | string, text: string,
               opts: Record<string, unknown> = {}): Promise<TgSentMessage> {
     return this.call<TgSentMessage>("sendMessage", {
@@ -62,6 +78,11 @@ export class Telegram {
       ...opts,
     });
   }
+}
+
+export interface TgCustomEmojiSticker {
+  custom_emoji_id: string;
+  emoji?: string;
 }
 
 export interface TgSentMessage {

@@ -43,6 +43,35 @@ MSG_MAX = 3500          # keep well under Telegram's 4096-char message limit
 # --------------------------------------------------------------------------- #
 # Pure helpers (unit-tested)
 # --------------------------------------------------------------------------- #
+# The reverse direction: ids typed as plain text rather than sent as emoji.
+#
+# The WHOLE message has to be ids and separators. A long number inside a
+# sentence is far more likely to be a chat id, a timestamp or a price than
+# something to look up, and answering prose with a wall of placeholder glyphs
+# is worse than ignoring it. Newline, comma, "comma space" and a bare single id
+# all parse; they are the shapes people actually paste.
+_ID_LIST_RE = re.compile(r"^\d{15,25}(?:[\s,;]+\d{15,25})*$")
+_ID_SEP_RE = re.compile(r"[\s,;]+")
+
+
+def parse_id_list(text: str) -> list[str]:
+    """Hand-typed custom-emoji ids, in the order given, de-duplicated.
+
+    Returns [] for anything that is not a pure id list, which is what keeps
+    ordinary conversation from being treated as a lookup.
+    """
+    body = (text or "").strip()
+    if not body or not _ID_LIST_RE.match(body):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in _ID_SEP_RE.split(body):
+        if part and part not in seen:
+            seen.add(part)
+            out.append(part)
+    return out
+
+
 def extract_custom_emoji_ids(message: dict) -> list[str]:
     """Ordered, de-duplicated custom_emoji_ids from a message's entities.
 
@@ -247,6 +276,8 @@ START_TEXT = (
     "matter) → I reply with a collapsed quote of <i>emoji + ID</i> (tap an ID to "
     "copy just it) and a <b>Copy all</b> button to copy every ID at once.\n"
     "• Send or forward a <b>post with premium emoji</b> → same reply.\n"
+    "• Or go the other way: <b>send me ids</b> and I show you the emoji. "
+    "One per line, comma-separated, or a single id, all work.\n"
     "• <b>Add me to a channel/group</b> (as admin) → I DM you the premium emoji IDs "
     "from new posts there.\n\n"
     "Note: I can only read posts I receive after joining (Telegram doesn't let bots "
@@ -343,6 +374,34 @@ def allowed_user_ids() -> set[int]:
     return out
 
 
+def answer_typed_ids(tg: Telegram, chat_id: int, ids: list[str], *,
+                     reply_to: int | None = None) -> None:
+    """Reverse lookup: the user typed ids, so show them the emoji.
+
+    Resolved through getCustomEmojiStickers rather than rendered straight into
+    a <tg-emoji> tag, because Telegram silently falls back to the placeholder
+    glyph for an id that does not exist -- so a typo would come back looking
+    exactly like a success. An id it cannot resolve is named instead.
+    """
+    known = enrich_labels(tg, ids)
+    found = [i for i in ids if i in known]
+    missing = [i for i in ids if i not in known]
+    header = None
+    if missing:
+        shown = ", ".join(f"<code>{html.escape(i)}</code>" for i in missing[:10])
+        more = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
+        header = f"⚠️ Telegram does not know {len(missing)} of these: {shown}{more}"
+    if found:
+        send_reply(tg, chat_id, found, reply_to=reply_to, header=header)
+        return
+    # Nothing resolved: say so plainly rather than send an empty-looking reply.
+    data = {"chat_id": chat_id, "text": header or "No usable ids in that message.",
+            "parse_mode": "HTML", "disable_web_page_preview": True}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+    tg._call("sendMessage", retries=1, data=data)
+
+
 def handle_update(tg: Telegram, owner_id: int, upd: dict,
                   allowed: set[int] | None = None) -> None:
     allowed = allowed_user_ids() if allowed is None else allowed
@@ -368,6 +427,13 @@ def handle_update(tg: Telegram, owner_id: int, upd: dict,
         if text.startswith("/start") or text.startswith("/help") or text.startswith("/menu"):
             tg._call("sendMessage", data={"chat_id": chat_id, "text": START_TEXT,
                                           "parse_mode": "HTML"})
+            return
+        typed = parse_id_list(text)
+        if typed:
+            # Ids typed as text and premium emoji cannot both be the subject of
+            # one message: a message that is nothing but digits and separators
+            # carries no custom_emoji entity to extract.
+            answer_typed_ids(tg, chat_id, typed, reply_to=msg.get("message_id"))
             return
         ids = extract_custom_emoji_ids(msg)
         if chat.get("type") == "private":

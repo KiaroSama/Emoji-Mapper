@@ -9,7 +9,7 @@
  */
 
 import { escapeHtml, Telegram } from "./telegram";
-import { extractCustomEmojiIds } from "./emoji";
+import { extractCustomEmojiIds, parseIdList } from "./emoji";
 import { isAdmin } from "./auth";
 import type { PublishRequest, TgMessage, TgUpdate } from "./types";
 
@@ -20,7 +20,8 @@ const DENIED_TEXT =
 const START_TEXT =
   "Send me any message containing <b>premium (custom) emoji</b> and I will " +
   "reply with their ids.\n\nWorks with emoji in the text, in a caption, and " +
-  "inside a quoted reply.";
+  "inside a quoted reply.\n\nOr the other way round: <b>send me ids</b> and I " +
+  "show you the emoji. One per line, comma-separated, or a single id.";
 
 /** Telegram rejects a sendMessage over 4096 characters. */
 const TEXT_LIMIT = 4096;
@@ -34,7 +35,8 @@ const TEXT_LIMIT = 4096;
 export const LOG_ECHO = "log-echo";
 
 /** Split ids into messages that stay under the limit. */
-export function renderIdMessages(ids: string[], header?: string): string[] {
+export function renderIdMessages(ids: string[], header?: string,
+                                 glyphs?: Map<string, string>): string[] {
   if (ids.length === 0) {
     return [header ? `${header}\nNo premium emoji in that message.`
                    : "No premium emoji in that message."];
@@ -43,7 +45,10 @@ export function renderIdMessages(ids: string[], header?: string): string[] {
   let buf = header ? `${header}\n` : "";
   for (const id of ids) {
     // <tg-emoji> renders the emoji itself; the <code> block is what you copy.
-    const line = `<tg-emoji emoji-id="${id}">⭐</tg-emoji> <code>${id}</code>\n`;
+    // The sticker's OWN emoji when we know it: that is what anyone without
+    // Premium actually sees, and a row of identical stars tells them nothing.
+    const glyph = escapeHtml(glyphs?.get(id) ?? "⭐");
+    const line = `<tg-emoji emoji-id="${id}">${glyph}</tg-emoji> <code>${id}</code>\n`;
     if (buf.length + line.length > TEXT_LIMIT) {
       out.push(buf.trimEnd());
       buf = "";
@@ -64,6 +69,50 @@ async function reply(tg: Telegram, chatId: number | string, ids: string[],
       ...(i === 0 && opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
     });
   }
+}
+
+/** Telegram resolves at most 200 ids per call. */
+const RESOLVE_CHUNK = 200;
+
+/**
+ * Reverse lookup: the user typed ids, so show them the emoji.
+ *
+ * Resolved through getCustomEmojiStickers rather than rendered straight into a
+ * <tg-emoji> tag, because Telegram silently falls back to the placeholder glyph
+ * for an id that does not exist -- so a typo would come back looking exactly
+ * like a success. An id it cannot resolve is named instead.
+ */
+async function replyToTypedIds(tg: Telegram, chatId: number | string,
+                               ids: string[], replyTo?: number): Promise<string> {
+  const glyphs = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += RESOLVE_CHUNK) {
+    const found = await tg.getCustomEmojiStickers(ids.slice(i, i + RESOLVE_CHUNK));
+    for (const st of found ?? []) {
+      if (st?.custom_emoji_id) glyphs.set(st.custom_emoji_id, st.emoji ?? "⭐");
+    }
+  }
+  const known = ids.filter((id) => glyphs.has(id));
+  const unknown = ids.filter((id) => !glyphs.has(id));
+  let header: string | undefined;
+  if (unknown.length) {
+    const shown = unknown.slice(0, 10).map((id) => `<code>${id}</code>`).join(", ");
+    const more = unknown.length > 10 ? ` (+${unknown.length - 10} more)` : "";
+    header = `⚠️ Telegram does not know ${unknown.length} of these: ${shown}${more}`;
+  }
+  if (known.length === 0) {
+    await tg.sendMessage(chatId, header ?? "No usable ids in that message.", {
+      parse_mode: "HTML",
+      ...(replyTo ? { reply_to_message_id: replyTo } : {}),
+    });
+    return `typed:0/${ids.length}`;
+  }
+  for (const [n, text] of renderIdMessages(known, header, glyphs).entries()) {
+    await tg.sendMessage(chatId, text, {
+      parse_mode: "HTML",
+      ...(n === 0 && replyTo ? { reply_to_message_id: replyTo } : {}),
+    });
+  }
+  return `typed:${known.length}/${ids.length}`;
 }
 
 /**
@@ -95,6 +144,13 @@ export async function handleUpdate(tg: Telegram, update: TgUpdate,
     if (/^\/(start|help|menu)\b/.test(text)) {
       await tg.sendMessage(msg.chat.id, START_TEXT, { parse_mode: "HTML" });
       return "greeted";
+    }
+    // Ids typed as text and premium emoji cannot both be the subject of one
+    // message: a message that is nothing but digits and separators carries no
+    // custom_emoji entity to extract.
+    const typed = parseIdList(text);
+    if (typed.length) {
+      return await replyToTypedIds(tg, msg.chat.id, typed, msg.message_id);
     }
     const ids = extractCustomEmojiIds(msg);
     await reply(tg, msg.chat.id, ids, { replyTo: msg.message_id });
