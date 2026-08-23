@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +67,68 @@ class ReorderIsIdempotent(unittest.TestCase):
             order.insert(target, order.pop(order.index(cid)))
         again = so.plan_moves(_live(*order), ["a", "b", "c"], 1)
         self.assertEqual(again, [], "a synced set must need no further moves")
+
+
+class TheRecordedOrderFollowsTheLiveOne(unittest.TestCase):
+    """Reordering a set must rewrite what the publisher recorded about it.
+
+    The publisher checks every recorded position by identity before adding to a
+    set, so a reorder that leaves the record behind makes the whole family
+    unpublishable. It did: the next publish stopped on "position 117 now holds a
+    sticker this publisher cannot identify".
+    """
+
+    class _Cat:
+        def __init__(self, pairs):
+            self._items = [type("It", (), {"custom_emoji_id": c,
+                                           "content_key": k})()
+                           for c, k in pairs]
+
+        def all_items(self):
+            return list(self._items)
+
+    def _tg(self):
+        tg = mock.Mock()
+        tg.set_sticker_position = mock.Mock()
+        return tg
+
+    def _set(self, live_cids, name="pk1_by_bot"):
+        return {"name": name, "logo": True,
+                "stickers": _live("logo", *live_cids)}
+
+    def test_a_reorder_rewrites_the_recorded_keys(self):
+        cat = self._Cat([("a", "s:a"), ("b", "s:b"), ("c", "s:c")])
+        so.desired_order = lambda _c, live: [c for c in ("a", "b", "c") if c in live]
+        tg = self._tg()
+        tg.get_sticker_set.return_value = {"stickers": _live("logo", "c", "a", "b")}
+        rec = {"name": "pk1_by_bot", "logo": True, "keys": ["s:c", "s:a", "s:b"]}
+        so.sync_set(tg, cat, rec, apply=True)
+        self.assertEqual(rec["keys"], ["s:a", "s:b", "s:c"],
+                         "the record must describe the order the set is in now")
+
+    def test_a_stale_record_is_repaired_even_with_nothing_to_move(self):
+        """The set can already be right while the RECORD is wrong.
+
+        That is exactly what an earlier reorder left behind, so the repair
+        cannot be gated on there being moves to make.
+        """
+        cat = self._Cat([("a", "s:a"), ("b", "s:b")])
+        so.desired_order = lambda _c, live: [c for c in ("a", "b") if c in live]
+        tg = self._tg()
+        tg.get_sticker_set.return_value = {"stickers": _live("logo", "a", "b")}
+        rec = {"name": "pk1_by_bot", "logo": True, "keys": ["s:b", "s:a"]}
+        self.assertEqual(so.sync_set(tg, cat, rec, apply=True), 0)
+        tg.set_sticker_position.assert_not_called()
+        self.assertEqual(rec["keys"], ["s:a", "s:b"])
+
+    def test_a_report_only_run_leaves_the_record_alone(self):
+        cat = self._Cat([("a", "s:a"), ("b", "s:b")])
+        so.desired_order = lambda _c, live: [c for c in ("a", "b") if c in live]
+        tg = self._tg()
+        tg.get_sticker_set.return_value = {"stickers": _live("logo", "b", "a")}
+        rec = {"name": "pk1_by_bot", "logo": True, "keys": ["s:b", "s:a"]}
+        so.sync_set(tg, cat, rec, apply=False)
+        self.assertEqual(rec["keys"], ["s:b", "s:a"], "a dry run must write nothing")
 
 
 if __name__ == "__main__":

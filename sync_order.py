@@ -31,7 +31,8 @@ import os
 import time
 from pathlib import Path
 
-from build_collection import _lock_path, _state_path, load_state
+from build_collection import (_lock_path, _state_path, load_state,
+                              save_json)
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, LockBusy, Telegram,
                         exclusive_lock, load_env)
 from emojikit.catalog import Catalog
@@ -106,15 +107,27 @@ def sync_set(tg: Telegram, cat: Catalog, rec: dict, *, apply: bool) -> int:
     if not moves:
         log.info("%s: already in the panel's order (%d stickers).",
                  name, len(live))
-        return 0
-
-    log.info("%s: %d of %d stickers need moving.", name, len(moves), len(live))
-    for target, cid, file_id in moves:
-        if not apply:
-            log.info("  would move %s -> position %d", cid, target)
-            continue
-        tg.set_sticker_position(file_id, target)
-        time.sleep(MOVE_DELAY)
+    else:
+        log.info("%s: %d of %d stickers need moving.", name, len(moves), len(live))
+        for target, cid, file_id in moves:
+            if not apply:
+                log.info("  would move %s -> position %d", cid, target)
+                continue
+            tg.set_sticker_position(file_id, target)
+            time.sleep(MOVE_DELAY)
+    # Rewritten even when nothing moved: a set can be in the right order while
+    # the RECORD of that order is stale -- which is exactly what an earlier
+    # reorder left behind, and what blocks the next publish.
+    if apply:
+        # The publisher records the order it uploaded in and refuses to add to a
+        # set whose live order no longer matches it -- by identity, position by
+        # position. Reordering without rewriting that record leaves the whole
+        # family unpublishable: the next publish stopped dead on "position 117
+        # now holds a sticker this publisher cannot identify". The reorder is
+        # legitimate, so the record follows it.
+        key_by_cid = {it.custom_emoji_id: it.content_key
+                      for it in cat.all_items() if it.custom_emoji_id}
+        rec["keys"] = [key_by_cid[cid] for cid in desired]
     return len(moves)
 
 
@@ -164,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
                         failed += 1
                     else:
                         total += n
+                if args.apply:
+                    # Written under the same lock that made the moves, so the
+                    # record cannot be left describing a set it no longer
+                    # matches.
+                    save_json(_state_path(data_dir, args.base), state)
             finally:
                 cat.close()
     except LockBusy as exc:
