@@ -60,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<tg-emoji>` tag shows its placeholder for an id that does not exist, so an
   unchecked id would make a typo look exactly like a success. Unresolvable ids
   are named. Resolving also supplies each sticker's own emoji as the tag's
-  fallback, replacing the fixed star a non-Premium viewer used to see.
+  fallback, replacing a fixed star wherever the tag cannot render
+  (notification previews, copied-out text, older clients).
 - Implemented in both the Worker (live) and `emoji_bot.py`, which the Worker's
   extractor is documented as a faithful port of.
 

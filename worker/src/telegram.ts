@@ -58,7 +58,8 @@ export class Telegram {
    * <tg-emoji> tag: Telegram falls back to the placeholder glyph for an id
    * that does not exist, so a typo would come back looking exactly like a
    * success. It also yields each sticker's own emoji, which is a far better
-   * placeholder than a fixed star for anyone without Premium.
+   * fallback than a fixed star wherever the tag cannot render -- notification
+   * previews, copied-out text, older clients.
    *
    * Telegram caps one call at 200 ids; callers chunk.
    */
