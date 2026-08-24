@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -1353,6 +1354,29 @@ def _detect_bot_username() -> str:
         return ""
 
 
+def _port_holder(port: int) -> int | None:
+    """The pid listening on ``port``, or None when it cannot be determined.
+
+    Best-effort and never fatal: it runs only to improve an error message, so a
+    missing tool, a parse surprise or a slow call must not turn "the panel is
+    already open" into a traceback.
+    """
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()          # proto  local  foreign  state  pid
+        if (len(parts) >= 5 and parts[3].upper() == "LISTENING"
+                and parts[1].endswith(f":{port}")):
+            try:
+                return int(parts[4])
+            except ValueError:
+                return None
+    return None
+
+
 def main() -> int:
     # BEFORE setup_logging: the logger registers the literal values of
     # SECRET_ENV_KEYS so they can be masked wherever they appear, and it can only
@@ -1424,10 +1448,17 @@ def main() -> int:
         # Say what to do about it. A traceback here reads as "the panel is
         # broken" when the real state is "the panel is already open".
         log.error("cannot listen on port %d: %s", args.port, exc)
+        pid = _port_holder(args.port)
+        # NAME the process. "Press Ctrl+C in the window running it" is useless
+        # when the holder was started detached and has no window -- which is how
+        # every stray one so far got there.
+        stop = (f"  Or stop it:   taskkill /PID {pid} /F" if pid
+                else "  Or stop it:   press Ctrl+C in the window running it")
+        who = f" (pid {pid})" if pid else ""
         print(
-            f"\nA panel is already running on port {args.port}." + "\n"
+            f"\nA panel is already running on port {args.port}{who}." + "\n"
             f"  Open it:      http://127.0.0.1:{args.port}/" + "\n"
-            "  Or stop it:   press Ctrl+C in the window running it" + "\n"
+            + stop + "\n"
             f"  Or use another port:  panel.py --port {args.port + 1}" + "\n",
             flush=True)
         return 2

@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install -r requirements-coins.txt` fail outright
   (`No matching distribution found for numpy>=2.5.2`).
 
+### Changed — "port already in use" now names the process holding it
+
+- The advice was "press Ctrl+C in the window running it", which helps nobody
+  when the holder was started detached and has no window — which is how every
+  stray one so far got there. The message now carries the pid and the exact
+  `taskkill` line. The lookup is best-effort and can never raise: it exists only
+  to improve an error message.
+
 ### Changed — the curate panel moved to port 9450
 
 - 8765 is a busy neighbourhood and a stray listener there made the launcher's
