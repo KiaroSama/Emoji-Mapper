@@ -1045,6 +1045,56 @@ class OnlyFinishedPacksLeaveTheGrid(unittest.TestCase):
             self.assertTrue(cat.is_published("pk", f"s:item{0:030d}"))
 
 
+class SavingFromAFilteredGridKeepsHiddenChoices(unittest.TestCase):
+    """A view that hides things cannot speak for what it hides.
+
+    `set_inclusion` re-includes every key it is NOT given, so a save posted
+    from a grid that hides finished packs would silently re-include every
+    hidden item that had been deselected. The panel already carries a comment
+    about an earlier variant of exactly this; the filter reintroduced it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        self.db = self.data / "catalog.db"
+        with Catalog(self.db) as cat:
+            for i in range(4):
+                img = self.data / "media" / "static" / f"i{i}.png"
+                _make_png(img)
+                cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
+                        emojis=["😀"], keywords=[f"item{i}"])
+            for i in (0, 1):
+                cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
+                                  base="pk", set_name="pk1_by_bot")
+            # the owner deselected one of the FINISHED pack's emoji
+            cat.set_inclusion({f"s:item{0:030d}"})
+        (self.data / "publish_pk.json").write_text(json.dumps({
+            "sets": [{"name": "pk1_by_bot", "index": 1, "live": p.PER_SET,
+                      "logo": True}]}), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_hidden_exclusion_survives_a_save_from_the_filtered_grid(self):
+        with Catalog(self.db) as cat:
+            view, _bk, hidden = p.build_view(cat, "", False, self.data)
+        self.assertEqual(hidden, 2, "the finished pack is out of the grid")
+        visible = {v["key"] for v in view if not v.get("isLogo")}
+        self.assertNotIn(f"s:item{0:030d}", visible)
+
+        # What the handler does: intersect the request with what is shown, then
+        # carry every hidden exclusion through.
+        raw: set[str] = set()                       # nothing deselected on screen
+        with Catalog(self.db) as cat:
+            hidden_excluded = {it.content_key for it in cat.all_items()
+                               if not it.included and it.content_key not in visible}
+            cat.set_inclusion((raw & visible) | hidden_excluded)
+            still = {it.content_key for it in cat.all_items() if not it.included}
+        self.assertEqual(still, {f"s:item{0:030d}"},
+                         "the hidden de-selection must not be undone")
+
+
 class TheBusyPortMessageNamesTheProcess(unittest.TestCase):
     """"Press Ctrl+C in the window running it" is useless with no window.
 
