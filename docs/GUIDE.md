@@ -231,7 +231,7 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 ### 6.3 Curate — pick what to publish (web panel)
 
 ```powershell
-.venv\Scripts\python.exe panel.py [--data-dir collection] [--port 8765] [--preview-fps 15] [--no-open]
+.venv\Scripts\python.exe panel.py [--data-dir collection] [--port 9450] [--preview-fps 15] [--no-open]
 ```
 
 Dark neon panel: every emoji is a big labelled card (static=image,
@@ -718,7 +718,7 @@ run writes nothing.
 |------|---------|---------|
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--all` | off | Also show emoji already live in a pack. |
-| `--port` | `8765` | Local port. |
+| `--port` | `9450` | Local port. |
 | `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
 | `--no-open` | off | Don't auto-open the browser. |
 
@@ -775,7 +775,8 @@ triggers the browser's "leave site?" prompt.
 **Never point automated UI checks at `collection/`.** Reordering is what this
 panel does, so a synthetic drag event *is* a write — there is no careful way to
 test it against real data. `scripts/panel_sandbox.py` clones the catalog to a
-temp directory, serves it on port **8766** (never 8765), and deletes the clone
+temp directory, serves it on the real panel's port + 1 (imported from
+`panel.DEFAULT_PORT`, never typed again), and deletes the clone
 on exit:
 
 ```powershell
@@ -1310,7 +1311,7 @@ the base coin's id. This filled the NOWPayments inventory to 354/354.
 
 # 2) Open the curate panel and untick anything you don't want, then Save:
 .venv\Scripts\python.exe panel.py
-#    (browser opens http://127.0.0.1:8765/ ; click cards / Shift+click ranges / Save)
+#    (browser opens http://127.0.0.1:9450/ ; click cards / Shift+click ranges / Save)
 
 # 3) Preview the publish plan:
 .venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
@@ -1718,7 +1719,7 @@ Done. new=80 dedup=0 failed=0
   catalog static: 80 total (80 pending upload)
 
 > python panel.py
-Emoji curate panel: http://127.0.0.1:8765/
+Emoji curate panel: http://127.0.0.1:9450/
 # (open browser, untick a few, click Save -> "Saved ✓  76 included · 4 excluded")
 
 > python build_collection.py --base accts --title "Accounts" --token-env GENERAL_BOT_TOKEN --dry-run

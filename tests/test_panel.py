@@ -1025,6 +1025,33 @@ class FinishedEmojiStayOutOfTheGrid(unittest.TestCase):
                             "the publication record must survive being hidden")
 
 
+class TheSandboxCannotTakeTheRealPanelsPort(unittest.TestCase):
+    """One number, one place.
+
+    The sandbox exists to stay off the port a real panel serves on. Both sides
+    used to spell the number out, so moving the panel would have silently
+    pointed the sandbox at it -- and a synthetic drag against the REAL catalog
+    is how three hours of manual ordering were destroyed once.
+    """
+
+    def _sandbox(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import panel_sandbox
+        return panel_sandbox
+
+    def test_the_sandbox_derives_its_port_from_the_panel(self):
+        ps = self._sandbox()
+        self.assertEqual(ps.PANEL_PORT, p.DEFAULT_PORT,
+                         "the sandbox must read the panel's port, not repeat it")
+        self.assertNotEqual(ps.DEFAULT_PORT, p.DEFAULT_PORT)
+
+    def test_it_refuses_to_be_told_to_use_it(self):
+        ps = self._sandbox()
+        with self.assertRaises(SystemExit) as caught:
+            ps.main(["--port", str(p.DEFAULT_PORT)])
+        self.assertIn(str(p.DEFAULT_PORT), str(caught.exception))
+
+
 class OnlyOnePanelPerPort(unittest.TestCase):
     """A second panel must REFUSE the port, not quietly bind over the first.
 
