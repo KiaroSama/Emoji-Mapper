@@ -1025,6 +1025,48 @@ class FinishedEmojiStayOutOfTheGrid(unittest.TestCase):
                             "the publication record must survive being hidden")
 
 
+class TheBusyPortMessageNamesTheProcess(unittest.TestCase):
+    """"Press Ctrl+C in the window running it" is useless with no window.
+
+    Every stray panel so far was started detached, so the advice pointed at a
+    window that does not exist. The pid does.
+    """
+
+    SAMPLE = chr(10).join([
+        "Active Connections",
+        "",
+        "  Proto  Local Address      Foreign Address    State       PID",
+        "  TCP    127.0.0.1:9450     0.0.0.0:0          LISTENING   4321",
+        "  TCP    127.0.0.1:9451     0.0.0.0:0          LISTENING   9999",
+        "  TCP    10.0.0.5:59450     1.2.3.4:443        ESTABLISHED 1111",
+    ])
+
+    def _holder(self, port, stdout=None, boom=None):
+        def run(*a, **kw):
+            if boom:
+                raise boom
+            text = self.SAMPLE if stdout is None else stdout
+            return type("R", (), {"stdout": text})()
+
+        with mock.patch.object(p.subprocess, "run", run):
+            return p._port_holder(port)
+
+    def test_it_finds_the_listener(self):
+        self.assertEqual(self._holder(9450), 4321)
+        self.assertEqual(self._holder(9451), 9999)
+
+    def test_an_established_connection_is_not_a_listener(self):
+        self.assertIsNone(self._holder(443))
+
+    def test_a_port_nobody_listens_on_is_none(self):
+        self.assertIsNone(self._holder(1234))
+
+    def test_it_never_raises(self):
+        """It runs only to improve an error message."""
+        self.assertIsNone(self._holder(9450, boom=OSError("no netstat")))
+        self.assertIsNone(self._holder(9450, stdout="garbage" + chr(10)))
+
+
 class TheSandboxCannotTakeTheRealPanelsPort(unittest.TestCase):
     """One number, one place.
 
