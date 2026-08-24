@@ -828,13 +828,22 @@ logo itself is never part of the catalog and is only actually inserted by
 `build_collection.py` at publish time (see §12.5). For the coin bot, or if the
 logo file is missing, the card is simply not shown.
 
-**Emoji already live in a pack are hidden.** The panel arranges the pack being
-BUILT, and once the first family was published its 200 finished emoji sat in
-front of the handful still being curated. The header says how many are hidden —
-a filter nobody can see is indistinguishable from having lost the items. They
-are hidden, never deleted: those catalog rows are what dedup recognises a
-re-download by, what maps a source premium id to ours, and what `sync_order`
-reads to re-sort an already published set. `--all` brings them back.
+**Emoji in a FINISHED pack are hidden** — finished meaning the set is full, so
+nothing can be added to it again. The panel arranges the pack being BUILT.
+
+"Already published" was the first rule and it was wrong: it hid the 14 emoji of
+a half-empty second pack along with the 200 of the finished first one, leaving
+an empty grid. An emoji in a set still being filled is still part of the pack
+being built. Fullness is read from the publishers' own state files, not counted
+from the catalog: the brand logo takes a slot without being a catalog row, so
+counting rows calls a full set one short. An item whose set cannot be resolved
+stays visible — unknown is not finished.
+
+The header says how many are hidden; a filter nobody can see is
+indistinguishable from having lost the items. They are hidden, never deleted:
+those catalog rows are what dedup recognises a re-download by, what maps a
+source premium id to ours, and what `sync_order` reads to re-sort an already
+published set. `--all` brings them back.
 
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 

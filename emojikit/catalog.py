@@ -415,6 +415,15 @@ class Catalog:
             "SELECT 1 FROM publications WHERE base=? AND content_key=?",
             (base, content_key)).fetchone() is not None
 
+    def published_set_names(self) -> dict[str, str]:
+        """content_key -> the set it was published into, across every base.
+
+        One query rather than a lookup per item: the panel asks this for the
+        whole catalog on every page load.
+        """
+        return {k: n for k, n in self.db.execute(
+            "SELECT content_key, set_name FROM publications WHERE set_name IS NOT NULL")}
+
     def custom_emoji_id_for(self, base: str, content_key: str) -> str | None:
         row = self.db.execute(
             "SELECT custom_emoji_id FROM publications WHERE base=? AND content_key=?",
