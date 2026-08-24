@@ -121,7 +121,18 @@ def copy_id_for(label: str) -> str:
     return m.group(1) if m else ""
 
 
-def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
+def build_view(cat: Catalog, bot_username: str = "",
+               show_published: bool = False) -> tuple[list[dict], dict, int]:
+    """The cards to render, and where each one's file lives.
+
+    Items already live in a pack are hidden by default. The panel exists to
+    arrange the pack being BUILT, and once the first family was published its
+    200 finished emoji sat in front of the handful that were still being
+    curated. They are hidden, never deleted: the catalog rows are what dedup
+    recognises a re-download by, what maps a source premium id to ours, and what
+    `sync_order` reads to re-sort an already published set. Pass
+    ``show_published`` (``panel.py --all``) to see them.
+    """
     # First time only: seed the manual order with the look-alike-grouped
     # similarity order (a nice starting point). After that, always use the saved
     # position order so the user's drag-drop arrangement is what shows/publishes.
@@ -130,6 +141,11 @@ def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
         cat.set_order([it.content_key for it in seeded])
         cat.set_meta("order_seeded", "1")
     items = cat.all_items()  # saved manual/seeded order (by position)
+    hidden = 0
+    if not show_published:
+        keep = [it for it in items if not it.uploaded]
+        hidden = len(items) - len(keep)
+        items = keep
 
     view = []
     by_key: dict[str, Path] = {}
@@ -157,7 +173,7 @@ def build_view(cat: Catalog, bot_username: str = "") -> tuple[list[dict], dict]:
             "included": it.included,
         })
         by_key[it.content_key] = Path(it.file_path)
-    return view, by_key
+    return view, by_key, hidden
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
@@ -209,8 +225,14 @@ def _preview_bytes(key: str, src: Path, db_path: Path, fps: int,
 
 
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
-                 preview_fps: int = PREVIEW_FPS, bot_username: str = ""):
+                 preview_fps: int = PREVIEW_FPS, bot_username: str = "",
+                 show_published: bool = False, hidden: int = 0):
     lock = threading.Lock()
+    # A one-element list, not an int: `_reload_view` has to update it and the
+    # page handler has to read the update, and rebinding a closed-over int
+    # would leave the handler reading the value from start-up forever -- the
+    # same trap `view`/`by_key` are rebuilt in place to avoid.
+    hidden_now = [hidden]
 
     def _reload_view() -> None:
         """Refresh ``view``/``by_key`` from the catalog, IN PLACE.
@@ -225,7 +247,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
         try:
             cat = Catalog(db_path)
             try:
-                fresh, fresh_by_key = build_view(cat, bot_username)
+                fresh, fresh_by_key, fresh_hidden = build_view(
+                    cat, bot_username, show_published)
             finally:
                 cat.close()
         except Exception as exc:  # noqa: BLE001 - a page load must not 500
@@ -234,6 +257,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
         view[:] = fresh
         by_key.clear()
         by_key.update(fresh_by_key)
+        hidden_now[0] = fresh_hidden
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # quiet default logging
@@ -315,7 +339,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                     items = _json_for_script(view)
                 page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
                             .replace("__PREVIEW_FPS__", str(preview_fps))
-                            .replace("__PER_SET__", str(PER_SET)))
+                            .replace("__PER_SET__", str(PER_SET))
+                            .replace("__HIDDEN__", str(hidden_now[0])))
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -670,6 +695,7 @@ body.bg-gray  .thumb{background:#808a96}
     <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
     <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
       <span class="hint">· click = toggle · drag = reorder · click the id = copy</span>
+      <span id="hiddenNote" class="hint"></span>
       <span id="capWarn" class="warn" style="display:none"></span></span>
   </div>
   <div class="actions">
@@ -695,6 +721,7 @@ body.bg-gray  .thumb{background:#808a96}
 const ITEMS = JSON.parse(document.getElementById('items-data').textContent);
 const TOKEN = "__TOKEN__";
 const PREVIEW_FPS = __PREVIEW_FPS__;
+const HIDDEN = __HIDDEN__;   // already live in a pack, kept out of the grid
 const PER_SET = __PER_SET__;
 const grid = document.getElementById('grid');
 const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -907,6 +934,14 @@ function updateCount(){
   const logo = ITEMS.filter(x=>x.isLogo).length;
   const real = ITEMS.filter(x=>!x.isLogo);
   const included = real.filter(x=>x.included).length + logo;
+  // Never silent: a grid that quietly drops 200 emoji is indistinguishable
+  // from one that lost them.
+  const note = document.getElementById('hiddenNote');
+  if (note) {
+    note.textContent = HIDDEN
+      ? `· ${HIDDEN} already published (hidden — panel.py --all shows them)`
+      : '';
+  }
   document.getElementById('selCount').textContent = included;
   document.getElementById('totCount').textContent = real.length + logo;
   // Telegram's hard cap is 200 stickers per set and the logo takes one of them,
@@ -1336,6 +1371,9 @@ def main() -> int:
                          "of each, so this is the main lever on how heavy the "
                          "panel feels (default: %(default)s).")
     ap.add_argument("--no-open", action="store_true", help="Don't auto-open the browser.")
+    ap.add_argument("--all", action="store_true",
+                    help="Also show emoji already live in a pack. They are hidden by "
+                         "default so the grid is the pack being built.")
     args = ap.parse_args()
 
     data_dir = (ROOT / args.data_dir) if not os.path.isabs(args.data_dir) else Path(args.data_dir)
@@ -1348,7 +1386,7 @@ def main() -> int:
 
     cat = Catalog(db_path)
     try:
-        view, by_key = build_view(cat, bot_username)
+        view, by_key, hidden = build_view(cat, bot_username, args.all)
     finally:
         cat.close()
     log.info("loaded %d emoji from %s", len(view), db_path)
@@ -1358,7 +1396,7 @@ def main() -> int:
     # catalog behind the user's back.
     token = secrets.token_urlsafe(24)
     handler = make_handler(view, by_key, db_path, token, args.preview_fps,
-                           bot_username)
+                           bot_username, args.all, hidden)
 
     class QuietServer(ThreadingHTTPServer):
         # SO_REUSEADDR OFF. socketserver turns it on by default, and on Windows

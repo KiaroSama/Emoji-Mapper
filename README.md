@@ -308,7 +308,7 @@ Emoji Mapper/                  # the whole project
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   requirements.txt
   .env.example                 # configuration template
-  README.md  SECURITY.md  LICENSE
+  README.md  LICENSE                # CONTRIBUTING/SECURITY live in .github/
   tests/                       # unit tests + fixtures (see tests/README.md)
   coins/                       # ONE component: the crypto-coin emoji tool
     fetch_*.py                 # coin logo fetchers (CoinGecko/Paprika/CMC)
@@ -358,7 +358,7 @@ which scrubs credentials out of the environment and refuses non-loopback sockets
 ## Security
 
 Tokens and the owner id live only in `.env` (never committed) and are read at
-runtime. See [SECURITY.md](SECURITY.md). Revoke a leaked token via @BotFather
+runtime. See [SECURITY.md](.github/SECURITY.md). Revoke a leaked token via @BotFather
 and update `.env`.
 
 ## License
