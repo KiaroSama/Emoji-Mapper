@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install -r requirements-coins.txt` fail outright
   (`No matching distribution found for numpy>=2.5.2`).
 
+### Changed — the curate panel moved to port 9450
+
+- 8765 is a busy neighbourhood and a stray listener there made the launcher's
+  panel step fail with a bare WinError 10048.
+- **`panel_sandbox` now IMPORTS the panel's port** (`panel.DEFAULT_PORT`) and
+  serves on it + 1, instead of both files spelling the number out. The sandbox
+  exists to stay off the real panel's port; two copies of that number would have
+  drifted the moment one moved — and pointing an automated drag at the REAL
+  catalog is how three hours of manual ordering were lost once. A test pins it.
+
 ### Changed — the curate panel shows the pack being built, not the finished ones
 
 - **Emoji already live in a pack are hidden from the grid.** After the first

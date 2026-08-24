@@ -11,7 +11,8 @@ So automated UI checks get their own catalog and their own port:
 
 * the catalog is copied to a temp directory, media is symlinked or copied, and
   the copy is deleted on exit;
-* port 8766, not 8765, so a sandbox can never take the port a real panel is on
+* its port is the real panel's + 1, taken from `panel.DEFAULT_PORT` rather
+  than typed again, so a sandbox can never take the port a real panel is on
   and a real panel is never mistaken for the sandbox;
 * it refuses to start if `--data-dir` points anywhere inside the project.
 
@@ -33,7 +34,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PORT = 8766          # never 8765: that is where a real panel lives
+sys.path.insert(0, str(ROOT))
+from panel import DEFAULT_PORT as PANEL_PORT  # noqa: E402 - needs ROOT on the path
+
+# IMPORTED, never re-typed: the sandbox's whole job is to stay off the port a
+# real panel uses, and two copies of that number would drift the day one moves.
+DEFAULT_PORT = PANEL_PORT + 1
 TMP_PREFIX = "panel-sandbox-"
 
 
@@ -108,8 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = ap.parse_args(argv)
 
-    if args.port == 8765:
-        raise SystemExit("refusing port 8765: that is the real panel's port")
+    if args.port == PANEL_PORT:
+        raise SystemExit(f"refusing port {PANEL_PORT}: that is the real panel's port")
 
     source = (ROOT / args.source).resolve()
     sweep_stale()
