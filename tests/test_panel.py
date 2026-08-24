@@ -60,7 +60,8 @@ class BrandLogoPreview(unittest.TestCase):
         target = str(logo_file) if logo_file else p.BRAND_LOGO_DEFAULT
         with mock.patch.object(p, "BRAND_LOGO_DEFAULT", target):
             with Catalog(self.cat_path) as cat:
-                return p.build_view(cat, bot_username)
+                view, by_key, _hidden = p.build_view(cat, bot_username)
+                return view, by_key
 
     def test_logo_shown_first_for_emoji_mapper_bot(self):
         logo = self.data / "logo.png"
@@ -138,7 +139,7 @@ class MutationGuard(unittest.TestCase):
                 _make_png(img)
                 cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
                         emojis=["😀"], keywords=[f"item{i}"])
-            self.view, by_key = p.build_view(cat, "")
+            self.view, by_key, _hidden = p.build_view(cat, "")
 
         handler = p.make_handler(self.view, by_key, self.db, self.TOKEN)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -304,7 +305,7 @@ class SaveDuringReorder(unittest.TestCase):
                 _make_png(img)
                 cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
                         emojis=["😀"], keywords=[f"item{i}"])
-            self.view, by_key = p.build_view(cat, "")
+            self.view, by_key, _hidden = p.build_view(cat, "")
 
         self.sorting = threading.Event()
         self.release = threading.Event()
@@ -420,7 +421,7 @@ class CatalogUnavailable(unittest.TestCase):
             img = data / "media" / "static" / "i0.png"
             _make_png(img)
             cat.add(content_key="s:item0", fmt="static", file_path=img)
-            self.view, by_key = p.build_view(cat, "")
+            self.view, by_key, _hidden = p.build_view(cat, "")
 
         # Replace the database with a directory: sqlite3 then refuses to open
         # it, which is a real sqlite3.Error on the same code path a locked
@@ -549,7 +550,7 @@ class CopyTheEmojiId(unittest.TestCase):
             cat.add(content_key="s:" + "b" * 30, fmt="static", file_path=other,
                     emojis=["😀"], keywords=["hand drawn"])
         with Catalog(data / "catalog.db") as cat:
-            view, _ = p.build_view(cat, "")
+            view, _by_key, _hidden = p.build_view(cat, "")
         by_label = {v["label"]: v["copyId"] for v in view}
         self.assertEqual(by_label["premium-id:5406926593698312391"],
                          "5406926593698312391")
@@ -970,6 +971,58 @@ class RefreshMustActuallyRefresh(MutationGuard):
         self.assertIn("view[:] = fresh", block)
         self.assertIn("by_key.clear()", block)
         self.assertNotIn("view = fresh", block)
+
+
+class FinishedEmojiStayOutOfTheGrid(unittest.TestCase):
+    """The panel arranges the pack being BUILT, not the ones already shipped.
+
+    Once the first family was published, its 200 finished emoji sat in front of
+    the handful still being curated. They are HIDDEN, never deleted: those rows
+    are what dedup recognises a re-download by, what maps a source premium id to
+    ours, and what `sync_order` reads to re-sort an already published set.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        self.db = self.data / "catalog.db"
+        with Catalog(self.db) as cat:
+            for i in range(4):
+                img = self.data / "media" / "static" / f"i{i}.png"
+                _make_png(img)
+                cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
+                        emojis=["😀"], keywords=[f"item{i}"])
+            # two of them are live in a pack
+            for i in (0, 1):
+                cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
+                                  base="pk", set_name="pk1_by_bot")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _view(self, show_published):
+        with Catalog(self.db) as cat:
+            return p.build_view(cat, "", show_published)
+
+    def test_published_emoji_are_hidden_and_counted(self):
+        view, _by_key, hidden = self._view(False)
+        keys = [v["key"] for v in view]
+        self.assertEqual(hidden, 2)
+        self.assertEqual(keys, [f"s:item{i:030d}" for i in (2, 3)],
+                         "only the two that are not live yet")
+
+    def test_all_shows_them_again(self):
+        view, _by_key, hidden = self._view(True)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(view), 4)
+
+    def test_hiding_deletes_nothing(self):
+        """The rows carry dedup, the id mapping and the published order."""
+        self._view(False)
+        with Catalog(self.db) as cat:
+            self.assertEqual(len(cat.all_items()), 4, "no row was removed")
+            self.assertTrue(cat.is_published("pk", f"s:item{0:030d}"),
+                            "the publication record must survive being hidden")
 
 
 class OnlyOnePanelPerPort(unittest.TestCase):

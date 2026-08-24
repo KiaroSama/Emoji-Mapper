@@ -48,6 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pip install -r requirements-coins.txt` fail outright
   (`No matching distribution found for numpy>=2.5.2`).
 
+### Changed — the curate panel shows the pack being built, not the finished ones
+
+- **Emoji already live in a pack are hidden from the grid.** After the first
+  family was published, its 200 finished emoji sat in front of the few still
+  being curated. The header reports how many are hidden and `panel.py --all`
+  brings them back — a filter nobody can see is indistinguishable from having
+  lost the items.
+- Hidden, never deleted. Those rows are what dedup recognises a re-download by,
+  what maps a source premium id to ours, and what `sync_order` reads to re-sort
+  an already published set. `set_order` keeps unlisted items in their relative
+  order, so arranging the new pack cannot scramble a published one.
+
+### Changed — a tidier repository root
+
+- `CONTRIBUTING.md` and `SECURITY.md` moved to `.github/`, where GitHub reads
+  them just the same.
+
 ### Fixed — reordering a pack left it unpublishable
 
 - **`sync_order.py` moved the live stickers but never rewrote the order the

@@ -717,6 +717,7 @@ run writes nothing.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--data-dir` | `collection` | Catalog/media directory. |
+| `--all` | off | Also show emoji already live in a pack. |
 | `--port` | `8765` | Local port. |
 | `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
 | `--no-open` | off | Don't auto-open the browser. |
@@ -825,6 +826,14 @@ not counted in the included/excluded totals, and never sent to `/api/save` — t
 logo itself is never part of the catalog and is only actually inserted by
 `build_collection.py` at publish time (see §12.5). For the coin bot, or if the
 logo file is missing, the card is simply not shown.
+
+**Emoji already live in a pack are hidden.** The panel arranges the pack being
+BUILT, and once the first family was published its 200 finished emoji sat in
+front of the handful still being curated. The header says how many are hidden —
+a filter nobody can see is indistinguishable from having lost the items. They
+are hidden, never deleted: those catalog rows are what dedup recognises a
+re-download by, what maps a source premium id to ours, and what `sync_order`
+reads to re-sort an already published set. `--all` brings them back.
 
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
