@@ -66,6 +66,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drifted the moment one moved — and pointing an automated drag at the REAL
   catalog is how three hours of manual ordering were lost once. A test pins it.
 
+### Fixed — saving from the filtered grid could re-include hidden emoji
+
+- `set_inclusion` re-includes every key it is not given, and the new filter
+  meant a save posted from the grid carried only the VISIBLE keys — so any
+  hidden emoji that had been deselected would have been silently re-included.
+  The save now carries every hidden exclusion through. The panel already
+  documented an earlier variant of this bug; the filter reintroduced it.
+- The save toast says `in the catalog` when a filter is active: its counts come
+  from the catalog, not the grid, and "213 included" under 15 visible cards is
+  alarming until you know that.
+
 ### Changed — the curate panel shows the pack being built, not the finished ones
 
 - **Emoji in a FINISHED pack are hidden from the grid** — finished meaning the

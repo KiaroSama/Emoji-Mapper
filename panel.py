@@ -502,7 +502,15 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                     excluded = set(raw) & known
                     cat = Catalog(db_path)
                     try:
-                        inc, exc = cat.set_inclusion(excluded)
+                        # A FILTERED view can only speak for what it shows.
+                        # set_inclusion re-includes every key it is not given,
+                        # so saving from a grid that hides finished packs would
+                        # silently re-include every hidden item that had been
+                        # deselected. Carry their current state through.
+                        hidden_excluded = {
+                            it.content_key for it in cat.all_items()
+                            if not it.included and it.content_key not in known}
+                        inc, exc = cat.set_inclusion(excluded | hidden_excluded)
                     finally:
                         cat.close()
                     for v in view:
@@ -1330,7 +1338,11 @@ document.getElementById('save').onclick=async()=>{
     const j = await r.json();
     if(r.ok){
       setAlert('');
-      toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded`);
+      // Say WHOSE numbers these are. They come from the catalog, not the
+      // grid, and reading "213 included" under 15 visible cards is
+      // alarming until you know that.
+      const scope = HIDDEN ? ' in the catalog' : '';
+      toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
     }else{
       // Not a toast: a failed save you did not see is how an afternoon of
       // work goes missing.
