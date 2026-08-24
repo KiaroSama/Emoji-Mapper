@@ -68,11 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — the curate panel shows the pack being built, not the finished ones
 
-- **Emoji already live in a pack are hidden from the grid.** After the first
-  family was published, its 200 finished emoji sat in front of the few still
-  being curated. The header reports how many are hidden and `panel.py --all`
-  brings them back — a filter nobody can see is indistinguishable from having
-  lost the items.
+- **Emoji in a FINISHED pack are hidden from the grid** — finished meaning the
+  set is full, so nothing can be added to it again. The header reports how many
+  are hidden and `panel.py --all` brings them back; a filter nobody can see is
+  indistinguishable from having lost the items.
+- The first version of this test was "already published", which hid the 14
+  emoji of a half-empty second pack along with the 200 of the finished first
+  one and left an empty grid. Fullness comes from the publishers' state files,
+  not from counting catalog rows: the brand logo takes a slot without being a
+  row, so counting calls a full set one short. An item whose set cannot be
+  resolved stays visible — unknown is not finished.
 - Hidden, never deleted. Those rows are what dedup recognises a re-download by,
   what maps a source premium id to ours, and what `sync_order` reads to re-sort
   an already published set. `set_order` keeps unlisted items in their relative

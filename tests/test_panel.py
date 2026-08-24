@@ -973,13 +973,13 @@ class RefreshMustActuallyRefresh(MutationGuard):
         self.assertNotIn("view = fresh", block)
 
 
-class FinishedEmojiStayOutOfTheGrid(unittest.TestCase):
-    """The panel arranges the pack being BUILT, not the ones already shipped.
+class OnlyFinishedPacksLeaveTheGrid(unittest.TestCase):
+    """The panel arranges the pack being BUILT.
 
-    Once the first family was published, its 200 finished emoji sat in front of
-    the handful still being curated. They are HIDDEN, never deleted: those rows
-    are what dedup recognises a re-download by, what maps a source premium id to
-    ours, and what `sync_order` reads to re-sort an already published set.
+    "Already published" was the first rule and it was wrong: it hid the 14 emoji
+    of a half-empty second pack along with the 200 of the finished first one,
+    and the owner opened the panel to an empty grid. A set that can still be
+    added to is still the pack being built.
     """
 
     def setUp(self):
@@ -987,42 +987,62 @@ class FinishedEmojiStayOutOfTheGrid(unittest.TestCase):
         self.data = Path(self.tmp.name)
         self.db = self.data / "catalog.db"
         with Catalog(self.db) as cat:
-            for i in range(4):
+            for i in range(5):
                 img = self.data / "media" / "static" / f"i{i}.png"
                 _make_png(img)
                 cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
                         emojis=["😀"], keywords=[f"item{i}"])
-            # two of them are live in a pack
-            for i in (0, 1):
+            for i in (0, 1):                      # in the FULL set
                 cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
                                   base="pk", set_name="pk1_by_bot")
+            cat.mark_uploaded(f"s:item{2:030d}", "cid2",   # in the OPEN set
+                              base="pk", set_name="pk2_by_bot")
+        self._write_state(full=p.PER_SET, open_=3)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _view(self, show_published):
+    def _write_state(self, full, open_):
+        (self.data / "publish_pk.json").write_text(json.dumps({
+            "sets": [{"name": "pk1_by_bot", "index": 1, "live": full, "logo": True},
+                     {"name": "pk2_by_bot", "index": 2, "live": open_, "logo": True}],
+        }), encoding="utf-8")
+
+    def _view(self, show_published=False):
         with Catalog(self.db) as cat:
-            return p.build_view(cat, "", show_published)
+            return p.build_view(cat, "", show_published, self.data)
 
-    def test_published_emoji_are_hidden_and_counted(self):
-        view, _by_key, hidden = self._view(False)
+    def test_a_full_set_is_hidden_but_an_open_one_is_not(self):
+        view, _by_key, hidden = self._view()
         keys = [v["key"] for v in view]
-        self.assertEqual(hidden, 2)
-        self.assertEqual(keys, [f"s:item{i:030d}" for i in (2, 3)],
-                         "only the two that are not live yet")
+        self.assertEqual(hidden, 2, "only the two in the FULL set")
+        self.assertIn(f"s:item{2:030d}", keys, "the open set is still being built")
+        for i in (3, 4):
+            self.assertIn(f"s:item{i:030d}", keys, "never published at all")
 
-    def test_all_shows_them_again(self):
-        view, _by_key, hidden = self._view(True)
+    def test_the_set_fills_up_and_then_it_goes(self):
+        self._write_state(full=p.PER_SET, open_=p.PER_SET)
+        _view, _bk, hidden = self._view()
+        self.assertEqual(hidden, 3, "the second set is finished now too")
+
+    def test_an_unresolvable_set_stays_visible(self):
+        """Unknown is not finished -- the project's own rule."""
+        with Catalog(self.db) as cat:
+            cat.mark_uploaded(f"s:item{3:030d}", "cid3", base="pk",
+                              set_name="a_set_no_state_file_mentions")
+        view, _bk, _h = self._view()
+        self.assertIn(f"s:item{3:030d}", [v["key"] for v in view])
+
+    def test_all_shows_everything(self):
+        view, _bk, hidden = self._view(show_published=True)
         self.assertEqual(hidden, 0)
-        self.assertEqual(len(view), 4)
+        self.assertEqual(len(view), 5)
 
     def test_hiding_deletes_nothing(self):
-        """The rows carry dedup, the id mapping and the published order."""
-        self._view(False)
+        self._view()
         with Catalog(self.db) as cat:
-            self.assertEqual(len(cat.all_items()), 4, "no row was removed")
-            self.assertTrue(cat.is_published("pk", f"s:item{0:030d}"),
-                            "the publication record must survive being hidden")
+            self.assertEqual(len(cat.all_items()), 5, "no row was removed")
+            self.assertTrue(cat.is_published("pk", f"s:item{0:030d}"))
 
 
 class TheBusyPortMessageNamesTheProcess(unittest.TestCase):
