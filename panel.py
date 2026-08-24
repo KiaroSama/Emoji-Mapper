@@ -8,7 +8,7 @@ perceptual hash) so you can deselect look-alikes quickly. "Save" writes the
 selection back to the catalog; build_collection then only publishes included
 items.
 
-Run:  python panel.py            (serves http://127.0.0.1:8765 and opens it)
+Run:  python panel.py            (serves http://127.0.0.1:9450 and opens it)
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ log = logging.getLogger("panel")
 _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
          ".webm": "video/webm", ".tgs": "application/gzip"}
 FMT_ORDER = {"static": 0, "video": 1, "animated": 2}
+DEFAULT_PORT = 9450   # the panel's home port; panel_sandbox imports it
 LOGO_KEY = "__brand_logo__"  # pseudo content_key: preview-only, never saved/counted
 
 MAX_BODY = 4 * 1024 * 1024  # generous for an order list, small enough to bound
@@ -182,7 +183,7 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 def _is_loopback(netloc: str) -> bool:
     """True if a Host/Origin authority points at this machine's loopback."""
     host = netloc.rsplit("://", 1)[-1]
-    if host.startswith("["):                    # [::1]:8765
+    if host.startswith("["):                    # [::1]:9450
         host = host[:host.index("]") + 1] if "]" in host else host
     elif ":" in host:
         host = host.rsplit(":", 1)[0]
@@ -1364,7 +1365,7 @@ def main() -> int:
     setup_logging("panel")
     ap = argparse.ArgumentParser(description="Curate downloaded emoji before publishing.")
     ap.add_argument("--data-dir", default="collection")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--preview-fps", type=int, default=PREVIEW_FPS,
                     help="Frame rate for animated previews. The grid can show "
                          "60+ cards at once and the browser decodes every frame "
