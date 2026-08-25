@@ -97,8 +97,14 @@ plain-text log line carries no custom emoji, so the handler returns before
 sending — but it becomes one the moment channel handling grows a path that logs
 an ERROR.
 
-**D1**, capped at 10 MB, oldest evicted first. The insert and the eviction go in
-one `batch()`, so a row can never be stored without its budget check. The cap
+**D1**, capped at 10 MB, oldest evicted first. The eviction sums the whole
+table, so it runs once every 250 rows rather than on every insert — keyed off
+the `last_row_id` the insert just returned, not a counter in the isolate, which
+would reset before it ever reached its threshold and let the table grow without
+bound. Running it every time was affordable at 77 rows and ruinous at the cap:
+10 MB holds roughly 163 000 rows, and D1's free tier allows 5 000 000 row reads
+a day — about thirty log lines. The budget is exact when it runs; between runs
+the table may sit up to 250 rows over it. The cap
 counts the *text* stored, not the database file: D1 offers no cheap, reliable
 file-size reading, and page overhead plus the index put the file somewhat above
 it. One line's detail is capped at 2000 characters — a publish announcing 120

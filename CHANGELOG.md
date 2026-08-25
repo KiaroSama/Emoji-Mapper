@@ -56,6 +56,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `taskkill` line. The lookup is best-effort and can never raise: it exists only
   to improve an error message.
 
+### Fixed — the log eviction read the whole table on every write
+
+- The 10 MB budget is enforced with a window function that sums every row. It
+  ran on **every insert**. Measured on the live database: 77 rows today, so
+  harmless — but the cost grows exactly as the log fills, which is its normal
+  state. At the cap the table holds roughly 163 000 rows, and D1's free tier
+  allows 5 000 000 row reads a day: about **thirty log lines**.
+- It now runs once every 250 rows, keyed off the `last_row_id` the insert just
+  returned. Not a counter in the isolate — a Worker isolate is short-lived, so
+  that counter would reset before reaching its threshold and the eviction would
+  never run at all. The budget stays exact when it runs; between runs the table
+  may sit up to 250 rows over it, and one row is capped at 2000 characters.
+
 ### Changed — the curate panel moved to port 9450
 
 - 8765 is a busy neighbourhood and a stray listener there made the launcher's

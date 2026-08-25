@@ -56,6 +56,12 @@ export interface LogEntry {
  * rather than tracked in a counter, so it cannot drift out of step with reality
  * after a failed write. COALESCE keeps the delete a no-op while under budget:
  * ids start at 1, so nothing is `<= -1`.
+ *
+ * The window function reads EVERY row, so this must not run on every insert.
+ * It used to. Harmless at 77 rows; at the 10 MB cap the table holds roughly
+ * 163 000 of them, and D1's free tier allows 5 000 000 row reads a day -- about
+ * THIRTY log lines. The cost grows exactly as the log fills, which is its normal
+ * state. See EVICT_EVERY.
  */
 const EVICT_SQL = `
 DELETE FROM logs WHERE id <= COALESCE((
@@ -66,6 +72,23 @@ DELETE FROM logs WHERE id <= COALESCE((
 
 const INSERT_SQL =
   "INSERT INTO logs (ts, bot, level, event, detail, bytes) VALUES (?1,?2,?3,?4,?5,?6)";
+
+/**
+ * Run the eviction scan once every N rows, keyed off the row id the insert
+ * just returned.
+ *
+ * Keyed off the ID rather than a counter in the isolate: a Worker isolate is
+ * short-lived, so a per-isolate counter would reset before it ever reached its
+ * threshold and the eviction would simply never run -- the table would grow
+ * without bound. `last_row_id` is durable, monotonic and free (the insert
+ * already returns it), so the cadence holds no matter how the isolates come
+ * and go.
+ *
+ * The budget is still exact when it runs; between runs the table may sit up to
+ * N rows over. One row is capped at DETAIL_LIMIT characters, so 250 rows is
+ * well under a megabyte against a ten megabyte cap.
+ */
+const EVICT_EVERY = 250;
 
 /**
  * Anything token-shaped, in case a Bot API error echoes a URL back at us.
@@ -165,10 +188,13 @@ async function writeToD1(env: Env, e: LogEntry): Promise<void> {
   // past the budget it is supposed to hold.
   const bytes = new TextEncoder().encode(
     `${e.bot}${e.level}${e.event}${detail ?? ""}`).length;
-  await env.DB.batch([
-    env.DB.prepare(INSERT_SQL).bind(Date.now(), e.bot, e.level, e.event, detail, bytes),
-    env.DB.prepare(EVICT_SQL).bind(LOG_BYTES_CAP),
-  ]);
+  const written = await env.DB.prepare(INSERT_SQL)
+    .bind(Date.now(), e.bot, e.level, e.event, detail, bytes)
+    .run();
+  const id = Number(written?.meta?.last_row_id ?? 0);
+  if (id > 0 && id % EVICT_EVERY === 0) {
+    await env.DB.prepare(EVICT_SQL).bind(LOG_BYTES_CAP).run();
+  }
 }
 
 async function writeToChannel(env: Env, e: LogEntry, atMs: number): Promise<void> {
