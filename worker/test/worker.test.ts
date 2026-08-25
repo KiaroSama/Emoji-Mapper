@@ -39,10 +39,19 @@ const CTX = {
 const settle = () => Promise.allSettled(pending.splice(0));
 
 /** A D1 stand-in that records the SQL and bindings it was handed. */
-function stubDb() {
+function stubDb(nextRowId = 1) {
   const runs: { sql: string; args: unknown[] }[] = [];
   const prepare = (sql: string) => ({
-    bind: (...args: unknown[]) => ({ sql, args, run: async () => ({}) }),
+    bind: (...args: unknown[]) => ({
+      sql,
+      args,
+      // The insert hands back the id it just wrote; the eviction cadence is
+      // keyed off it, so the stub has to be able to choose it.
+      run: async () => {
+        runs.push({ sql, args });
+        return { meta: { last_row_id: nextRowId } };
+      },
+    }),
   });
   return {
     db: {
@@ -351,15 +360,31 @@ describe("logging", () => {
     expect(out).toContain("+7000 chars");
   });
 
-  it("writes the row and the eviction in ONE batch", async () => {
-    const { db, runs } = stubDb();
+  it("does NOT scan the whole table on an ordinary write", async () => {
+    // The eviction reads every row. It used to run on every insert: harmless
+    // at 77 rows, but at the 10 MB cap the table holds ~163 000 and D1's free
+    // tier allows 5 000 000 row reads a day -- about thirty log lines.
+    const { db, runs } = stubDb(7);
     await log({ ...ENV, DB: db }, { bot: "coin", level: "INFO", event: "webhook" });
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1);
     expect(runs[0].sql).toContain("INSERT INTO logs");
-    // Same batch, so a row can never be inserted without its budget check --
-    // which is how a table quietly grows past the cap.
-    expect(runs[1].sql).toContain("DELETE FROM logs");
-    expect(runs[1].args[0]).toBe(10 * 1024 * 1024);
+    expect(runs.some((r) => r.sql.includes("DELETE FROM logs"))).toBe(false);
+  });
+
+  it("enforces the budget every Nth row, keyed off the id just written", async () => {
+    const { db, runs } = stubDb(250);
+    await log({ ...ENV, DB: db }, { bot: "coin", level: "INFO", event: "webhook" });
+    const evict = runs.find((r) => r.sql.includes("DELETE FROM logs"));
+    expect(evict, "row 250 must trigger the scan").toBeTruthy();
+    expect(evict!.args[0]).toBe(10 * 1024 * 1024);
+  });
+
+  it("a failed insert reports no row id and triggers nothing", async () => {
+    // `id > 0` guards it: a missing last_row_id must not read as row 0 and
+    // fire the scan on every write that failed to store anything.
+    const { db, runs } = stubDb(0);
+    await log({ ...ENV, DB: db }, { bot: "coin", level: "INFO", event: "webhook" });
+    expect(runs.some((r) => r.sql.includes("DELETE FROM logs"))).toBe(false);
   });
 
   it("counts BYTES, not characters, so non-ASCII cannot overshoot the cap", async () => {
