@@ -973,13 +973,15 @@ class RefreshMustActuallyRefresh(MutationGuard):
         self.assertNotIn("view = fresh", block)
 
 
-class OnlyFinishedPacksLeaveTheGrid(unittest.TestCase):
-    """The panel arranges the pack being BUILT.
+class PublishedEmojiLeaveTheGrid(unittest.TestCase):
+    """The panel arranges the pack being BUILT: anything live is out.
 
-    "Already published" was the first rule and it was wrong: it hid the 14 emoji
-    of a half-empty second pack along with the 200 of the finished first one,
-    and the owner opened the panel to an empty grid. A set that can still be
-    added to is still the pack being built.
+    The rule was "hide only a FULL set" for one round. `--new-set` broke that
+    theory -- a pack can be left half-empty deliberately, so a set that is not
+    full is not therefore unfinished, and the owner kept being shown an
+    abandoned pack's emoji while curating the next one. Published is the
+    property that decides it, and it needs no publish_*.json and no capacity
+    arithmetic.
     """
 
     def setUp(self):
@@ -995,43 +997,39 @@ class OnlyFinishedPacksLeaveTheGrid(unittest.TestCase):
             for i in (0, 1):                      # in the FULL set
                 cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
                                   base="pk", set_name="pk1_by_bot")
-            cat.mark_uploaded(f"s:item{2:030d}", "cid2",   # in the OPEN set
+            cat.mark_uploaded(f"s:item{2:030d}", "cid2",   # in the HALF-EMPTY set
                               base="pk", set_name="pk2_by_bot")
-        self._write_state(full=p.PER_SET, open_=3)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _write_state(self, full, open_):
-        (self.data / "publish_pk.json").write_text(json.dumps({
-            "sets": [{"name": "pk1_by_bot", "index": 1, "live": full, "logo": True},
-                     {"name": "pk2_by_bot", "index": 2, "live": open_, "logo": True}],
-        }), encoding="utf-8")
-
     def _view(self, show_published=False):
         with Catalog(self.db) as cat:
-            return p.build_view(cat, "", show_published, self.data)
+            return p.build_view(cat, "", show_published)
 
-    def test_a_full_set_is_hidden_but_an_open_one_is_not(self):
+    def test_a_half_empty_pack_is_hidden_too_once_it_is_published(self):
+        """The regression the owner reported twice: pack 2 kept coming back."""
         view, _by_key, hidden = self._view()
         keys = [v["key"] for v in view]
-        self.assertEqual(hidden, 2, "only the two in the FULL set")
-        self.assertIn(f"s:item{2:030d}", keys, "the open set is still being built")
+        self.assertEqual(hidden, 3, "two in the full set AND the half-empty one")
+        self.assertNotIn(f"s:item{2:030d}", keys,
+                         "published into a 3/200 set is still published")
         for i in (3, 4):
             self.assertIn(f"s:item{i:030d}", keys, "never published at all")
 
-    def test_the_set_fills_up_and_then_it_goes(self):
-        self._write_state(full=p.PER_SET, open_=p.PER_SET)
+    def test_no_publish_state_file_is_needed(self):
+        """The old rule read publish_*.json; this one asks the catalog."""
+        self.assertEqual(list(self.data.glob("publish_*.json")), [])
         _view, _bk, hidden = self._view()
-        self.assertEqual(hidden, 3, "the second set is finished now too")
+        self.assertEqual(hidden, 3)
 
-    def test_an_unresolvable_set_stays_visible(self):
-        """Unknown is not finished -- the project's own rule."""
+    def test_a_row_with_no_recorded_set_name_still_counts_as_published(self):
+        """Unknown WHERE is not unknown WHETHER -- it must not be offered up."""
         with Catalog(self.db) as cat:
             cat.mark_uploaded(f"s:item{3:030d}", "cid3", base="pk",
-                              set_name="a_set_no_state_file_mentions")
+                              set_name=None)
         view, _bk, _h = self._view()
-        self.assertIn(f"s:item{3:030d}", [v["key"] for v in view])
+        self.assertNotIn(f"s:item{3:030d}", [v["key"] for v in view])
 
     def test_all_shows_everything(self):
         view, _bk, hidden = self._view(show_published=True)
@@ -1078,8 +1076,8 @@ class SavingFromAFilteredGridKeepsHiddenChoices(unittest.TestCase):
 
     def test_a_hidden_exclusion_survives_a_save_from_the_filtered_grid(self):
         with Catalog(self.db) as cat:
-            view, _bk, hidden = p.build_view(cat, "", False, self.data)
-        self.assertEqual(hidden, 2, "the finished pack is out of the grid")
+            view, _bk, hidden = p.build_view(cat, "", False)
+        self.assertEqual(hidden, 2, "the published pack is out of the grid")
         visible = {v["key"] for v in view if not v.get("isLogo")}
         self.assertNotIn(f"s:item{0:030d}", visible)
 

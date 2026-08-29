@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the curate panel kept showing an abandoned pack's emoji
+
+- **A published pack that is not full no longer appears in the grid.** The panel
+  hid a pack only once it was *full*, on the theory that a set still being
+  filled is still the pack being built. `--new-set` ended that theory: a pack
+  can now be left half-empty deliberately, so "full" stopped meaning "finished"
+  and a 21/200 pack's emoji kept coming back while curating the next one. The
+  test is now simply whether the item is published — `is_published` skips it at
+  publish time regardless, so showing it only invited pruning that changed
+  nothing. `panel.py --all` still brings them back, which is how you reorder a
+  live pack. Drops the `publish_*.json` read and the capacity arithmetic that
+  went with the old rule.
+- The check asks whether a publication row exists, **not** whether it records a
+  set name: a row with a NULL `set_name` is still published, and reading the
+  name would turn "I do not know where it went" into "never published" and
+  offer a live emoji up to be republished.
+
 ### Added — `--new-set`, for starting the next pack before this one is full
 
 - **`build_collection.py --new-set`** rolls the run into a fresh set and leaves

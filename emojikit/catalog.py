@@ -415,6 +415,18 @@ class Catalog:
             "SELECT 1 FROM publications WHERE base=? AND content_key=?",
             (base, content_key)).fetchone() is not None
 
+    def published_keys(self) -> set[str]:
+        """Every content_key live in SOME pack, across every base.
+
+        Deliberately not ``published_set_names()``: that one drops rows whose
+        ``set_name`` is NULL, and an item whose set is unrecorded is still
+        published. The question here is "is this already live", so a row is
+        enough -- reading the set name would turn "I do not know where" into
+        "not published" and offer a live emoji up for republishing.
+        """
+        return {r[0] for r in self.db.execute(
+            "SELECT DISTINCT content_key FROM publications")}
+
     def published_set_names(self) -> dict[str, str]:
         """content_key -> the set it was published into, across every base.
 

@@ -840,16 +840,21 @@ logo itself is never part of the catalog and is only actually inserted by
 `build_collection.py` at publish time (see §12.5). For the coin bot, or if the
 logo file is missing, the card is simply not shown.
 
-**Emoji in a FINISHED pack are hidden** — finished meaning the set is full, so
-nothing can be added to it again. The panel arranges the pack being BUILT.
+**Emoji already live in a pack are hidden.** The panel arranges the pack being
+BUILT, and `is_published` skips a published item at publish time however it is
+ticked here — so showing it only invites pruning work that changes nothing.
 
-"Already published" was the first rule and it was wrong: it hid the 14 emoji of
-a half-empty second pack along with the 200 of the finished first one, leaving
-an empty grid. An emoji in a set still being filled is still part of the pack
-being built. Fullness is read from the publishers' own state files, not counted
-from the catalog: the brand logo takes a slot without being a catalog row, so
-counting rows calls a full set one short. An item whose set cannot be resolved
-stays visible — unknown is not finished.
+The rule was "hide only a FULL set" for one round, on the theory that a set
+still being filled is still the pack being built. `--new-set` (§12.5) ended
+that: a pack can now be left half-empty *on purpose*, so "full" stopped meaning
+"finished", and a half-empty published pack kept reappearing in the grid for
+the next one. Being published is the property that actually settles it, and it
+needs neither a `publish_*.json` nor any capacity arithmetic.
+
+The test is "does this key have a publication row", **not** "does it have a
+recorded set name": a row whose `set_name` is NULL is still published, and
+reading the name would turn *I do not know where it went* into *it was never
+published* — offering a live emoji up to be republished.
 
 The header says how many are hidden; a filter nobody can see is
 indistinguishable from having lost the items. They are hidden, never deleted:

@@ -123,48 +123,26 @@ def copy_id_for(label: str) -> str:
     return m.group(1) if m else ""
 
 
-def finished_sets(data_dir: Path) -> set[str]:
-    """Names of sets that are FULL, so nothing more can ever be added to them.
-
-    Read from the publishers' own state files rather than counted from the
-    catalog: the brand logo occupies a slot but is not a catalog row, so
-    counting rows would call a full 200-sticker set one short and keep showing
-    a pack that is finished.
-    """
-    done: set[str] = set()
-    for state in sorted(data_dir.glob("publish_*.json")):
-        try:
-            data = json.loads(state.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            log.debug("could not read %s: %s", state.name, exc)
-            continue
-        for rec in data.get("sets") or []:
-            live, name = rec.get("live"), rec.get("name")
-            if isinstance(live, int) and not isinstance(live, bool)                     and name and live >= PER_SET:
-                done.add(name)
-    return done
-
-
 def build_view(cat: Catalog, bot_username: str = "",
-               show_published: bool = False,
-               data_dir: Path | None = None) -> tuple[list[dict], dict, int]:
+               show_published: bool = False) -> tuple[list[dict], dict, int]:
     """The cards to render, and where each one's file lives.
 
-    Emoji in a FINISHED pack are hidden by default -- finished meaning the set
-    is full, so nothing can be added to it again. The panel exists to arrange
-    the pack being BUILT.
+    An emoji already live in a pack is hidden by default: the grid is what the
+    NEXT pack gets made of, and `is_published` skips those items at publish
+    time however they are ticked here, so showing them only invites pruning
+    work that changes nothing.
 
-    "Published" is the wrong test and was the first attempt: it hid the 14 emoji
-    of a half-empty second pack along with the 200 of the finished first one,
-    leaving a grid with nothing in it. An emoji in a set still being filled is
-    still part of the pack being built.
+    This was "hide only a FULL set" for one round, on the theory that a set
+    still being filled is still the pack being built. `--new-set` ended that --
+    a pack can now be left half-empty on purpose, so "full" stopped meaning
+    "finished" and the owner kept meeting an abandoned pack's emoji in the grid
+    for the next one. Being published is the property that actually settles it,
+    and it needs no state file and no capacity arithmetic.
 
-    Unknown is not finished: an item whose set cannot be resolved stays visible.
-
-    Hidden, never deleted -- those catalog rows are what dedup recognises a
-    re-download by, what maps a source premium id to ours, and what
-    `sync_order` reads to re-sort an already published set. ``show_published``
-    (``panel.py --all``) brings them back.
+    Hidden, never deleted -- those rows are what dedup recognises a re-download
+    by, what maps a source premium id to ours, and what `sync_order` reads to
+    re-sort a live set. ``show_published`` (``panel.py --all``) brings them
+    back, which is how you reorder a pack that is already published.
     """
     # First time only: seed the manual order with the look-alike-grouped
     # similarity order (a nice starting point). After that, always use the saved
@@ -175,11 +153,9 @@ def build_view(cat: Catalog, bot_username: str = "",
         cat.set_meta("order_seeded", "1")
     items = cat.all_items()  # saved manual/seeded order (by position)
     hidden = 0
-    if not show_published and data_dir is not None:
-        done = finished_sets(data_dir)
-        where = cat.published_set_names() if done else {}
-        keep = [it for it in items
-                if where.get(it.content_key) not in done]
+    if not show_published:
+        live = cat.published_keys()
+        keep = [it for it in items if it.content_key not in live]
         hidden = len(items) - len(keep)
         items = keep
 
@@ -284,7 +260,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
             cat = Catalog(db_path)
             try:
                 fresh, fresh_by_key, fresh_hidden = build_view(
-                    cat, bot_username, show_published, db_path.parent)
+                    cat, bot_username, show_published)
             finally:
                 cat.close()
         except Exception as exc:  # noqa: BLE001 - a page load must not 500
@@ -1457,8 +1433,7 @@ def main() -> int:
 
     cat = Catalog(db_path)
     try:
-        view, by_key, hidden = build_view(cat, bot_username, args.all,
-                                          db_path.parent)
+        view, by_key, hidden = build_view(cat, bot_username, args.all)
     finally:
         cat.close()
     log.info("loaded %d emoji from %s", len(view), db_path)
