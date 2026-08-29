@@ -649,10 +649,22 @@ remain the identity, and only the human title moved.
 | `--emoji` | `😀` | Fallback associated emoji. |
 | `--formats` | `static,video,animated` | Which formats to publish, in order. |
 | `--per-set` | `200` | Emojis per set. |
+| `--new-set` | off | Start this run in a **fresh** set instead of filling the current one. |
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--brand-logo` | `assets/god-verify-emoji-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
 | `--dry-run` | off | Show the plan without uploading. |
+
+**Leaving a pack unfinished (`--new-set`).** Normally set *N+1* opens only when
+set *N* reaches `--per-set`, so a pack you want to stop early has no way
+forward. `--new-set` rolls this run into a fresh set and leaves the current one
+at whatever size it has — that is how you start pack 3 while pack 2 is still
+half empty. It is consulted **once per run**: later items in the same run fill
+the new set normally, so pass it on the run that should open the pack, not on
+every run afterwards (each one would open another set). The two workarounds it
+replaces are both wrong: a smaller `--per-set` caps every *later* set at the
+same wrong size, and a second `--base` starts a new family whose `publications`
+table is empty, so the entire catalog would be re-uploaded into it.
 
 Only **included** (panel-selected), not-yet-uploaded, non-skipped items are
 published. Per-format sets, drift-proof resume, per-pack manifests.
