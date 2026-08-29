@@ -936,7 +936,8 @@ def write_manifest(data_dir: Path, cat: Catalog, s: dict, base: str) -> None:
 def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str],
                    base: str, title: str, user_id: int, default_emoji: str,
                    per_set: int, data_dir: Path, state: dict, bot: str,
-                   logo: "BrandLogo | None" = None) -> tuple[int, int]:
+                   logo: "BrandLogo | None" = None,
+                   new_set: bool = False) -> tuple[int, int]:
     """Publish all pending items of one format; returns (uploaded, failed).
 
     Duplicate-proof: "already uploaded" is decided by the catalog's per-item
@@ -968,6 +969,17 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     if cur and not _set_is_open(cur):
         log.warning("[%s] %s holds unattributed live sticker(s); publishing "
                     "continues in a new set", fmt, cur["name"])
+        cur = None
+    # Without this the only way to reach set N+1 is to fill set N to `per_set`:
+    # a pack the owner wants to leave half-empty (to start the next one with
+    # different content) had no supported path, and the workarounds -- a smaller
+    # --per-set, or a second base -- either cap every LATER set at the same
+    # wrong size or re-upload the whole catalog into a new family. Deliberately
+    # reuses the closed-set path above rather than adding a second way to roll,
+    # and is consulted once per run: later items follow `in_set` as usual.
+    if cur and new_set:
+        log.info("[%s] --new-set: %s stays at %d live; this run starts a fresh "
+                 "set", fmt, cur["name"], cur.get("live", 0))
         cur = None
     if cur and cur["live"] < per_set:
         set_index, set_name, in_set = cur["index"], cur["name"], cur["live"]
@@ -1298,6 +1310,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--formats", default="static,video,animated",
                     help="Comma list of formats to publish, in order.")
     ap.add_argument("--per-set", type=int, default=PER_SET)
+    ap.add_argument("--new-set", action="store_true",
+                    help="Start this run in a FRESH set instead of filling the "
+                         "current one. Use to begin the next pack while the "
+                         "one before it is deliberately left unfinished.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--brand-logo", default=BRAND_LOGO_DEFAULT,
                     help="Logo image used as the FIRST emoji of every set built "
@@ -1436,7 +1452,8 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
                 tg, cat, fmt=fmt, plan_keys=plan.get(fmt, []),
                 base=base, title=args.title, user_id=args.user_id,
                 default_emoji=args.emoji, per_set=args.per_set,
-                data_dir=data_dir, state=state, bot=bot, logo=logo)
+                data_dir=data_dir, state=state, bot=bot, logo=logo,
+                new_set=args.new_set)
             ok += done
             failed += bad
         save_json(_state_path(data_dir, base), state)
