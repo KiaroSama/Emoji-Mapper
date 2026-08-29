@@ -958,6 +958,42 @@ class PublishThroughMain(_CatalogFixture):
         self.assertEqual(len(tg.sets[SET]), 3)        # pks1 was left alone
         self.assertEqual(len(tg.sets[SET2]), 1)
 
+    def test_new_set_starts_the_next_pack_while_this_one_is_half_empty(self):
+        """--new-set is the ONLY supported way to leave a pack unfinished.
+
+        Without it the next set opens only at `per_set`, so a deliberately
+        half-empty pack could be continued only by shrinking --per-set (which
+        caps every later set too) or by a second base (which re-uploads the
+        whole catalog).
+        """
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self.assertEqual(len(tg.sets[SET]), 2)        # nowhere near per_set
+
+        key2 = self._add_item(2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--new-set"), EXIT_OK)
+
+        self.assertEqual(len(tg.sets[SET]), 2)        # left exactly as it was
+        self.assertEqual(len(tg.sets[SET2]), 1)       # the new pack holds it
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(cat.custom_emoji_id_for("pk", key2), f"{SET2}-0")
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        self.assertEqual([s["index"] for s in state["sets"]], [1, 2])
+        self.assertEqual(state["sets"][1]["keys"], [key2])
+
+    def test_without_new_set_the_next_emoji_still_fills_the_current_pack(self):
+        """The negative half: the flag must be what moves the emoji, not luck."""
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self._add_item(2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)
+        self.assertEqual(len(tg.sets[SET]), 3)        # appended, no new set
+        self.assertNotIn(SET2, tg.sets)
+
     # ----- H-11: every recorded set is verified, not just the active one -- #
     def test_an_older_recorded_set_that_disappeared_fails_closed(self):
         tg = FakeTG()

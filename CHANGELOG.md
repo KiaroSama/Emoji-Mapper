@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `--new-set`, for starting the next pack before this one is full
+
+- **`build_collection.py --new-set`** rolls the run into a fresh set and leaves
+  the current one at whatever size it has. Until now set *N+1* opened only when
+  set *N* reached `--per-set`, so a pack deliberately stopped early had no
+  supported way forward. Both workarounds were wrong: a smaller `--per-set` caps
+  every *later* set at the same wrong size, and a second `--base` starts a family
+  whose publication table is empty, so the whole catalog re-uploads into it.
+  The flag reuses the existing closed-set roll rather than adding a second way to
+  open a set, and is read once per run — later items fill the new set normally.
+
 ### Fixed — a stopped publish locked its own pack family for six hours
 
 - **A killed run could not be resumed.** The pack-family lock was only
