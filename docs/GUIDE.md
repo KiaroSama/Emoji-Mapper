@@ -730,6 +730,7 @@ run writes nothing.
 |------|---------|---------|
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--all` | off | Also show emoji already live in a pack. |
+| `--with-pack N` | off | Also show the emoji already live in pack **N**. Repeatable. |
 | `--port` | `9450` | Local port. |
 | `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
 | `--no-open` | off | Don't auto-open the browser. |
@@ -861,6 +862,29 @@ indistinguishable from having lost the items. They are hidden, never deleted:
 those catalog rows are what dedup recognises a re-download by, what maps a
 source premium id to ours, and what `sync_order` reads to re-sort an already
 published set. `--all` brings them back.
+
+**`--with-pack N` is the narrow version of `--all`.** It un-hides one published
+set so a half-full pack can be arranged beside the new candidates going into
+it — `panel.py --with-pack 5` shows pack 5's emoji and the unpublished ones
+together, and nothing else. `--all` is the wrong tool for that job: it also
+returns every finished pack, which on a grown catalog is hundreds of cards that
+cannot change. The index is resolved through the publisher's own
+`publish_*.json`, not by rebuilding `<base><n>_by_<bot>`, because the state file
+already records the exact name. Here — and only here — the lookup asks *which*
+set an item is in, so a publication row with no recorded `set_name` stays
+hidden: unknown-where is not answered with a guess.
+
+**Pack boundaries are drawn in the grid.** A full-width marker carrying the
+brand logo heads each pack and is labelled with the grid range it spans, so a
+selection that publishes as several packs shows where each one starts and ends.
+The splits count **included** items only — an unticked card never reaches
+Telegram, so it cannot push the next emoji into the following pack — which is
+why ticking recomputes them and not just the counter. The marker is deliberately
+a `.packsep` and never a `.card`: the drop handler resolves its target with
+`closest('.card')`, and a marker that matched would swallow a drop and silently
+do nothing.
+
+The header's **↑ Top / ↓ Bottom** buttons jump to the ends of the grid.
 
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
@@ -1470,7 +1494,24 @@ Front-end:
   default, plus a **Backdrop switch** (Checker → Light → Dark → Gray, persisted
   in `localStorage`) to inspect tricky emoji on any background.
 - All selected by default. Click toggles; **Shift+click** toggles a range.
-  Header buttons: Select all / Deselect all / Invert / Animation: On|Off / Save.
+  Header buttons: ↑ Top / ↓ Bottom / Select all / Deselect all / Invert /
+  Backdrop / Animation: On|Off / Save. The two jump buttons scroll the
+  **document**, not `scrollIntoView`: that aligns an element with the top of
+  the viewport, which sits behind the sticky header, so Top stopped a
+  header-height short — hiding the Pack 1 marker — and Bottom stopped short for
+  the same reason.
+- **Pack boundaries are drawn in the grid.** When the selection needs more than
+  one set, a full-width marker carrying the brand logo sits at the head of each
+  pack, labelled with the grid range it spans (`Pack 2 · #201–#399`), so you can
+  see where each published pack will start and end while still curating.
+  Two things it deliberately does: the splits are counted from **included**
+  items only, since an unticked card never reaches Telegram and so cannot push
+  the next emoji into the following pack — which is why the markers move as you
+  tick and untick, not only when you drag. And a marker is a `.packsep`, never
+  a `.card`: the drop handler resolves its target with `closest('.card')`, so a
+  marker that matched would swallow a drop aimed past it and silently do
+  nothing. Card numbers stay **grid** positions and are unchanged by the
+  markers.
 - **Static and animated are both plain `<img loading="lazy">`** — the browser
   owns decoding and compositing, and there are no player objects to build or
   tear down. Video is `<video preload="metadata">` (muted, looping,

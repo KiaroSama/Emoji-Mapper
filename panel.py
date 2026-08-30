@@ -123,8 +123,29 @@ def copy_id_for(label: str) -> str:
     return m.group(1) if m else ""
 
 
+def packs_named(data_dir: Path, wanted: set[int]) -> set[str]:
+    """Set names for the given pack indices, across every published family.
+
+    Read from the publishers' own state files: the index is theirs, and
+    deriving a name from the base plus a number would guess at a convention
+    the state file already records exactly.
+    """
+    names: set[str] = set()
+    for state in sorted(data_dir.glob("publish_*.json")):
+        try:
+            data = json.loads(state.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.debug("could not read %s: %s", state.name, exc)
+            continue
+        for rec in data.get("sets") or []:
+            if rec.get("index") in wanted and rec.get("name"):
+                names.add(rec["name"])
+    return names
+
+
 def build_view(cat: Catalog, bot_username: str = "",
-               show_published: bool = False) -> tuple[list[dict], dict, int]:
+               show_published: bool = False,
+               keep_sets: set[str] | None = None) -> tuple[list[dict], dict, int]:
     """The cards to render, and where each one's file lives.
 
     An emoji already live in a pack is hidden by default: the grid is what the
@@ -143,6 +164,12 @@ def build_view(cat: Catalog, bot_username: str = "",
     by, what maps a source premium id to ours, and what `sync_order` reads to
     re-sort a live set. ``show_published`` (``panel.py --all``) brings them
     back, which is how you reorder a pack that is already published.
+
+    ``keep_sets`` (``panel.py --with-pack N``) is the narrow version of that:
+    it un-hides ONE published set so its emoji can be arranged beside the new
+    candidates going into it. `--all` is the wrong tool for that -- it also
+    brings back every finished pack, which here is hundreds of cards you cannot
+    act on.
     """
     # First time only: seed the manual order with the look-alike-grouped
     # similarity order (a nice starting point). After that, always use the saved
@@ -155,6 +182,12 @@ def build_view(cat: Catalog, bot_username: str = "",
     hidden = 0
     if not show_published:
         live = cat.published_keys()
+        if keep_sets:
+            # published_set_names() is the right lookup HERE and not in the
+            # plain filter above: this asks "which set", where a row with no
+            # recorded set name is genuinely unanswerable, so it stays hidden.
+            where = cat.published_set_names()
+            live = {k for k in live if where.get(k) not in keep_sets}
         keep = [it for it in items if it.content_key not in live]
         hidden = len(items) - len(keep)
         items = keep
@@ -238,7 +271,8 @@ def _preview_bytes(key: str, src: Path, db_path: Path, fps: int,
 
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                  preview_fps: int = PREVIEW_FPS, bot_username: str = "",
-                 show_published: bool = False, hidden: int = 0):
+                 show_published: bool = False, hidden: int = 0,
+                 keep_sets: set[str] | None = None):
     lock = threading.Lock()
     # A one-element list, not an int: `_reload_view` has to update it and the
     # page handler has to read the update, and rebinding a closed-over int
@@ -260,7 +294,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
             cat = Catalog(db_path)
             try:
                 fresh, fresh_by_key, fresh_hidden = build_view(
-                    cat, bot_username, show_published)
+                    cat, bot_username, show_published, keep_sets)
             finally:
                 cat.close()
         except Exception as exc:  # noqa: BLE001 - a page load must not 500
@@ -679,6 +713,16 @@ body.bg-gray  .thumb{background:#808a96}
 .card.over{border-color:#f472b6;box-shadow:inset 0 0 0 2px #f472b688}
 /* The logo has no format, but it still gets an inner frame -- amber, to
    match its badge, so the two frames mean the same thing on every card. */
+/* A pack boundary. Deliberately NOT .card: the drop handler resolves its
+   target with closest('.card'), so a separator that matched would swallow a
+   drop and silently do nothing. Spans the whole grid row so the split reads as
+   a rule across the page rather than one more tile in the flow. */
+.packsep{grid-column:1/-1;display:flex;align-items:center;gap:12px;
+         margin:18px 0 6px;color:#fbbf24;font-weight:600;font-size:13px}
+.packsep::after{content:'';flex:1;height:1px;background:#5a4415}
+.packsep img{width:34px;height:34px;border-radius:8px;background:#1a1508;
+             padding:2px;border:1px solid #5a4415}
+.packsep .n{opacity:.75;font-weight:400}
 .card.logo{cursor:default;border-color:#6b5316;--fmt:#fbbf24}
 .card.logo:hover{border-color:#fbbf24}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
@@ -721,6 +765,9 @@ body.bg-gray  .thumb{background:#808a96}
   <div class="actions">
     <button id="undo" title="Undo the last reorder or selection change (Ctrl+Z)" disabled>&#8630; Undo</button>
     <button id="redo" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" disabled>Redo &#8631;</button>
+    <span class="sep"></span>
+    <button id="top" title="Jump to the first card">&#8593; Top</button>
+    <button id="bot" title="Jump to the last card">&#8595; Bottom</button>
     <span class="sep"></span>
     <button id="all">Select all</button>
     <button id="none">Deselect all</button>
@@ -846,13 +893,65 @@ function makeCard(it){
 // slot -- build_collection reserves it (capacity = per_set - 1). Numbering it
 // away made the panel disagree with what actually ships: the owner read "200"
 // and the pack was 201.
+// A pack boundary marker. Rebuilt from scratch on every renumber() and held
+// only in the DOM -- never in ITEMS, never in `cards`, never saved. That is
+// what keeps drag/drop, /api/order and /api/save completely unaware of it.
+function makeSep(pack, from, to){
+  const box = el('div','packsep');
+  const logo = ITEMS.find(x=>x.isLogo);
+  if(logo){
+    const img = document.createElement('img');
+    img.src = '/img/' + encodeURIComponent(logo.key);
+    img.alt = '';
+    box.appendChild(img);
+  }
+  box.appendChild(el('span','', 'Pack ' + pack));
+  box.appendChild(el('span','n', to ? `#${from}–#${to}` : `from #${from}`));
+  return box;
+}
+
+// Position labels, and the pack splits the owner reads "how far does this one
+// go" off. The number on a card is its GRID position and always has been --
+// the ranges the owner works in are grid ranges, so it must not silently
+// become a ship position.
+//
+// The SPLITS are a different question and are computed from the INCLUDED count
+// only: an unticked card never reaches Telegram, so it cannot push the next
+// emoji into the following pack. That is why this runs on every selection
+// change and not just on reorder -- untick enough cards and a boundary really
+// does move.
 function renumber(){
-  let n = 0;
-  for(const it of ITEMS){
+  for(const s of grid.querySelectorAll('.packsep')) s.remove();
+
+  const logo = ITEMS.find(x=>x.isLogo);
+  const capacity = PER_SET - (logo ? 1 : 0);   // items that fit beside the logo
+
+  // Pass 1: grid number per item, and where each pack begins.
+  const starts = [];                 // {index, gridNo}
+  let n = 0, inPack = 0;
+  for(let i = 0; i < ITEMS.length; i++){
+    const it = ITEMS[i];
     n++;
+    if(!it.isLogo && it.included){
+      if(inPack === 0) starts.push({index: i, gridNo: n});
+      inPack++;
+      if(inPack >= capacity) inPack = 0;
+    }
     const card = cards.get(it.key);
     const pos = card && card.querySelector('.pos');
     if(pos && pos.textContent !== String(n)) pos.textContent = n;
+  }
+
+  // Pass 2: one marker per pack, each labelled with the grid range it spans.
+  // Only when there is more than one -- a single pack needs no divider.
+  if(starts.length < 2) return;
+  for(let p = starts.length - 1; p >= 0; p--){
+    const to = p + 1 < starts.length ? starts[p + 1].gridNo - 1 : n;
+    const card = cards.get(ITEMS[starts[p].index].key);
+    if(!card) continue;
+    // Pack 1 opens at the head logo, which already sits above its first item.
+    const anchor = (p === 0 && logo) ? cards.get(logo.key) || card : card;
+    grid.insertBefore(makeSep(p + 1, starts[p].gridNo, to), anchor);
   }
 }
 
@@ -986,7 +1085,8 @@ function setCard(it){
 }
 function setAll(fn){ remember();
   for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); }
-  updateCount(); }
+  // renumber() too, not just the counter: unticking moves the pack splits.
+  renumber(); updateCount(); }
 
 // Reduced motion is the one case where nothing plays by itself; hover is then
 // the only way to see a video move at all, so the old handlers survive for it.
@@ -1017,7 +1117,7 @@ grid.addEventListener('click',e=>{
   } else {
     ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
   }
-  lastIdx=i; updateCount();
+  lastIdx=i; renumber(); updateCount();
 });
 
 // --- Undo / redo ---------------------------------------------------------
@@ -1285,6 +1385,14 @@ document.addEventListener('drop',e=>{
   if(!e.target.closest('#grid')) endDrag();
 });
 
+// Plain document scrolling, NOT scrollIntoView. scrollIntoView aligns the
+// element with the top of the VIEWPORT, which is behind the sticky header, so
+// "Top" stopped one header short and hid the Pack 1 marker; the same alignment
+// rule cut the bottom short. The document ends where the last row does, and
+// the header floats above it, so scrolling the document reaches both edges.
+document.getElementById('top').onclick=()=>window.scrollTo({top:0});
+document.getElementById('bot').onclick=()=>
+  window.scrollTo({top:document.documentElement.scrollHeight});
 document.getElementById('all').onclick=()=>setAll(()=>true);
 document.getElementById('none').onclick=()=>setAll(()=>false);
 document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
@@ -1421,6 +1529,10 @@ def main() -> int:
     ap.add_argument("--all", action="store_true",
                     help="Also show emoji already live in a pack. They are hidden by "
                          "default so the grid is the pack being built.")
+    ap.add_argument("--with-pack", type=int, action="append", metavar="N",
+                    help="Also show the emoji already live in pack N, so a "
+                         "half-full pack can be arranged beside the new "
+                         "candidates going into it. Repeatable.")
     args = ap.parse_args()
 
     data_dir = (ROOT / args.data_dir) if not os.path.isabs(args.data_dir) else Path(args.data_dir)
@@ -1431,9 +1543,19 @@ def main() -> int:
 
     bot_username = _detect_bot_username()
 
+    keep_sets = packs_named(data_dir, set(args.with_pack)) if args.with_pack else set()
+    if args.with_pack and not keep_sets:
+        # Silence here would look identical to "that pack holds nothing".
+        log.error("no published pack matches %s in %s",
+                  sorted(set(args.with_pack)), data_dir)
+        return 2
+    if keep_sets:
+        log.info("also showing already-live emoji from: %s",
+                 ", ".join(sorted(keep_sets)))
+
     cat = Catalog(db_path)
     try:
-        view, by_key, hidden = build_view(cat, bot_username, args.all)
+        view, by_key, hidden = build_view(cat, bot_username, args.all, keep_sets)
     finally:
         cat.close()
     log.info("loaded %d emoji from %s", len(view), db_path)
@@ -1443,7 +1565,7 @@ def main() -> int:
     # catalog behind the user's back.
     token = secrets.token_urlsafe(24)
     handler = make_handler(view, by_key, db_path, token, args.preview_fps,
-                           bot_username, args.all, hidden)
+                           bot_username, args.all, hidden, keep_sets)
 
     class QuietServer(ThreadingHTTPServer):
         # SO_REUSEADDR OFF. socketserver turns it on by default, and on Windows
