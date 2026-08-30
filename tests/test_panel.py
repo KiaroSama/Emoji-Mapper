@@ -1229,5 +1229,136 @@ class OnlyOnePanelPerPort(unittest.TestCase):
         self.assertIn("already running", second.stdout + second.stderr)
 
 
+class OnePackCanBeUnhidden(unittest.TestCase):
+    """`--with-pack N` re-opens ONE published set, not all of them.
+
+    `--all` is the wrong tool for arranging a half-full pack: it also brings
+    back every finished pack, which on the real catalog is hundreds of cards
+    nothing can be done with.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        self.db = self.data / "catalog.db"
+        with Catalog(self.db) as cat:
+            for i in range(6):
+                img = self.data / "media" / "static" / f"i{i}.png"
+                _make_png(img)
+                cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
+                        emojis=["😀"], keywords=[f"item{i}"])
+            for i in (0, 1):
+                cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
+                                  base="pk", set_name="pk1_by_bot")
+            for i in (2, 3):
+                cat.mark_uploaded(f"s:item{i:030d}", f"cid{i}",
+                                  base="pk", set_name="pk2_by_bot")
+            # 4 and 5 stay unpublished: the new candidates.
+        (self.data / "publish_pk.json").write_text(json.dumps({
+            "sets": [{"name": "pk1_by_bot", "index": 1, "live": 3, "logo": True},
+                     {"name": "pk2_by_bot", "index": 2, "live": 3, "logo": True}],
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _keys(self, keep=None):
+        with Catalog(self.db) as cat:
+            view, _bk, hidden = p.build_view(cat, "", False, keep)
+        return {v["key"] for v in view if not v.get("isLogo")}, hidden
+
+    def test_an_index_resolves_through_the_publishers_own_state(self):
+        """Not by rebuilding '<base><n>_by_<bot>' -- the file records it."""
+        self.assertEqual(p.packs_named(self.data, {2}), {"pk2_by_bot"})
+        self.assertEqual(p.packs_named(self.data, {1, 2}),
+                         {"pk1_by_bot", "pk2_by_bot"})
+        self.assertEqual(p.packs_named(self.data, {9}), set(), "no such pack")
+
+    def test_only_the_named_pack_comes_back(self):
+        keys, hidden = self._keys(p.packs_named(self.data, {2}))
+        self.assertEqual(hidden, 2, "pack 1 stays hidden")
+        for i in (2, 3):
+            self.assertIn(f"s:item{i:030d}", keys, "pack 2 is visible")
+        for i in (0, 1):
+            self.assertNotIn(f"s:item{i:030d}", keys, "pack 1 is not")
+        for i in (4, 5):
+            self.assertIn(f"s:item{i:030d}", keys, "candidates always show")
+
+    def test_without_the_flag_every_published_pack_stays_hidden(self):
+        keys, hidden = self._keys(None)
+        self.assertEqual(hidden, 4)
+        self.assertEqual(keys, {f"s:item{i:030d}" for i in (4, 5)})
+
+    def test_a_row_with_no_recorded_set_is_not_unhidden_by_guesswork(self):
+        """Unknown WHERE must not be answered with "probably that one"."""
+        with Catalog(self.db) as cat:
+            cat.mark_uploaded(f"s:item{4:030d}", "cid4", base="pk", set_name=None)
+        keys, _h = self._keys(p.packs_named(self.data, {2}))
+        self.assertNotIn(f"s:item{4:030d}", keys)
+
+
+class PackSplitsAndJumpButtons(unittest.TestCase):
+    """The pack-boundary markers, and the two jump buttons beside them."""
+
+    def test_a_separator_is_never_a_card(self):
+        """The drop handler resolves its target with closest('.card').
+
+        A separator carrying that class would sit between cards, swallow a drop
+        aimed past it and do nothing -- the same shape as the bug where a drop
+        on a grid gap silently threw the emoji to the end. It is `.packsep`.
+        """
+        page = p.PAGE
+        css = page[page.index(".packsep{"):]
+        self.assertIn("grid-column:1/-1", css[:css.index("}")])
+        body = page[page.index("function makeSep("):]
+        body = body[:body.index("\nfunction ")]
+        self.assertIn("el('div','packsep')", body)
+        self.assertNotIn("'card'", body)
+        self.assertNotIn("packsep card", page)
+        # And the drop handler still keys off .card, so the two cannot meet.
+        self.assertIn("e.target.closest('.card')", page)
+
+    def test_the_splits_are_counted_from_included_items_only(self):
+        """An unticked card never ships, so it cannot push the boundary."""
+        body = p.PAGE[p.PAGE.index("function renumber("):]
+        body = body[:body.index("\n// Only the cards you can actually see")] \
+            if "\n// Only the cards you can actually see" in body else body[:4000]
+        self.assertIn("!it.isLogo && it.included", body)
+        # capacity leaves a slot for the logo, exactly as build_collection does.
+        self.assertIn("PER_SET - (logo ? 1 : 0)", body)
+
+    def test_selection_changes_recompute_the_splits(self):
+        """Both inclusion paths must renumber, not just update the counter.
+
+        Only reorder called renumber() before; unticking enough cards genuinely
+        moves a boundary, so a counter-only refresh left the markers lying.
+        """
+        page = p.PAGE
+        self.assertIn("renumber(); updateCount(); }", page)     # setAll
+        self.assertIn("lastIdx=i; renumber(); updateCount();", page)  # one card
+
+    def test_separators_are_rebuilt_rather_than_accumulated(self):
+        body = p.PAGE[p.PAGE.index("function renumber("):]
+        self.assertIn("querySelectorAll('.packsep')", body[:600])
+        self.assertIn("s.remove()", body[:600])
+
+    def test_one_pack_needs_no_divider(self):
+        body = p.PAGE[p.PAGE.index("function renumber("):]
+        self.assertIn("if(starts.length < 2) return;", body)
+
+    def test_the_header_offers_top_and_bottom(self):
+        page = p.PAGE
+        self.assertIn('id="top"', page)
+        self.assertIn('id="bot"', page)
+        # Document scrolling, NOT scrollIntoView: that aligns with the top of
+        # the viewport, which sits behind the sticky header, so Top stopped one
+        # header short of the Pack 1 marker and Bottom stopped short too.
+        jump = page[page.index("document.getElementById('top').onclick"):]
+        jump = jump[:400]
+        self.assertIn("window.scrollTo({top:0})", jump)
+        self.assertIn("document.documentElement.scrollHeight", jump)
+        self.assertNotIn("scrollIntoView", jump)
+
+
 if __name__ == "__main__":
     unittest.main()
