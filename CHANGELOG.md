@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `panel.py --with-pack N`, to arrange a half-full pack
+
+- **Un-hides one published set** so its emoji can be arranged beside the new
+  candidates going into it: `panel.py --with-pack 5` shows pack 5 and the
+  unpublished items together, and nothing else. Repeatable.
+- `--all` was the only way to do this and is the wrong tool: it also returns
+  every finished pack, which on a grown catalog is hundreds of cards that
+  cannot change.
+- The index is resolved through the publisher's own `publish_*.json` rather
+  than by rebuilding `<base><n>_by_<bot>`, because the state file already
+  records the exact name. An index that matches no published pack is an error,
+  not an empty grid — silence there is indistinguishable from "that pack is
+  empty".
+- Here, and only here, the lookup asks *which* set an item belongs to, so a
+  publication row with no recorded `set_name` stays hidden: unknown-where is
+  not answered with a guess. The plain filter still asks only *whether* a row
+  exists.
+
+### Added — the curate panel shows where each published pack starts and ends
+
+- **Pack boundary markers.** When the selection spans more than one set, a
+  full-width marker carrying the brand logo now sits at the head of each pack,
+  labelled with the grid range it covers. The logo really is the first emoji of
+  every set and costs one of the 200 slots, so this is where it will land.
+- The splits are counted from **included** items only — an unticked card never
+  ships and so cannot push the next emoji into the following pack — which is
+  why selection changes now recompute them and not just the counter.
+- A marker is a `.packsep`, deliberately not a `.card`: the drop handler
+  resolves its target with `closest('.card')`, so a marker carrying that class
+  would swallow a drop aimed past it and do nothing. Markers live only in the
+  DOM — never in `ITEMS`, never saved — so reorder and save are unaffected.
+- **↑ Top / ↓ Bottom** buttons in the header. They scroll the document rather
+  than calling `scrollIntoView`, which aligns an element with the top of the
+  viewport — behind the sticky header — and so stopped a header-height short of
+  both ends.
+
 ### Fixed — the curate panel kept showing an abandoned pack's emoji
 
 - **A published pack that is not full no longer appears in the grid.** The panel
