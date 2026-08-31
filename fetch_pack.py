@@ -24,7 +24,8 @@ import logging
 import os
 from pathlib import Path
 
-from build_pack import (EXIT_USAGE, ingest_exit_code, load_env)
+from build_pack import (EXIT_USAGE, REPAINT_MODES, ingest_exit_code,
+                        load_env, repaintable_gate)
 from telegram_api import (Telegram)
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
@@ -50,7 +51,8 @@ def _media_path(data_dir: Path, fmt: str, content_key: str, ext: str | None = No
 
 
 def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
-              tmp_dir: Path, limit: int = 0) -> dict[str, int]:
+              tmp_dir: Path, limit: int = 0,
+              repaintable: str = "ask") -> dict[str, int]:
     """Ingest a single pack; returns counts of new/dedup/skipped/failed.
 
     ``limit`` bounds NEW catalog items, not stickers looked at: already-known
@@ -61,7 +63,16 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
     sset = tg.get_sticker_set(name)
     stickers = sset.get("stickers", [])
     title = sset.get("title", name)
-    counts = {"new": 0, "dedup": 0, "skipped": 0, "failed": 0}
+    counts = {"new": 0, "dedup": 0, "skipped": 0, "failed": 0, "repaintable": 0}
+
+    # Asked once per pack, before any download. The flag is per STICKER even
+    # when the whole set is repaintable -- getStickerSet answers None at the set
+    # level -- so this reads the stickers, not sset.
+    repainted = [str(s.get("file_unique_id", "?")) for s in stickers
+                 if media.is_repaintable(s)]
+    if repainted and not repaintable_gate(repainted, mode=repaintable):
+        stickers = [s for s in stickers if not media.is_repaintable(s)]
+        counts["repaintable"] = len(repainted)
 
     for i, st in enumerate(stickers):
         if limit and counts["new"] >= limit:
@@ -111,8 +122,9 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
         if (i + 1) % 50 == 0:
             log.info("  %s: %d/%d processed", name, i + 1, len(stickers))
 
-    log.info("Pack %s (%s): %d stickers -> new=%d dedup=%d failed=%d",
-             name, title, len(stickers), counts["new"], counts["dedup"], counts["failed"])
+    log.info("Pack %s (%s): %d stickers -> new=%d dedup=%d failed=%d "
+             "repaintable_skipped=%d", name, title, len(stickers), counts["new"],
+             counts["dedup"], counts["failed"], counts["repaintable"])
     return counts
 
 
@@ -134,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=0,
                     help="Max NEW catalog items per pack; already-known stickers "
                          "are skipped and do not count (0=all).")
+    ap.add_argument("--repaintable", choices=REPAINT_MODES, default="ask",
+                    help="Emoji Telegram repaints (they arrive black in our "
+                         "packs): ask (default), skip, or keep.")
     args = ap.parse_args(argv)
 
     # A negative limit is not "no limit": ``counts["new"] >= -1`` is true before
@@ -160,13 +175,14 @@ def main(argv: list[str] | None = None) -> int:
         log.error("getMe failed: %s", redact(str(exc)))
         return 2
 
-    total = {"new": 0, "dedup": 0, "failed": 0}
+    total = {"new": 0, "dedup": 0, "failed": 0, "repaintable": 0}
     packs_failed = 0
     with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
         for raw in args.packs:
             name = pack_name(raw)
             try:
-                c = fetch_one(tg, cat, name, data_dir, tmp_dir, args.limit)
+                c = fetch_one(tg, cat, name, data_dir, tmp_dir, args.limit,
+                              args.repaintable)
             except RuntimeError as exc:
                 # A pack that never loaded is a failed item, not a no-op: only
                 # per-sticker failures were counted, so a run where every pack
@@ -183,9 +199,12 @@ def main(argv: list[str] | None = None) -> int:
         f.unlink(missing_ok=True)
     tmp_dir.rmdir() if not any(tmp_dir.iterdir()) else None
 
-    log.info("TOTAL ingested: new=%d dedup=%d failed=%d packs_failed=%d",
-             total["new"], total["dedup"], total["failed"], packs_failed)
+    log.info("TOTAL ingested: new=%d dedup=%d failed=%d packs_failed=%d "
+             "repaintable_skipped=%d", total["new"], total["dedup"],
+             total["failed"], packs_failed, total["repaintable"])
     extra = f" packs_failed={packs_failed}" if packs_failed else ""
+    if total["repaintable"]:
+        extra += f" repaintable_skipped={total['repaintable']}"
     print(f"Done. new={total['new']} dedup={total['dedup']} "
           f"failed={total['failed']}{extra}", flush=True)
     for fmt, s in sorted(stats.items()):
