@@ -21,7 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
 
 from emojikit import media  # noqa: E402
 
@@ -667,6 +667,116 @@ class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
         self.assertEqual(media.content_key(src, "video"),
                          media.content_key(clone, "video"),
                          "two encodes of one frame must dedup onto one key")
+
+
+class SameImageSurvivesAReEncode(unittest.TestCase):
+    """`content_key` equality cannot answer "is this our upload?".
+
+    The key is a SHA of exact pixels, so Telegram's lossy re-encode changes it
+    for a picture that is visually identical. The publisher read that as proof
+    of a FOREIGN sticker and stopped a 449-emoji run on one that had landed
+    correctly, so a mismatch must not be a negative on its own.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _art(self, name, seed=0):
+        """A mark with smooth shapes, like the logos this actually ships."""
+        img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(img)
+        dr.ellipse([8, 8, 92, 92], fill=(20 + seed * 90, 120, 220 - seed * 60, 255))
+        dr.rounded_rectangle([30 - seed * 12, 34, 70, 66 + seed * 14],
+                             radius=8, fill=(255, 255, 255, 255))
+        p = self.d / name
+        img.save(p, format="PNG")
+        return p
+
+    def _lossy(self, src, name, quality=90):
+        """A lossy re-encode that keeps RGB under transparent pixels.
+
+        ``exact=True`` is not decoration here, it is what makes this a model of
+        Telegram rather than of a different bug. Without it libwebp rewrites the
+        colour beneath fully transparent pixels -- owner rule 1's trap -- and
+        the dHash moves 12 bits on a picture that looks untouched, against the
+        0..3 measured on real round-tripped stickers. A fixture drifting four
+        times further than the thing it stands for would be testing the
+        tolerance against a fiction.
+        """
+        p = self.d / name
+        Image.open(src).convert("RGBA").save(p, format="WEBP",
+                                             quality=quality, exact=True)
+        return p
+
+    def test_the_exact_key_really_does_move(self):
+        """If it did not, this whole function would be unnecessary."""
+        src = self._art("a.png")
+        enc = self._lossy(src, "a.webp")
+        self.assertNotEqual(media.content_key(src, "static"),
+                            media.content_key(enc, "static"),
+                            "no drift: the fixture cannot exercise the bug")
+
+    def test_a_re_encode_of_the_same_picture_is_the_same_picture(self):
+        src = self._art("a.png")
+        self.assertIs(media.same_image(self._lossy(src, "a.webp"), src, "static"),
+                      True)
+
+    def test_an_identical_file_takes_the_exact_path(self):
+        src = self._art("a.png")
+        self.assertIs(media.same_image(src, src, "static"), True)
+
+    def test_a_different_picture_is_still_rejected(self):
+        """The tolerance must not have swallowed the guard it replaced."""
+        a, b = self._art("a.png", seed=0), self._art("b.png", seed=9)
+        self.assertIs(media.same_image(self._lossy(a, "a.webp"), b, "static"),
+                      False)
+
+    def test_animated_cannot_be_decided_and_says_so(self):
+        """Vector has no raster hash -- and unknown is not false.
+
+        Answering False here would accuse a live sticker of being a stranger on
+        the strength of a comparison that was never made.
+        """
+        a, b = self._art("a.png", seed=0), self._art("b.png", seed=9)
+        self.assertIsNone(media.same_image(a, b, "animated"))
+
+    def test_the_same_shape_in_another_colour_is_not_our_upload(self):
+        """dHash is grayscale, so structure alone cannot answer this.
+
+        A red square and a stranger's green square of the same shape sit 4 bits
+        apart -- inside any tolerance loose enough to survive the re-encode. A
+        structure-only check therefore reports a foreign sticker as ours, which
+        is how an item gets marked done against someone else's emoji. Colour is
+        the second, independent signal that catches it.
+
+        Not a hypothetical: accepting this pair is exactly the regression that
+        `test_a_foreign_sticker_landing_is_not_read_as_our_upload` caught.
+        """
+        def square(name, colour):
+            img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+            ImageDraw.Draw(img).rectangle([20, 20, 79, 79], fill=colour)
+            p = self.d / name
+            img.save(p, format="PNG")
+            return p
+
+        ours = square("ours.png", (200, 30, 30, 255))
+        theirs = square("theirs.png", (10, 200, 40, 255))
+        self.assertLessEqual(
+            media.hamming(media.perceptual_hash(ours, "static"),
+                          media.perceptual_hash(theirs, "static")),
+            media.UPLOAD_PHASH_TOLERANCE,
+            "fixture no longer exercises the hole: structure alone must accept these")
+        self.assertIs(media.same_image(ours, theirs, "static"), False)
+
+    def test_an_unreadable_file_is_undecidable_not_negative(self):
+        good = self._art("a.png")
+        bad = self.d / "torn.png"
+        bad.write_bytes(b"not an image")
+        self.assertIsNone(media.same_image(bad, good, "static"))
 
 
 if __name__ == "__main__":

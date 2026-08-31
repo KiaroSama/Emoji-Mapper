@@ -905,10 +905,18 @@ class Telegram:
     def _sticker_matches(self, sticker: dict, source: Path) -> bool | None:
         """Does a live sticker hold the image in ``source``?
 
-        Telegram re-encodes on upload, so bytes never match; compare the
-        decoded pixels through the project's own content key. Returns None when
-        the comparison itself could not be made, so the caller keeps treating
-        the outcome as unknown rather than as a negative.
+        Telegram re-encodes on upload, so bytes never match. Comparing the
+        project's content key was the first attempt and it is not enough
+        either: that key is a SHA of exact pixels, so a LOSSY re-encode changes
+        it for a picture that is visually identical. Every answer this gave for
+        our own uploads was therefore "different", and because the caller reads
+        False as "a foreign sticker landed", a 449-emoji publish stopped dead on
+        a sticker that had landed perfectly well.
+
+        ``media.same_image`` owns the decision now: exact key first, then a
+        measured tolerance for static, and None for anything it has no measured
+        tolerance for. Returns None when the comparison could not be made OR
+        could not be trusted, so the caller reconciles instead of accusing.
         """
         try:
             from emojikit import media
@@ -919,7 +927,7 @@ class Telegram:
             fmt = media.telegram_sticker_format(sticker)
             tmp = Path(tempfile.gettempdir()) / f"_em_{sticker['file_unique_id']}"
             self.download_file(sticker["file_id"], tmp)
-            return media.content_key(tmp, fmt) == media.content_key(source, fmt)
+            return media.same_image(tmp, source, fmt)
         except Exception:         # noqa: BLE001 - a failed probe is not a "no"
             return None
         finally:
