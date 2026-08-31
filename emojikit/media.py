@@ -40,7 +40,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 log = logging.getLogger("emojikit.media")
 
@@ -713,6 +713,84 @@ def reencode_in_place(path: Path, fmt: str) -> bool:
 
 def _norm_pixels(img: Image.Image, n: int = 64) -> bytes:
     return img.convert("RGBA").resize((n, n), Image.LANCZOS).tobytes()
+
+
+# Two tolerances, and BOTH must hold. Neither is sufficient alone, which is the
+# whole point of this pair:
+#
+#   * dHash survives Telegram's re-encode but is a GRAYSCALE structural hash,
+#     so it is colour-blind. Our red square and a stranger's green square of
+#     the same shape sit 4 bits apart -- inside any useful tolerance. Trusting
+#     it alone marks our item done against someone else's sticker.
+#   * The mean channel delta is colour-aware but says nothing about structure.
+#
+# Measured over 30 known-same pairs (a local file against the live sticker it
+# produced) and 30 known-different pairs, across three published packs:
+#
+#     dHash bits        same 0..3       different 12..47
+#     mean delta        same 0.02..2.35 different 35.46..188.22
+#
+# 6 bits clears every same pair by 3 and every different one by 6; 8.0 sits
+# ~3x above the worst same and ~4x below the closest different. The colour test
+# also catches the same-shape-different-colour case dHash cannot see: that pair
+# measures 33.44.
+UPLOAD_PHASH_TOLERANCE = 6
+UPLOAD_MEAN_DELTA = 8.0
+
+
+def _premultiplied(path: Path, n: int = 64) -> Image.Image:
+    """A 64x64 RGBA render with each colour scaled by its own alpha.
+
+    RGB underneath a fully transparent pixel is undefined and encoders rewrite
+    it freely -- libwebp does exactly that without ``exact=True``, owner rule
+    1's trap. Comparing raw channels therefore sees differences of the full
+    0..255 range in pixels invisible in both images. Multiplying by alpha
+    collapses every transparent pixel to the same value, so only what can
+    actually be seen is compared.
+    """
+    img = Image.open(path).convert("RGBA").resize((n, n), Image.LANCZOS)
+    r, g, b, a = img.split()
+    return Image.merge("RGBA", (ImageChops.multiply(r, a),
+                                ImageChops.multiply(g, a),
+                                ImageChops.multiply(b, a), a))
+
+
+def same_image(a: Path, b: Path, fmt: str) -> bool | None:
+    """Do two files hold the same picture? None when it cannot be decided.
+
+    ``content_key`` equality alone is the wrong question across a Telegram
+    round trip: the key is a SHA of exact pixels, so a lossy re-encode changes
+    it for a picture that is visually identical. Reading that as proof of a
+    DIFFERENT image is what stopped a 449-emoji publish on a sticker that had
+    landed perfectly well.
+
+    Exact first, because when the re-encode happens to be pixel-exact that is
+    the strongest answer available. Then structure AND colour, both of which
+    must agree -- see the tolerances above for why either alone is unsafe.
+
+    A false negative here costs a halted publish, which is recoverable; a false
+    positive attributes a stranger's sticker to our item, which is not. The
+    asymmetry is why this asks for two independent agreements rather than one.
+
+    Animated is vector and has no raster hash, so a mismatch there is
+    undecidable rather than negative -- unknown is not false. Callers read None
+    as "reconcile", which is safe, and False as "a foreign sticker landed",
+    which is not a claim this could honestly make from a comparison it could
+    not perform.
+    """
+    try:
+        if content_key(a, fmt) == content_key(b, fmt):
+            return True
+        ha, hb = perceptual_hash(a, fmt), perceptual_hash(b, fmt)
+        if ha is None or hb is None:
+            return None
+        if hamming(ha, hb) > UPLOAD_PHASH_TOLERANCE:
+            return False
+        diff = ImageChops.difference(_premultiplied(a), _premultiplied(b))
+        return sum(ImageStat.Stat(diff).mean) / 4.0 <= UPLOAD_MEAN_DELTA
+    except Exception as exc:     # noqa: BLE001 - a failed probe is not a "no"
+        log.debug("same_image(%s, %s) failed: %s", a.name, b.name, exc)
+        return None
 
 
 def content_key(path: Path, fmt: str) -> str:
