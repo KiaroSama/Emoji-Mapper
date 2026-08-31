@@ -207,6 +207,24 @@ def telegram_sticker_format(sticker: dict) -> str:
     return "static"
 
 
+def is_repaintable(sticker: dict) -> bool:
+    """True when Telegram REPAINTS this emoji instead of showing its own colours.
+
+    The flag lives on the **Sticker**, not on the StickerSet: `getStickerSet`
+    on a set whose every sticker is repaintable still answers None at the set
+    level (measured on `TopicIcons`: 160/160 stickers True, set field None), so
+    reading the set is exactly how this gets missed.
+
+    Such an emoji carries no colour of its own -- the client paints it with the
+    text or accent colour -- so the stored asset is typically flat black.
+    Republished into a set WITHOUT the flag it arrives black, which is not a
+    conversion fault and no re-encoding fixes it. The flag cannot be added
+    afterwards either: the Bot API exposes it only on the Sticker object and in
+    createNewStickerSet, with no setter, and it is a whole-set property.
+    """
+    return bool(sticker.get("needs_repainting"))
+
+
 def ext_for_format(fmt: str) -> str:
     return {"static": ".png", "animated": ".tgs", "video": ".webm"}.get(fmt, ".bin")
 

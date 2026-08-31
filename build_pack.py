@@ -70,6 +70,63 @@ def ingest_exit_code(succeeded: int, failed: int) -> int:
     return EXIT_PARTIAL if succeeded else EXIT_FAILED
 
 
+# What to do about emoji Telegram repaints (see media.is_repaintable).
+REPAINT_MODES = ("ask", "skip", "keep")
+_REPAINT_SAMPLE = 8
+_NO_ANSWER = ("  nobody answered, so skipping them. Re-run with "
+              "--repaintable keep to ingest them.")
+
+
+def repaintable_gate(labels: list[str], *, mode: str = "ask",
+                     prompt=None) -> bool:
+    """Should these repaintable emoji be ingested? True = keep them.
+
+    ``ask`` prompts, but only when there is someone to answer: with no tty the
+    answer is SKIP, because skipping is the reversible half. A skipped emoji is
+    one re-run away with ``--repaintable keep``; one already published into a
+    live set has to be replaced sticker by sticker -- the exact round trip this
+    gate exists to prevent.
+    """
+    if not labels:
+        return True
+    n = len(labels)
+    shown = ", ".join(labels[:_REPAINT_SAMPLE])
+    if n > _REPAINT_SAMPLE:
+        shown += f", ... (+{n - _REPAINT_SAMPLE} more)"
+    warning = "\n".join((
+        f"WARNING: {n} of these emoji are REPAINTABLE: {shown}",
+        "  Telegram paints them with the text/accent colour, so the stored art"
+        " is usually flat black.",
+        "  Published into a pack without that flag they will look black, and"
+        " the flag cannot be added to an existing set.",
+    ))
+    log.warning("%d repaintable emoji in this batch: %s", n, shown)
+    print(warning, file=sys.stderr)
+
+    if mode == "keep":
+        print("  --repaintable keep: ingesting them anyway.", file=sys.stderr)
+        return True
+    if mode == "skip":
+        print("  --repaintable skip: leaving them out.", file=sys.stderr)
+        return False
+
+    if prompt is None:
+        if not sys.stdin.isatty():
+            print(_NO_ANSWER, file=sys.stderr)
+            return False
+        prompt = input
+    try:
+        answer = prompt("  Ingest them anyway? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        # isatty() is NOT enough: under Git Bash `... < /dev/null` still reports
+        # a tty, and input() then raises EOFError and kills the whole ingest.
+        # A question nobody answered is a no, never a crash.
+        print("", file=sys.stderr)
+        print(_NO_ANSWER, file=sys.stderr)
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 
 
 def safe_int_env(name: str, default: int = 0, *, minimum: int | None = None,

@@ -30,7 +30,8 @@ import os
 import re
 from pathlib import Path
 
-from build_pack import (ingest_exit_code, load_env)
+from build_pack import (REPAINT_MODES, ingest_exit_code, load_env,
+                        repaintable_gate)
 from telegram_api import (Telegram)
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
@@ -131,9 +132,9 @@ def _media_path(data_dir: Path, fmt: str, content_key: str, ext: str | None = No
 
 
 def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
-              tmp_dir: Path) -> dict[str, int]:
+              tmp_dir: Path, repaintable: str = "ask") -> dict[str, int]:
     """Resolve + download the given unique IDs; return run counts."""
-    counts = {"new": 0, "dedup": 0, "failed": 0, "missing": 0}
+    counts = {"new": 0, "dedup": 0, "failed": 0, "missing": 0, "repaintable": 0}
 
     # 1) Resolve every ID to its Sticker object (batches of 200).
     resolved: dict[str, dict] = {}
@@ -152,7 +153,16 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
         log.warning("%d id(s) could not be resolved by Telegram: %s",
                     len(missing), ", ".join(missing[:20]))
 
-    # 2) Download + ingest each resolved sticker.
+    # 2) Ask once about the ones Telegram repaints, BEFORE any download: they
+    #    arrive black in a pack that lacks the flag, and that is only cheap to
+    #    undo while they are still out of the catalog.
+    repainted = [cid for cid, st in resolved.items() if media.is_repaintable(st)]
+    if repainted and not repaintable_gate(repainted, mode=repaintable):
+        for cid in repainted:
+            resolved.pop(cid)
+        counts["repaintable"] = len(repainted)
+
+    # 3) Download + ingest each remaining sticker.
     for n, (cid, st) in enumerate(resolved.items(), 1):
         fuid = str(st.get("file_unique_id", ""))
         emoji = st.get("emoji")
@@ -216,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
                     default=DEFAULT_PHASH_THRESHOLD,
                     help="Hamming distance for near-duplicate merging "
                          "(-1 disables, else 0..16).")
+    ap.add_argument("--repaintable", choices=REPAINT_MODES, default="ask",
+                    help="Emoji Telegram repaints (they arrive black in our "
+                         "packs): ask (default), skip, or keep.")
     args = ap.parse_args(argv)
 
     if not args.ids_file and not args.inline_ids:
@@ -245,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
-        counts = fetch_ids(tg, cat, ids, data_dir, tmp_dir)
+        counts = fetch_ids(tg, cat, ids, data_dir, tmp_dir, args.repaintable)
         stats = cat.stats()
 
     # Clean the scratch download directory (keep the catalog + media).
@@ -254,10 +267,13 @@ def main(argv: list[str] | None = None) -> int:
     if tmp_dir.exists() and not any(tmp_dir.iterdir()):
         tmp_dir.rmdir()
 
-    log.info("TOTAL: unique_ids=%d new=%d dedup=%d failed=%d missing=%d",
-             len(ids), counts["new"], counts["dedup"], counts["failed"], counts["missing"])
+    log.info("TOTAL: unique_ids=%d new=%d dedup=%d failed=%d missing=%d "
+             "repaintable_skipped=%d", len(ids), counts["new"], counts["dedup"],
+             counts["failed"], counts["missing"], counts["repaintable"])
     print(f"Done. unique_ids={len(ids)} new={counts['new']} dedup={counts['dedup']} "
-          f"failed={counts['failed']} missing={counts['missing']}", flush=True)
+          f"failed={counts['failed']} missing={counts['missing']}"
+          + (f" repaintable_skipped={counts['repaintable']}"
+             if counts["repaintable"] else ""), flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
     # A requested id Telegram could not resolve is a real miss, not a success.

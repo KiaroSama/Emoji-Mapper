@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `--repaintable`, a gate on emoji Telegram paints itself
+
+A repaintable emoji carries no colour of its own: the client paints it with the
+text or accent colour, so the stored asset is typically flat black. Republished
+into one of our sets — created without that flag, and the Bot API has no method
+to add it afterwards — it arrives black. `5354899958329784877` from Telegram's
+built-in `TopicIcons` went through exactly that and had to be replaced sticker
+by sticker.
+
+- `fetch_pack.py` and `fetch_emoji_ids.py` now take
+  `--repaintable {ask,skip,keep}`, default `ask`. The check runs **before any
+  download**, once per run, and names the ids.
+- **The flag is on the Sticker, not the StickerSet.** `getStickerSet` on
+  `TopicIcons` answers `None` at the set level while all 160 of its stickers
+  answer `True`, so a gate that read the set would pass every one through.
+- With no one to answer, the default is **skip**, not proceed: a skipped emoji
+  is one re-run away with `--repaintable keep`, while one already published has
+  to be replaced in a live set.
+- **`isatty()` alone was not enough, and only a real run showed it.** Under Git
+  Bash, `fetch_emoji_ids.py … < /dev/null` still reports a tty; `input()` then
+  raised `EOFError` and killed the whole ingest with an uncaught traceback. A
+  question nobody answered is now a no. The fakes missed it because they inject
+  the prompt — the live run is what caught it.
+
+
 ### Added — `--repaint`, so a monochrome mark can look right
 
 - Telegram's own marks (TopicIcons and friends) are stored BLACK and painted by
