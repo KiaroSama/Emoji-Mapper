@@ -28,6 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
+import announce  # noqa: E402
 from tests._pack_fixtures import _png  # noqa: E402
 
 
@@ -41,25 +44,25 @@ class AtomicJsonWrite(unittest.TestCase):
 
     def test_writes_and_leaves_no_temp_file(self):
         target = self.dir / "state.json"
-        bp.write_json_atomic(target, {"done": ["a", "b"]})
+        ps.write_json_atomic(target, {"done": ["a", "b"]})
         self.assertEqual(json.loads(target.read_text(encoding="utf-8")),
                          {"done": ["a", "b"]})
         self.assertEqual(list(self.dir.iterdir()), [target])
 
     def test_previous_content_survives_a_failed_write(self):
         target = self.dir / "state.json"
-        bp.write_json_atomic(target, {"done": ["a"]})
+        ps.write_json_atomic(target, {"done": ["a"]})
         # A crash mid-serialisation must not truncate the existing file.
         unserialisable = {"done": {1, 2}}
         with self.assertRaises(TypeError):
-            bp.write_json_atomic(target, unserialisable)
+            ps.write_json_atomic(target, unserialisable)
         self.assertEqual(json.loads(target.read_text(encoding="utf-8")),
                          {"done": ["a"]})
 
     def test_overwrites_in_place(self):
         target = self.dir / "state.json"
-        bp.write_json_atomic(target, {"n": 1})
-        bp.write_json_atomic(target, {"n": 2})
+        ps.write_json_atomic(target, {"n": 1})
+        ps.write_json_atomic(target, {"n": 2})
         self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"n": 2})
 
 
@@ -81,8 +84,8 @@ class PerSetLimit(unittest.TestCase):
             return bp.main()
 
     def test_default_matches_telegram_cap(self):
-        self.assertEqual(bp.PER_SET, 200)
-        self.assertEqual(bp.MAX_PER_SET, 200)
+        self.assertEqual(tg_api.PER_SET, 200)
+        self.assertEqual(tg_api.MAX_PER_SET, 200)
 
     def test_zero_is_rejected_instead_of_dividing_by_zero(self):
         self.assertEqual(self._run("--per-set", "0"), 2)
@@ -124,7 +127,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         tg.get_me.return_value = {"username": "bot"}
         sset = {"stickers": [{"file_unique_id": f"f{i}"} for i in range(live_count)]}
         tg.probe_sticker_set.return_value = (True, sset)
-        tg.probe_set_state.return_value = (bp.SetState.EXISTS, sset)
+        tg.probe_set_state.return_value = (tg_api.SetState.EXISTS, sset)
         tg.add_sticker.return_value = None
         tg.create_set.return_value = None
         tg.send_message.return_value = None
@@ -154,7 +157,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
 
     def test_in_flight_record_attributes_the_upload_exactly(self):
         # b.png was applied but not recorded; the intent record names it.
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
             "in_flight": "b",
@@ -178,7 +181,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         The set grew by one while our add was unresolved -- but by someone
         else's sticker. Marking our item done here binds our source to theirs.
         """
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
             "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
@@ -199,7 +202,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         subsequent run, one transient blip turned terminal. What decides it is
         whether OUR image is among the arrivals, not how many arrived.
         """
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
             "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
@@ -227,7 +230,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
         pending and uploaded a SECOND copy of an image that was already live,
         then exited 0.
         """
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 2, "index": 1}],
             "in_flight": {"key": "b", "operation": "add", "set_name": "t1_by_bot",
@@ -251,7 +254,7 @@ class ResumeAfterSkippedImage(unittest.TestCase):
     def test_unexplained_drift_refuses_to_guess(self):
         # Two extra live stickers and no in-flight record: the old code silently
         # marked the first two pending images done, which is a coin-flip.
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
             "in_flight": None,
@@ -357,19 +360,19 @@ class LinksDestination(unittest.TestCase):
 
     def test_unset_falls_back_to_the_owner(self):
         with self._env(""):
-            self.assertEqual(bp.links_chat_id(self.OWNER), self.OWNER)
+            self.assertEqual(announce.links_chat_id(self.OWNER), self.OWNER)
 
     def test_numeric_channel_id_is_used_as_an_int(self):
         with self._env("-1001111111111"):
-            self.assertEqual(bp.links_chat_id(self.OWNER), -1001111111111)
+            self.assertEqual(announce.links_chat_id(self.OWNER), -1001111111111)
 
     def test_at_username_is_passed_through(self):
         with self._env("@packlinks"):
-            self.assertEqual(bp.links_chat_id(self.OWNER), "@packlinks")
+            self.assertEqual(announce.links_chat_id(self.OWNER), "@packlinks")
 
     def test_surrounding_whitespace_is_tolerated(self):
         with self._env("  -1001111111111  "):
-            self.assertEqual(bp.links_chat_id(self.OWNER), -1001111111111)
+            self.assertEqual(announce.links_chat_id(self.OWNER), -1001111111111)
 
     def test_every_publisher_resolves_the_same_destination(self):
         """A publisher that still hardcoded the owner would fail here.
@@ -383,7 +386,7 @@ class LinksDestination(unittest.TestCase):
         import build_collection
         import coins.rebuild_dedup as rd
         for module in (bp, build_collection, rd):
-            self.assertIs(module.announce_packs, bp.announce_packs,
+            self.assertIs(module.announce_packs, announce.announce_packs,
                           f"{module.__name__} must use the shared announcer")
         self.assertFalse(hasattr(build_collection, "links_chat_id"))
         self.assertFalse(hasattr(rd, "links_chat_id"))
@@ -449,7 +452,7 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
     def _tg(self):
         tg = mock.Mock()
         tg.get_me.return_value = {"username": "bot"}
-        tg.probe_set_state.return_value = (bp.SetState.MISSING, None)
+        tg.probe_set_state.return_value = (tg_api.SetState.MISSING, None)
         tg.send_message.return_value = None
         return tg
 
@@ -464,10 +467,10 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
         it left the whole 530-test suite green.
         """
         tg = self._tg()
-        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.create_set.side_effect = tg_api.AmbiguousUploadError("timed out after apply")
         # A set of that name exists with exactly one sticker -- but it is not ours.
         tg.probe_set_state.return_value = (
-            bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "STRANGER"}]})
+            tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "STRANGER"}]})
         tg._sticker_matches.return_value = False
 
         self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
@@ -481,9 +484,9 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
     def test_an_unverifiable_set_is_not_adopted_after_an_ambiguous_create(self):
         """`_sticker_matches` returning None is "could not look", not "it is ours"."""
         tg = self._tg()
-        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.create_set.side_effect = tg_api.AmbiguousUploadError("timed out after apply")
         tg.probe_set_state.return_value = (
-            bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "UNREADABLE"}]})
+            tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "UNREADABLE"}]})
         tg._sticker_matches.return_value = None
 
         self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
@@ -494,9 +497,9 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
     def test_our_own_set_is_still_adopted_after_an_ambiguous_create(self):
         """The positive control: proving identity must not block the real case."""
         tg = self._tg()
-        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
+        tg.create_set.side_effect = tg_api.AmbiguousUploadError("timed out after apply")
         sset = {"stickers": [{"file_unique_id": "OURS"}]}
-        tg.probe_set_state.return_value = (bp.SetState.EXISTS, sset)
+        tg.probe_set_state.return_value = (tg_api.SetState.EXISTS, sset)
         tg.probe_sticker_set.return_value = (True, sset)
         tg.add_sticker.return_value = None
         tg._sticker_matches.return_value = True
@@ -510,8 +513,8 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
         tg = self._tg()
         # First item creates the set; the second add comes back ambiguous.
         tg.create_set.return_value = None
-        tg.add_sticker.side_effect = bp.AmbiguousUploadError("timed out after apply")
-        tg.probe_set_state.return_value = (bp.SetState.EXISTS,
+        tg.add_sticker.side_effect = tg_api.AmbiguousUploadError("timed out after apply")
+        tg.probe_set_state.return_value = (tg_api.SetState.EXISTS,
                                            {"stickers": [{"file_unique_id": "f0"}]})
 
         code = self._run(tg)
@@ -527,8 +530,8 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
 
     def test_ambiguous_create_records_the_target_set(self):
         tg = self._tg()
-        tg.create_set.side_effect = bp.AmbiguousUploadError("timed out after apply")
-        tg.probe_set_state.return_value = (bp.SetState.MISSING, None)
+        tg.create_set.side_effect = tg_api.AmbiguousUploadError("timed out after apply")
+        tg.probe_set_state.return_value = (tg_api.SetState.MISSING, None)
 
         code = self._run(tg)
         self.assertEqual(code, bp.EXIT_PARTIAL)
@@ -538,14 +541,14 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
                         "an ambiguous create must record the set name it targeted")
 
     def test_unknown_live_state_on_resume_keeps_the_intent(self):
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": [], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 0, "index": 1}],
             "in_flight": {"key": "a", "operation": "add", "set_name": "t1_by_bot",
                           "set_index": 1, "expected_before": 0},
         })
         tg = self._tg()
-        tg.probe_set_state.return_value = (bp.SetState.UNKNOWN, None)
+        tg.probe_set_state.return_value = (tg_api.SetState.UNKNOWN, None)
 
         code = self._run(tg)
         self.assertEqual(code, bp.EXIT_PARTIAL)
@@ -555,7 +558,7 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
         self.assertIsNotNone(intent, "an unknown probe must not clear the intent")
 
     def test_state_for_a_different_base_is_refused(self):
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "OTHER", "per_set": 200, "done": [], "sent": [], "sets": [],
         })
         tg = self._tg()
@@ -567,7 +570,7 @@ class UnresolvedMutationStopsTheRun(unittest.TestCase):
         tg = self._tg()
         tg.create_set.return_value = None
         tg.add_sticker.return_value = None
-        tg.probe_set_state.return_value = (bp.SetState.EXISTS, {"stickers": []})
+        tg.probe_set_state.return_value = (tg_api.SetState.EXISTS, {"stickers": []})
         self.assertEqual(self._run(tg), bp.EXIT_PARTIAL,
                          "a skipped image must not report full success")
 
@@ -600,7 +603,7 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
                           "expected_before": 0, "title": "T 2"},
         }
         base.update(over)
-        bp.write_json_atomic(self.state, base)
+        ps.write_json_atomic(self.state, base)
 
     def _run(self, tg):
         argv = ["build_pack.py", "--base", "t", "--title", "T", "--user-id", "1",
@@ -625,8 +628,8 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
     def test_landed_create_of_set_two_is_adopted(self):
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"}]}),
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"}]}),
         })
         self._run(tg)
         tg.create_set.assert_not_called()
@@ -639,8 +642,8 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
     def test_missing_create_of_set_two_leaves_the_item_pending(self):
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.MISSING, None),
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.MISSING, None),
         })
         tg.create_set.return_value = None
         self._run(tg)
@@ -657,8 +660,8 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
         """
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "foreign"}]}),
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "foreign"}]}),
         }, matches=False)
         self.assertEqual(self._run(tg), bp.EXIT_FAILED)
         saved = json.loads(self.state.read_text(encoding="utf-8"))
@@ -675,8 +678,8 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
         """
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"},
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f2"},
                                                             {"file_unique_id": "extra"}]}),
         }, matches=True)          # even a matching FIRST sticker is not enough
         self.assertEqual(self._run(tg), bp.EXIT_FAILED)
@@ -689,16 +692,16 @@ class AmbiguousCreateForLaterSets(unittest.TestCase):
     def test_an_unverifiable_create_target_stops_retryably(self):
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "x"}]}),
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "x"}]}),
         }, matches=None)
         self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
 
     def test_unknown_create_stops_retryably(self):
         self._state()
         tg = self._tg({
-            "t1_by_bot": (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
-            "t2_by_bot": (bp.SetState.UNKNOWN, None),
+            "t1_by_bot": (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f1"}]}),
+            "t2_by_bot": (tg_api.SetState.UNKNOWN, None),
         })
         self.assertEqual(self._run(tg), bp.EXIT_PARTIAL)
         tg.create_set.assert_not_called()
@@ -715,7 +718,7 @@ class RecordedSetIntegrity(unittest.TestCase):
         self.src = self.dir / "src"
         _png(self.src / "a.png", (200, 0, 0, 255))
         self.state = self.dir / "state.json"
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": ["x"], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 5, "index": 1}],
             "in_flight": None,
@@ -739,19 +742,19 @@ class RecordedSetIntegrity(unittest.TestCase):
             return bp.main(), tg
 
     def test_deleted_recorded_set_is_an_integrity_stop(self):
-        code, tg = self._run((bp.SetState.MISSING, None))
+        code, tg = self._run((tg_api.SetState.MISSING, None))
         self.assertEqual(code, bp.EXIT_FAILED)
         tg.add_sticker.assert_not_called()
         tg.create_set.assert_not_called()
 
     def test_shrunken_set_is_an_integrity_stop(self):
         code, tg = self._run(
-            (bp.SetState.EXISTS, {"stickers": [{"file_unique_id": "f"}] * 3}))
+            (tg_api.SetState.EXISTS, {"stickers": [{"file_unique_id": "f"}] * 3}))
         self.assertEqual(code, bp.EXIT_FAILED, "negative drift must not be ignored")
         tg.add_sticker.assert_not_called()
 
     def test_unknown_recorded_set_is_retryable(self):
-        code, tg = self._run((bp.SetState.UNKNOWN, None))
+        code, tg = self._run((tg_api.SetState.UNKNOWN, None))
         self.assertEqual(code, bp.EXIT_PARTIAL)
         tg.add_sticker.assert_not_called()
 
@@ -767,17 +770,17 @@ class StateShapeValidation(unittest.TestCase):
         return s
 
     def test_a_sound_state_passes(self):
-        bp.validate_state_shape(self._ok(), base="t", per_set=200)
+        ps.validate_state_shape(self._ok(), base="t", per_set=200)
 
     def test_wrong_base_is_rejected(self):
-        with self.assertRaises(bp.StateInvalid):
-            bp.validate_state_shape(self._ok(base="other"), base="t", per_set=200)
+        with self.assertRaises(ps.StateInvalid):
+            ps.validate_state_shape(self._ok(base="other"), base="t", per_set=200)
 
     def test_negative_and_oversized_counts_are_rejected(self):
         for bad in (-1, 201):
             s = self._ok(sets=[{"name": "n", "title": "", "count": bad, "index": 1}])
-            with self.assertRaises(bp.StateInvalid):
-                bp.validate_state_shape(s, base="t", per_set=200)
+            with self.assertRaises(ps.StateInvalid):
+                ps.validate_state_shape(s, base="t", per_set=200)
 
     def test_duplicate_and_backwards_indexes_are_rejected(self):
         dup = self._ok(sets=[{"name": "a", "title": "", "count": 1, "index": 1},
@@ -785,19 +788,19 @@ class StateShapeValidation(unittest.TestCase):
         back = self._ok(sets=[{"name": "a", "title": "", "count": 1, "index": 2},
                               {"name": "b", "title": "", "count": 1, "index": 1}])
         for s in (dup, back):
-            with self.assertRaises(bp.StateInvalid):
-                bp.validate_state_shape(s, base="t", per_set=200)
+            with self.assertRaises(ps.StateInvalid):
+                ps.validate_state_shape(s, base="t", per_set=200)
 
     def test_malformed_intent_is_rejected(self):
         for bad in ({"key": "a"}, {"key": "a", "operation": "add"},
                     {"key": "a", "operation": "wat", "set_name": "s"}):
-            with self.assertRaises(bp.StateInvalid):
-                bp.validate_state_shape(self._ok(in_flight=bad),
+            with self.assertRaises(ps.StateInvalid):
+                ps.validate_state_shape(self._ok(in_flight=bad),
                                         base="t", per_set=200)
 
     def test_done_must_hold_strings(self):
-        with self.assertRaises(bp.StateInvalid):
-            bp.validate_state_shape(self._ok(done=[1, 2]), base="t", per_set=200)
+        with self.assertRaises(ps.StateInvalid):
+            ps.validate_state_shape(self._ok(done=[1, 2]), base="t", per_set=200)
 
 
 if __name__ == "__main__":

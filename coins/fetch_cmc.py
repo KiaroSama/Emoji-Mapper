@@ -31,7 +31,8 @@ import os
 import time
 import urllib.parse
 
-from build_pack import Telegram, ingest_exit_code, load_env
+from build_pack import (ingest_exit_code, load_env)
+from telegram_api import (Telegram)
 from coins import _http
 from coins._inventory import base_ticker
 # Reuse proven helpers from the CoinPaprika fetcher -- including the ONE

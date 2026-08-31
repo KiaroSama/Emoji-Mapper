@@ -26,7 +26,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_pack as bp  # noqa: E402
+import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
 from tests._rebuild_fixtures import FakeTelegram, RebuildCase, _png_bytes  # noqa: E402
 
@@ -76,7 +76,7 @@ class MapIsResolvedByImageIdentity(RebuildCase):
 
     def test_a_same_length_replacement_does_not_rewrite_the_map(self):
         """A stranger's image at the same position, same count, same length."""
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.images["s1"][1] = _png_bytes("someone-elses-logo")
         with self.assertRaises(SystemExit) as caught:
             rd.map_and_fill(self.tg)
@@ -87,21 +87,21 @@ class MapIsResolvedByImageIdentity(RebuildCase):
                         "a refusal must leave something reviewable behind")
 
     def test_a_live_sticker_that_cannot_be_read_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.images["s1"][1] = b"not an image at all"
         with self.assertRaises(SystemExit):
             rd.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"})
 
     def test_a_missing_source_image_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         (self.emoji / "bbb.png").unlink()
         with self.assertRaises(SystemExit):
             rd.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"})
 
     def test_an_extra_live_sticker_refuses_to_map(self):
-        bp.write_json_atomic(self.map, {"aaa": "keep-me"})
+        ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.append("s1", _png_bytes("appended-by-a-concurrent-tool"))
         with self.assertRaises(SystemExit):
             rd.map_and_fill(self.tg)
@@ -110,8 +110,8 @@ class MapIsResolvedByImageIdentity(RebuildCase):
     def test_the_canonical_map_is_written_under_the_shared_lock(self):
         # Every writer of ticker_to_id.json takes this lock; holding it here
         # must block the rebuild's own write rather than let it interleave.
-        with bp.canonical_map_lock():
-            with self.assertRaises(bp.LockBusy):
+        with ps.canonical_map_lock():
+            with self.assertRaises(ps.LockBusy):
                 rd.map_and_fill(self.tg)
         self.assertFalse(self.map.exists())
         self.assertFalse(rd.LOCK.exists(),
@@ -132,17 +132,17 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         def a_provider_runs_mid_read(method, *, data=None, **kw):
             if method == "getStickerSet" and not attempts:
                 try:
-                    with bp.canonical_map_lock():
-                        bp.write_json_atomic(self.map, {"prov": "provider-cid"})
+                    with ps.canonical_map_lock():
+                        ps.write_json_atomic(self.map, {"prov": "provider-cid"})
                     attempts.append(None)
-                except bp.LockBusy as exc:
+                except ps.LockBusy as exc:
                     attempts.append(exc)
             return real_call(method, data=data, **kw)
 
         self.tg._call = a_provider_runs_mid_read
         rd.map_and_fill(self.tg)
         self.assertIsInstance(
-            attempts[0], bp.LockBusy,
+            attempts[0], ps.LockBusy,
             "the map was writable while its own replacement was being read; "
             "an entry added there is erased by the write that follows")
 
@@ -152,8 +152,8 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         Pack-family lock FIRST, canonical map lock SECOND -- the documented
         order, and the reason this can be taken while a build cannot.
         """
-        with bp.exclusive_lock(rd.LOCK):
-            with self.assertRaises(bp.LockBusy):
+        with ps.exclusive_lock(rd.LOCK):
+            with self.assertRaises(ps.LockBusy):
                 rd.map_and_fill(self.tg)
         self.assertFalse(self.map.exists(),
                          "the map was rebuilt from live sets a concurrent "

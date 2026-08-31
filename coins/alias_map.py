@@ -18,7 +18,8 @@ import json
 import re
 from pathlib import Path
 
-from build_pack import EXIT_FAILED, LockBusy, canonical_map_lock, write_json_atomic
+from build_pack import (EXIT_FAILED)
+from packstate import (LockBusy, canonical_map_lock, write_json_atomic)
 from coins._inventory import parse_missing, refill_inventory
 
 ROOT = Path(__file__).resolve().parent

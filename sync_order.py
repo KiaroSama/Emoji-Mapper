@@ -33,8 +33,9 @@ from pathlib import Path
 
 from collection_state import (_lock_path, _state_path, load_state,
                               save_json)
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, LockBusy, Telegram,
-                        exclusive_lock, load_env)
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, load_env)
+from packstate import (LockBusy, exclusive_lock)
+from telegram_api import (Telegram)
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 

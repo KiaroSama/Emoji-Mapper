@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import (write_json_atomic)
+from packstate import (write_json_atomic)
 from emojikit import media
 from emojikit.catalog import Catalog
 

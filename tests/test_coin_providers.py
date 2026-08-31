@@ -36,6 +36,8 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
 from coins import fetch_cmc, fetch_paprika as fp, rebuild_dedup as rd  # noqa: E402
 
 SET = "cryptoemoji1_by_bot"
@@ -99,10 +101,10 @@ class FakeTelegram:
 
     def probe_set_state(self, name: str):
         if name in self.unreadable:
-            return bp.SetState.UNKNOWN, None
+            return tg_api.SetState.UNKNOWN, None
         if name not in self.sets:
-            return bp.SetState.MISSING, None
-        return bp.SetState.EXISTS, {"stickers": [dict(s) for s in self.sets[name]]}
+            return tg_api.SetState.MISSING, None
+        return tg_api.SetState.EXISTS, {"stickers": [dict(s) for s in self.sets[name]]}
 
     def add_sticker(self, user_id, name, png, emoji, keywords, *,
                     expected_before=None):
@@ -174,10 +176,10 @@ class VerifiedPublish(unittest.TestCase):
         self.emoji.mkdir()
         _gradient().save(self.emoji / "aaa.png", "PNG")
         self.state = self.dir / "state.json"
-        bp.write_json_atomic(self.state, {"sets": [
+        ps.write_json_atomic(self.state, {"sets": [
             {"index": 1, "name": SET, "title": "T 1"}]})
         self.ids = self.dir / "ticker_to_id.json"
-        bp.write_json_atomic(self.ids, {"btc": "c-btc"})
+        ps.write_json_atomic(self.ids, {"btc": "c-btc"})
         self.lock = self.dir / "pack_cryptoemoji.lock"
         self.patch = mock.patch.multiple(
             fp, EMOJI=self.emoji, STATE=self.state, TICKER_IDS=self.ids,
@@ -236,7 +238,7 @@ class VerifiedPublish(unittest.TestCase):
 
         def ambiguous(*a, **kw):
             real_add(*a, **kw)                       # Telegram DID apply it
-            raise bp.AmbiguousUploadError("addStickerToSet: network failure")
+            raise tg_api.AmbiguousUploadError("addStickerToSet: network failure")
 
         tg.add_sticker = ambiguous
         mapping: dict[str, str] = {}
@@ -265,7 +267,7 @@ class VerifiedPublish(unittest.TestCase):
         """Only real if both tools name the SAME lock (see OnePackFamilyOneLock)."""
         tg = FakeTelegram(existing=2)
         with mock.patch.object(rd, "LOCK", self.lock), \
-             bp.exclusive_lock(rd.LOCK):
+             ps.exclusive_lock(rd.LOCK):
             self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
         self.assertEqual(tg.adds, [])
 
@@ -292,7 +294,7 @@ class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
             with real() as beat:
                 current = json.loads(self.ids.read_text("utf-8"))
                 current.update(landed)
-                bp.write_json_atomic(self.ids, current)
+                ps.write_json_atomic(self.ids, current)
                 yield beat
 
         return mock.patch.object(fp, "canonical_map_lock", racing)
@@ -345,7 +347,7 @@ class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
     def test_a_map_writer_blocks_the_publisher(self):
         """Proof the publisher takes the map lock at all, in the right order."""
         tg = FakeTelegram(existing=2)
-        with bp.canonical_map_lock():
+        with ps.canonical_map_lock():
             self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
         self.assertEqual(tg.adds, [], "no sticker may be added without it")
         self.assertFalse(self.lock.exists(),
@@ -368,10 +370,10 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         self.emoji.mkdir()
         _gradient().save(self.emoji / "aaa.png", "PNG")
         self.state = self.dir / "state.json"
-        bp.write_json_atomic(self.state, {"sets": [
+        ps.write_json_atomic(self.state, {"sets": [
             {"index": 1, "name": SET, "title": "T 1"}]})
         self.ids = self.dir / "ticker_to_id.json"
-        bp.write_json_atomic(self.ids, {})
+        ps.write_json_atomic(self.ids, {})
         self.patch = mock.patch.multiple(
             fp, EMOJI=self.emoji, STATE=self.state, TICKER_IDS=self.ids,
             PACK_LOCK=self.dir / "pack.lock", KEYWORDS_CSV=self.dir / "none.csv",
@@ -397,7 +399,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
             tg.add_sticker = real_add          # the outage is over after this
             real_add(*a, **kw)                 # the add DID land
             tg.unreadable.add(SET)             # ...and then the link went down
-            raise bp.AmbiguousUploadError("addStickerToSet: network failure")
+            raise tg_api.AmbiguousUploadError("addStickerToSet: network failure")
 
         tg.add_sticker = ambiguous
 
@@ -469,7 +471,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         #     map already names ITS sticker. Our download must stay in staging.
         fp.to_emoji_png(fresh, fp.incoming_dir() / "aaa.png")
         current = json.loads(self.ids.read_text("utf-8"))
-        bp.write_json_atomic(self.ids, {**current, "aaa": "c-the-other-tools"})
+        ps.write_json_atomic(self.ids, {**current, "aaa": "c-the-other-tools"})
         self.assertEqual(fp.publish_logos(FakeTelegram(existing=2), ["aaa"], {}),
                          (0, 0))
         self.assertEqual((self.emoji / "aaa.png").read_bytes(), published,
@@ -485,7 +487,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
         #     tools cannot recognize, which is the same breakage from the other
         #     direction.
         fp.to_emoji_png(fresh, fp.incoming_dir() / "aaa.png")
-        bp.write_json_atomic(self.ids, current)
+        ps.write_json_atomic(self.ids, current)
         tg = FakeTelegram(existing=2)
         self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (1, 0))
         self.assertNotEqual((self.emoji / "aaa.png").read_bytes(), published,
@@ -634,7 +636,7 @@ class UnverifiedUploadIsRecovered(unittest.TestCase):
 
         def blind(*a, **kw):
             tg.unreadable.add(SET)             # dark BEFORE Telegram applied it
-            raise bp.AmbiguousUploadError("addStickerToSet: network failure")
+            raise tg_api.AmbiguousUploadError("addStickerToSet: network failure")
 
         tg.add_sticker = blind
         mapping: dict[str, str] = {}
@@ -668,7 +670,7 @@ class OnePackFamilyOneLock(unittest.TestCase):
     """One live pack family must mean one lock name, whatever the tool."""
 
     def test_every_coin_tool_locks_on_the_pack_base(self):
-        family = bp.pack_family_lock_path(fp.SET_BASE)
+        family = ps.pack_family_lock_path(fp.SET_BASE)
         self.assertEqual(fp.PACK_LOCK, family)
         self.assertEqual(rd.LOCK, family,
                          "the rebuild appends to the very same sets")
@@ -688,12 +690,12 @@ class CommandExitCodes(unittest.TestCase):
         self.emoji = self.dir / "emoji"
         self.emoji.mkdir()
         self.state = self.dir / "state.json"
-        bp.write_json_atomic(self.state, {"sets": [
+        ps.write_json_atomic(self.state, {"sets": [
             {"index": 1, "name": SET, "title": "T 1"}]})
         self.ids = self.dir / "ticker_to_id.json"
-        bp.write_json_atomic(self.ids, {"btc": "c-btc"})
+        ps.write_json_atomic(self.ids, {"btc": "c-btc"})
         self.cache = self.dir / "cache.json"
-        bp.write_json_atomic(self.cache, {
+        ps.write_json_atomic(self.cache, {
             "aaa": {"id": "alpha-coin", "conf": "symbol", "name": "Alpha Coin"}})
         self.inv = self.dir / "inv.md"
         self.inv.write_text(self.INVENTORY, encoding="utf-8")

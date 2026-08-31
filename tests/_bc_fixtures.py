@@ -17,8 +17,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_pack as bp  # noqa: E402
-from build_pack import SetState  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+from telegram_api import (SetState)  # noqa: E402
 
 def _make_png(path: Path, color=(200, 30, 30, 255)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +55,7 @@ class FakeTG:
     def check_uploadable(self, user_id, path, fmt):
         self.checked.append(path.name)
         if path.name in self.refuse:
-            raise bp.BotApiError(
+            raise tg_api.BotApiError(
                 "uploadStickerFile failed: Bad Request: wrong file type")
 
     def probe_set_state(self, name):

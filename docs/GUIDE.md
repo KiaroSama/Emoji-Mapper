@@ -35,17 +35,23 @@ Supported custom-emoji formats: **static** (PNG/WEBP, 100×100), **animated**
 Emoji Mapper/
   run.ps1                  Windows launcher (menu). Prefer this.
   build_pack.py            core engine: upload a folder of media to emoji sets
+  telegram_api.py          the Bot API client, its errors and Telegram's caps
+  packstate.py             state-file shape + atomic write + pack-family lock
+  announce.py              announce finished packs (Worker, or direct)
   make_emoji_pngs.py       image -> 100x100 PNG (static)
   fetch_pack.py            collector: download a Telegram pack -> catalog
   fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
   add_media.py             collector: build emoji from local files -> catalog
   build_collection.py      collector: publish the catalog into new packs
+  collection_state.py      publisher plan/resume state + brand logo
+  collection_reconcile.py  what is live in a set, and whose key each sticker is
   sync_order.py            reorder an already published pack (no re-upload)
   panel.py                 web "Curate" panel: pick which emoji to publish
   emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
   emojikit/                shared core library
     logsetup.py            UTC file logging (logs/)
-    media.py               format detect, hashing, conversions (static/video/tgs)
+    media.py               format detect + conversions (static/video/tgs)
+    identity.py            content keys, perceptual hashes, same_image
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
   coins/                   the crypto-coin component (see §7)
   scripts/check.ps1        byte-compile + full unit suite (CI runs this too)
@@ -197,9 +203,14 @@ Guarantees (root-cause fixes — do not regress these):
 - **Curation**: each row has an `included` flag (default 1). The Curate panel
   toggles it; `build_collection` only publishes `included` rows.
 
-`emojikit/media.py` cheat-sheet: `detect_format`, `content_key`,
-`perceptual_hash`, `to_static_png`, `to_video_webm` (ffmpeg, VP9, ≤256 KB),
-`to_animated_tgs` (Lottie→gzip), `validate_video`, `validate_tgs`.
+`emojikit/media.py` cheat-sheet: `detect_format`, `to_static_png`,
+`to_video_webm` (ffmpeg, VP9, ≤256 KB), `to_animated_tgs` (Lottie→gzip),
+`validate_video`, `validate_tgs`, `reencode_in_place`.
+
+`emojikit/identity.py` cheat-sheet: `content_key` (the catalog's primary
+key), `perceptual_hash`, `fingerprint` (both in one pass), `same_image`
+(did OUR file produce THAT sticker? `None` when undecidable), `hamming`.
+It imports `media`; `media` never imports it.
 
 ---
 

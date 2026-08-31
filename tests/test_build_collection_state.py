@@ -43,9 +43,10 @@ sys.path.insert(0, str(ROOT))
 import build_collection as bc  # noqa: E402
 import collection_state as cs  # noqa: E402
 import collection_reconcile as cr  # noqa: E402
-import build_pack as bp  # noqa: E402
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
-                        LiveStateUnknown, exclusive_lock)
+import telegram_api as tg_api  # noqa: E402
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE)  # noqa: E402
+from packstate import (exclusive_lock)  # noqa: E402
+from telegram_api import (LiveStateUnknown)  # noqa: E402
 from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
@@ -1014,7 +1015,7 @@ class PublishThroughMain(_CatalogFixture):
         def refuse_the_first(*a, **kw):
             calls.append(1)
             if len(calls) == 1:
-                raise bp.BotApiError(
+                raise tg_api.BotApiError(
                     "addStickerToSet failed: Bad Request: wrong file type")
             return original(*a, **kw)
 
@@ -1143,7 +1144,7 @@ class PublishThroughMain(_CatalogFixture):
         def refuse_the_first(*a, **kw):
             calls.append(1)
             if len(calls) == 1:
-                raise bp.BotApiError(
+                raise tg_api.BotApiError(
                     "addStickerToSet failed: Bad Request: wrong file type")
             return original(*a, **kw)
 

@@ -28,7 +28,8 @@ sys.path.insert(0, str(ROOT))
 import build_collection as bc  # noqa: E402
 import collection_state as cs  # noqa: E402
 import build_pack as bp  # noqa: E402
-from build_pack import announce_packs  # noqa: E402
+import announce  # noqa: E402
+from announce import (announce_packs)  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 from tests._bc_fixtures import FakeTG, _make_png  # noqa: E402
@@ -259,7 +260,7 @@ class EveryPublisherSharesOneAnnouncer(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "",
                                           "PACK_LINKS_CHAT_ID": ""}, clear=False), \
-             mock.patch.object(bp, "announce_via_worker") as worker:
+             mock.patch.object(announce, "announce_via_worker") as worker:
             dest = announce_packs(tg, 7, [{"name": "a_by_bot", "title": "A"}],
                                   bot="general")
         worker.assert_not_called()
@@ -284,7 +285,7 @@ class EveryPublisherSharesOneAnnouncer(unittest.TestCase):
         tg = FakeTG()
         packs = [{"name": f"p{i}_by_bot", "title": str(i)} for i in range(30)]
         with mock.patch.dict(os.environ, self.WORKER, clear=False), \
-             mock.patch.object(bp, "announce_via_worker") as worker:
+             mock.patch.object(announce, "announce_via_worker") as worker:
             announce_packs(tg, 7, packs, bot="coin", note="all packs:")
         worker.assert_called_once()
         self.assertEqual(len(worker.call_args.args[0]), 30)
@@ -326,7 +327,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bp, "announce_via_worker") as worker:
+             mock.patch.object(announce, "announce_via_worker") as worker:
             self._notify(tg)
         worker.assert_called_once()
         packs = worker.call_args.args[0]
@@ -346,7 +347,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bp, "announce_via_worker",
+             mock.patch.object(announce, "announce_via_worker",
                                side_effect=RuntimeError("worker down")):
             self._notify(tg)
         self.assertEqual(self.state["sent"], [])
@@ -356,7 +357,7 @@ class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
         tg = mock.Mock()
         with mock.patch.dict(os.environ, {"WORKER_PUBLISH_URL": "https://w.dev/publish",
                                           "WORKER_PUBLISH_SECRET": "s"}, clear=False), \
-             mock.patch.object(bp, "announce_via_worker") as worker:
+             mock.patch.object(announce, "announce_via_worker") as worker:
             self._notify(tg)
         worker.assert_not_called()
         tg.send_message.assert_not_called()
