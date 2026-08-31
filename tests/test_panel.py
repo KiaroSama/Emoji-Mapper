@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 import panel as p
 from emojikit.catalog import Catalog
-from emojikit.media import hamming
+from emojikit.identity import hamming
 
 
 class BrandLogoPreview(unittest.TestCase):
@@ -339,7 +339,7 @@ class _Fake:
 
 
 def _reference_order(items: list) -> list:
-    """The original greedy walk, written against ``media.hamming``."""
+    """The original greedy walk, written against ``identity.hamming``."""
     out: list = []
     for fmt in sorted({it.fmt for it in items}, key=lambda f: p.FMT_ORDER.get(f, 9)):
         group = [it for it in items if it.fmt == fmt]
@@ -363,7 +363,7 @@ class SimilarityOrder(unittest.TestCase):
 
     ``order_by_similarity`` seeds the saved publish order, so a different
     ordering is a different pack. The inlined popcount is only allowed to be
-    media.hamming's exact result, first-minimum tie-break included.
+    identity.hamming's exact result, first-minimum tie-break included.
     """
 
     def _items(self, seed: int) -> list:

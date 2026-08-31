@@ -25,7 +25,7 @@ import os
 from pathlib import Path
 
 from build_pack import EXIT_USAGE, Telegram, ingest_exit_code, load_env
-from emojikit import media
+from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
@@ -91,7 +91,7 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
             # One decode for both keys: separately, a video paid two ffmpeg
             # launches over the same clip -- the priciest step in ingest,
             # doubled, once per sticker of every fetched pack.
-            key, phash = media.fingerprint(tmp, fmt)
+            key, phash = identity.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
             dest = _media_path(data_dir, fmt, key, ext)
             if not dest.exists():

@@ -41,7 +41,7 @@ from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, AmbiguousUploadError,
                         _mime_for_path, write_json_atomic)
 from coins import _http
 from emojikit import media
-from emojikit.media import _dhash, hamming
+from emojikit.identity import _dhash, hamming
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent

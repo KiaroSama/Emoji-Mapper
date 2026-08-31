@@ -54,7 +54,7 @@ from coins import _http, _inventory
 # One definition of the inventory format and of "which asset is this ticker",
 # shared with alias_map, enhance_map, fetch_cmc and rebuild_dedup.
 from coins._inventory import base_ticker, norm
-from emojikit.media import _dhash, hamming
+from emojikit.identity import _dhash, hamming
 # The pipeline's single definition of "this image is effectively empty".
 from make_emoji_pngs import _is_blank
 

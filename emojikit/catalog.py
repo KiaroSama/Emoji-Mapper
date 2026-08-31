@@ -1,7 +1,7 @@
 """Content-addressed emoji catalog -- the duplicate-proof core.
 
 The catalog is a small SQLite database that stores every prepared emoji exactly
-once, keyed by a normalized *content hash* (see :func:`emojikit.media.content_key`).
+once, keyed by a normalized *content hash* (see :func:`emojikit.identity.content_key`).
 It is the single source of truth for both ingest paths ("download from Telegram"
 and "build from scratch") and for publishing.
 
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import media
+from . import identity
 
 log = logging.getLogger("emojikit.catalog")
 
@@ -270,7 +270,7 @@ class Catalog:
             (fmt,),
         ).fetchall()
         for r in rows:
-            if media.hamming(_phash_from_db(r["phash"]), phash) <= self.phash_threshold:
+            if identity.hamming(_phash_from_db(r["phash"]), phash) <= self.phash_threshold:
                 return r["content_key"]
         return None
 

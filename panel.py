@@ -82,7 +82,7 @@ def order_by_similarity(items: list) -> list:
             # that would make it sub-quadratic (LSH buckets, BK-tree pruning)
             # changes which near-twin ends up next to which. Only the constant
             # is negotiable, so the distance is inlined rather than called:
-            # ``(a ^ b).bit_count()`` is media.hamming's exact result, and at
+            # ``(a ^ b).bit_count()`` is identity.hamming's exact result, and at
             # n=3 600 dropping the per-pair call costs 0.48 s instead of 0.92 s
             # for a byte-identical order. (Against the older string-building
             # hamming it was 3.7 s.)
