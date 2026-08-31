@@ -136,7 +136,7 @@ class TestGeneralRun(unittest.TestCase):
         self._raster("foo.png")
         Image.new("RGB", (40, 70), RED[:3]).save(self.src / "foo.jpg")  # JPEG has no alpha
         (self.src / "foo.svg").write_text(BLUE_SVG, encoding="utf-8")
-        self.assertEqual([p.name for p in m._pick_sources(self.src)], ["foo.svg"])
+        self.assertEqual([g[0].name for g in m._source_groups(self.src)], ["foo.svg"])
 
     def test_svg_wins_over_same_stem_png(self):
         # "foo.png" sorts before "foo.svg": lexical order used to pick the raster.

@@ -136,7 +136,7 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
 _FRAME_BYTES = 64 * 64 * 4          # one sampled RGBA frame
 
 
-def _video_is_blank(path: Path, min_visible: int = 8) -> bool:
+def _video_is_blank(path: Path) -> bool:
     """True only when EVERY sampled frame of a video is effectively empty.
 
     The first frame alone is not evidence: any animation that fades in, or
@@ -156,7 +156,11 @@ def _video_is_blank(path: Path, min_visible: int = 8) -> bool:
         return False                # nothing decoded: let the upload decide
     for start in range(0, len(raw) - _FRAME_BYTES + 1, _FRAME_BYTES):
         alpha = raw[start + 3:start + _FRAME_BYTES:4]
-        if sum(1 for v in alpha if v > 10) > min_visible:
+        # media's named thresholds, not a third copy of 10/8: this is the
+        # same "is it blank?" rule, applied to a raw frame instead of a
+        # decoded image, and a literal drifting here would disagree with
+        # every other producer about what ships.
+        if sum(v > media.VISIBLE_ALPHA for v in alpha) > media.BLANK_MAX_VISIBLE:
             return False
     return True
 

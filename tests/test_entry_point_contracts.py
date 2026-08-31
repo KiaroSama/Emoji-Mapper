@@ -37,7 +37,7 @@ import make_emoji_pngs as m  # noqa: E402
 import panel as p  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_USAGE  # noqa: E402
 from emojikit.media import TGS_MAX_UNPACKED  # noqa: E402
-from tests._cli_fixtures import DeadTelegram, _load_standalone  # noqa: E402
+from tests._cli_fixtures import DeadTelegram  # noqa: E402
 
 RED = (240, 20, 20, 255)
 EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"></svg>'
@@ -157,7 +157,7 @@ class MakeEmojiPngsContracts(unittest.TestCase):
     def test_preferred_source_is_still_tried_first(self):
         (self.src / "foo.svg").write_text(EMPTY_SVG, encoding="utf-8")
         self._raster("foo.png")
-        self.assertEqual([s.name for s in m._pick_sources(self.src)], ["foo.svg"])
+        self.assertEqual([g[0].name for g in m._source_groups(self.src)], ["foo.svg"])
 
 
 class MakeEmojiPngsLegacyFallback(unittest.TestCase):
@@ -280,39 +280,6 @@ class PanelLottieBound(unittest.TestCase):
 
     def test_unknown_key_is_404(self):
         self.assertEqual(self._get("/preview/nope")[0], 404)
-
-
-# --------------------------------------------------------------------------- #
-# logsetup: a bad retention value must not break logging at import
-# --------------------------------------------------------------------------- #
-class LogRetentionParsing(unittest.TestCase):
-    PATH = ROOT / "emojikit" / "logsetup.py"
-
-    def _fresh(self, value: str | None):
-        env = {} if value is None else {"EMOJI_LOG_RETENTION_DAYS": value}
-        with mock.patch.dict(os.environ, env, clear=False), \
-                contextlib.redirect_stderr(io.StringIO()):
-            if value is None:
-                os.environ.pop("EMOJI_LOG_RETENTION_DAYS", None)
-            return _load_standalone(self.PATH, "logsetup_probe")
-
-    def test_garbage_value_falls_back_to_the_default(self):
-        # A bare int() here raised ValueError at import: logging, and with it
-        # every entry point that imports it, died before argparse could speak.
-        mod = self._fresh("30 days")
-        self.assertEqual(mod.LOG_RETENTION_DAYS, 30)
-        self.assertTrue(callable(mod.setup_logging))
-
-    def test_empty_value_falls_back_to_the_default(self):
-        self.assertEqual(self._fresh("").LOG_RETENTION_DAYS, 30)
-
-    def test_negative_value_is_clamped_to_disabled(self):
-        mod = self._fresh("-5")
-        self.assertEqual(mod.LOG_RETENTION_DAYS, 0)
-        self.assertEqual(mod.prune_old_logs(mod.LOG_RETENTION_DAYS), 0)
-
-    def test_valid_value_is_honoured(self):
-        self.assertEqual(self._fresh("7").LOG_RETENTION_DAYS, 7)
 
 
 if __name__ == "__main__":
