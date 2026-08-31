@@ -1915,8 +1915,19 @@ catalog cannot identify.
 ### Two things that will mislead a measurement
 
 - **Telegram re-encodes what it stores.** Never confirm an upload by exact
-  content key — compare against the file you just sent (2304 of 16384 normalised
-  bytes changed on a real sticker, yet the perceptual distance was 1 bit of 64).
+  content key — the key is a SHA of exact pixels, so a lossy re-encode changes
+  it for a picture that is visually identical. `media.same_image` owns this
+  comparison for every caller: exact key first, then **both** a dHash and a
+  colour check, since neither alone is safe. dHash survives the re-encode but
+  is grayscale, so a stranger's green square sits 4 bits from our red one; the
+  mean channel delta sees colour but not structure. Measured over 30 known-same
+  and 30 known-different pairs across three live packs — dHash 0–3 vs 12–47
+  bits, mean delta 0.02–2.35 vs 35.46–188.22.
+  A false negative costs a halted publish and is recoverable; a false positive
+  attributes a stranger's sticker to our item and is not. That asymmetry is why
+  it asks for two independent agreements, and why anything it cannot compare
+  (animated is vector, so there is no raster hash) returns *undecidable* rather
+  than *no*.
 - **VP9 keeps alpha in a separate layer.** Probing a video emoji without
   `-c:v libvpx-vp9` reports every one of them as opaque, correct ones included.
   The same flag is required when re-encoding, or transparency is silently lost.

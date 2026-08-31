@@ -457,20 +457,13 @@ class Unresolvable(Exception):
     """
 
 
-# How far Telegram's own re-encode may move an image and still be OUR upload.
+# The upload tolerance now lives with the comparison it belongs to, in
+# media.same_image: the Bot API client needs the identical rule when it checks
+# whether its own add landed, and two copies of "is this the same picture"
+# drifting apart is how one caller starts accusing a sticker the other accepts.
 #
-# Measured, not guessed: a 100x100 WEBP from this catalog came back from
-# Telegram with 2304 of 16384 normalised bytes changed (mean delta 2.38) and a
-# perceptual distance of 1 bit out of 64. Exact content_key equality therefore
-# CANNOT hold for a fresh upload -- the publisher stopped on its own integrity
-# guard before a single emoji was recorded.
+# The catalog-wide tolerance below is a DIFFERENT question and stays here.
 #
-# This does not weaken the guard. It is compared against ONE expected source --
-# the file we just uploaded -- not searched across the catalog, so a false
-# positive would have to be a foreign sticker that is visually that exact
-# image. A foreign llama sits tens of bits away.
-UPLOAD_PHASH_TOLERANCE = 6
-
 # The same tolerance is NOT safe for a catalog-wide search. Verifying an upload
 # compares against ONE expected file; reconciling an unknown live sticker asks
 # "which of 200 is this?", and this catalog is full of near-identical marks --
@@ -486,24 +479,14 @@ SEARCH_PHASH_TOLERANCE = 2
 def _same_image(tg, st: dict, source: Path, tmp_dir: Path) -> bool | None:
     """Is this live sticker the image in ``source``? None = could not tell.
 
-    Exact first, because when Telegram's re-encode happens to be pixel-exact
-    that is the strongest possible answer. Perceptual second, bounded.
+    Fetching is this layer's job; deciding is ``media.same_image``'s, which the
+    Bot API client asks the same question of.
     """
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp = tmp_dir / f"verify_{st.get('file_unique_id') or 'x'}.dl"
     try:
-        fmt = media.telegram_sticker_format(st)
         tg.download_file(st["file_id"], tmp)
-        if media.content_key(tmp, fmt) == media.content_key(source, fmt):
-            return True
-        a, b = media.perceptual_hash(tmp, fmt), media.perceptual_hash(source, fmt)
-        if a is None or b is None:
-            # Animated (vector) has no raster hash. Nothing further to compare,
-            # and "I could not tell" must not read as "not ours".
-            return None
-        d = media.hamming(a, b)
-        log.debug("upload verify: perceptual distance %d for %s", d, source.name)
-        return d <= UPLOAD_PHASH_TOLERANCE
+        return media.same_image(tmp, source, media.telegram_sticker_format(st))
     except Exception as exc:  # noqa: BLE001 - a failed probe is not a "no"
         log.warning("upload verify failed for %s: %s", source.name, redact(str(exc)))
         return None

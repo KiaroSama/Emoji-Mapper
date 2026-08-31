@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — an upload check that called every one of its own uploads a stranger
+
+- **`Telegram._sticker_matches` confirmed an upload by exact content key.** That
+  key is a SHA of exact pixels and Telegram re-encodes what it stores, so the
+  comparison could never hold for our own upload — and the caller reads a
+  negative as "a foreign sticker landed". A 449-emoji publish stopped on a
+  sticker that had landed correctly. The path is rare (it needs a network
+  failure to trigger the probe), which is why it took a 449-item run to surface.
+- **`media.same_image` now owns the decision for every caller.** Exact key
+  first, then a dHash *and* a colour check, both of which must agree.
+  `build_collection._same_image` keeps only the fetch and delegates: two answers
+  to "is this the same picture" drifting apart is how one caller starts
+  accusing what the other accepts.
+- **Neither signal is safe alone**, which the suite proved before this shipped:
+  dHash survives the re-encode but is grayscale, so a stranger's green square
+  sits 4 bits from our red one and a structure-only check reported it as ours.
+  Tolerances measured over 30 known-same and 30 known-different pairs across
+  three live packs — dHash 0–3 vs 12–47 bits, mean channel delta 0.02–2.35 vs
+  35.46–188.22.
+- A false negative costs a halted publish and is recoverable; a false positive
+  attributes a stranger's sticker to our item and is not. Anything that cannot
+  be compared — animated is vector, so there is no raster hash — is reported as
+  undecidable rather than negative, and callers reconcile instead of accusing.
+
 ### Added — `panel.py --with-pack N`, to arrange a half-full pack
 
 - **Un-hides one published set** so its emoji can be arranged beside the new
