@@ -42,6 +42,7 @@ import build_pack as bp  # noqa: E402
 import telegram_api as tg_api  # noqa: E402
 import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
+from coins import _dedup_plan as cfg  # noqa: E402
 from tests._rebuild_fixtures import (  # noqa: E402
     FakeTelegram, RebuildCase, _png, _png_bytes)
 
@@ -94,7 +95,7 @@ class AmbiguousUploadStopsTheRun(RebuildCase):
         self.assertEqual(code, bp.EXIT_PARTIAL)
         marker = self.saved()["in_flight"]
         self.assertEqual(marker["operation"], "create")
-        self.assertEqual(marker["set_name"], f"{rd.BASE}1_by_bot")
+        self.assertEqual(marker["set_name"], f"{cfg.BASE}1_by_bot")
         self.assertEqual(marker["set_index"], 1)
         self.assertEqual(self.saved()["sets"], [],
                          "the set is unconfirmed; it must not be recorded as ours")
@@ -105,7 +106,7 @@ class ResumeReconcilesTheMarker(RebuildCase):
 
     def test_a_create_that_landed_is_adopted_from_the_marker(self):
         self.write_plan(["aaa"])
-        created = f"{rd.BASE}1_by_bot"
+        created = f"{cfg.BASE}1_by_bot"
         self.write_state(sets=[], order=[], cursor=1, in_flight={
             "key": "aaa", "operation": "create", "set_name": created,
             "set_index": 1, "expected_before": 0, "phase": "upload"})
@@ -120,7 +121,7 @@ class ResumeReconcilesTheMarker(RebuildCase):
 
     def test_a_create_that_did_not_land_is_retried_once(self):
         self.write_plan(["aaa"])
-        created = f"{rd.BASE}1_by_bot"
+        created = f"{cfg.BASE}1_by_bot"
         self.write_state(sets=[], order=[], cursor=1, in_flight={
             "key": "aaa", "operation": "create", "set_name": created,
             "set_index": 1, "expected_before": 0, "phase": "upload"})
@@ -131,7 +132,7 @@ class ResumeReconcilesTheMarker(RebuildCase):
 
     def test_an_unreadable_set_stops_instead_of_deciding(self):
         self.write_plan(["aaa"])
-        created = f"{rd.BASE}1_by_bot"
+        created = f"{cfg.BASE}1_by_bot"
         self.write_state(sets=[], order=[], cursor=1, in_flight={
             "key": "aaa", "operation": "create", "set_name": created,
             "set_index": 1, "expected_before": 0, "phase": "upload"})
@@ -212,7 +213,7 @@ class CreateIsAdoptedOnlyOnImageIdentity(RebuildCase):
     first sticker's IMAGE can tell the two apart.
     """
 
-    CREATED = f"{rd.BASE}1_by_bot"
+    CREATED = f"{cfg.BASE}1_by_bot"
 
     def setUp(self):
         super().setUp()
@@ -441,23 +442,25 @@ class OwnerIdIsParsedSafely(unittest.TestCase):
     """18: int() on a .env typo raised before argparse could explain anything."""
 
     def test_a_typo_falls_back_instead_of_killing_the_import(self):
-        self.addCleanup(importlib.reload, rd)
+        # The owner id is resolved at IMPORT of the config module, so the reload
+        # has to be of that module -- reloading the tool re-reads nothing.
+        self.addCleanup(importlib.reload, cfg)
         with mock.patch.dict(os.environ, {"PACK_OWNER_USER_ID": "42abc"},
                              clear=False):
-            self.assertEqual(importlib.reload(rd).USER_ID, 0)
+            self.assertEqual(importlib.reload(cfg).USER_ID, 0)
 
     def test_a_valid_value_is_still_used(self):
-        self.addCleanup(importlib.reload, rd)
+        self.addCleanup(importlib.reload, cfg)
         with mock.patch.dict(os.environ, {"PACK_OWNER_USER_ID": "12345"},
                              clear=False):
-            self.assertEqual(importlib.reload(rd).USER_ID, 12345)
+            self.assertEqual(importlib.reload(cfg).USER_ID, 12345)
 
 
 class RebuildTakesThePackFamilyLock(unittest.TestCase):
     """6: a lock named after this tool's state file excludes nobody else."""
 
     def test_the_lock_is_keyed_on_the_pack_base(self):
-        self.assertEqual(rd.LOCK, ps.pack_family_lock_path(rd.BASE))
+        self.assertEqual(cfg.LOCK, ps.pack_family_lock_path(cfg.BASE))
 
 
 class LiveStateUnknownStopsTheRun(RebuildCase):
@@ -580,7 +583,7 @@ class TruncatedPlanFailsClosed(RebuildCase):
 
     def test_a_sound_plan_still_loads(self):
         self.write_plan(["aaa", "bbb"])
-        self.assertEqual([g["rep"] for g in rd.load_plan()], ["aaa", "bbb"])
+        self.assertEqual([g["rep"] for g in cfg.load_plan()], ["aaa", "bbb"])
 
     def test_the_plan_and_the_report_are_written_atomically(self):
         """A killed process cannot be staged in-process; the writer is the contract.
@@ -590,12 +593,12 @@ class TruncatedPlanFailsClosed(RebuildCase):
         over it, so the previous plan survives any crash before the rename.
         """
         _png(self.emoji / "aaa.png")
-        with mock.patch.object(rd, "write_json_atomic",
+        with mock.patch.object(cfg, "write_json_atomic",
                                side_effect=ps.write_json_atomic) as writer:
-            rd.build_plan()
+            cfg.build_plan()
         self.assertEqual({c.args[0] for c in writer.call_args_list},
                          {self.plan, self.groups})
-        self.assertEqual([g["rep"] for g in rd.load_plan()], ["aaa"])
+        self.assertEqual([g["rep"] for g in cfg.load_plan()], ["aaa"])
         self.assertEqual(sorted(p.name for p in self.dir.glob("*.tmp")), [])
 
 
@@ -612,7 +615,7 @@ class _LockWatchingTelegram(FakeTelegram):
 
     def _sample(self) -> None:
         if self.held_at_mutation is None:
-            self.held_at_mutation = rd.LOCK.exists()
+            self.held_at_mutation = cfg.LOCK.exists()
 
     def create_set(self, *a, **kw):
         self._sample()
@@ -630,7 +633,7 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         self.write_plan(["aaa"])
         self.write_state()
         tg = FakeTelegram()
-        with ps.exclusive_lock(rd.LOCK):
+        with ps.exclusive_lock(cfg.LOCK):
             with self.assertRaises(ps.LockBusy):
                 rd.build(tg, "bot")
         self.assertEqual(tg.mutations, 0)
@@ -642,7 +645,7 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         rd.build(tg, "bot")
         self.assertTrue(tg.held_at_mutation,
                         "the lock must be HELD while the packs are mutated")
-        self.assertFalse(rd.LOCK.exists())
+        self.assertFalse(cfg.LOCK.exists())
 
     def test_the_lock_is_released_after_a_stop(self):
         self.write_plan(["aaa"])
@@ -653,7 +656,7 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
             rd.build(tg, "bot")
         self.assertTrue(tg.held_at_mutation,
                         "the lock must be HELD while the packs are mutated")
-        self.assertFalse(rd.LOCK.exists(),
+        self.assertFalse(cfg.LOCK.exists(),
                          "a stopped run must not block the retry")
 
 
@@ -706,7 +709,7 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
 
     def test_a_live_count_over_the_pack_limit_is_rejected(self):
         self.assertIn("outside 0..", self._rejects(sets=[
-            {"index": 1, "name": "s1", "live": rd.PER_SET + 1}]))
+            {"index": 1, "name": "s1", "live": cfg.PER_SET + 1}]))
 
     def test_an_in_flight_marker_missing_its_target_is_rejected(self):
         self.assertIn("set_name", self._rejects(in_flight={

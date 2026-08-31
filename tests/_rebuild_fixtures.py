@@ -28,6 +28,8 @@ from PIL import Image  # noqa: E402
 import telegram_api as tg_api  # noqa: E402
 import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
+from coins import _dedup_plan as cfg  # noqa: E402
+from coins import _dedup_map as dmap  # noqa: E402
 
 
 def _image(key: str) -> Image.Image:
@@ -187,19 +189,19 @@ class RebuildCase(unittest.TestCase):
         # build_plan() rewrites the plan AND the shared-logo report, and those
         # are tracked project files.
         patches = [
-            mock.patch.object(rd, "ROOT", self.dir),   # candidate map file
-            mock.patch.object(rd, "EMOJI", self.emoji),
-            mock.patch.object(rd, "STATE", self.state),
-            mock.patch.object(rd, "PLAN", self.plan),
-            mock.patch.object(rd, "OLD_STATE", self.old_state),
-            mock.patch.object(rd, "GROUPS_REPORT", self.groups),
-            mock.patch.object(rd, "INV", self.inv),
-            mock.patch.object(rd, "OUT_INV", self.dir / "inventory.filled.md"),
-            mock.patch.object(rd, "TICKER_IDS", self.dir / "ticker_to_id.json"),
-            mock.patch.object(rd, "BACKUP_IDS", self.dir / "ticker_to_id.bak.json"),
-            mock.patch.object(rd, "KEYWORDS_CSV", self.dir / "keywords.csv"),
-            mock.patch.object(rd, "LOCK", self.dir / "state.json.lock"),
-            mock.patch.object(rd, "USER_ID", 42),
+            mock.patch.object(cfg, "ROOT", self.dir),   # candidate map file
+            mock.patch.object(cfg, "EMOJI", self.emoji),
+            mock.patch.object(cfg, "STATE", self.state),
+            mock.patch.object(cfg, "PLAN", self.plan),
+            mock.patch.object(cfg, "OLD_STATE", self.old_state),
+            mock.patch.object(cfg, "GROUPS_REPORT", self.groups),
+            mock.patch.object(cfg, "INV", self.inv),
+            mock.patch.object(cfg, "OUT_INV", self.dir / "inventory.filled.md"),
+            mock.patch.object(cfg, "TICKER_IDS", self.dir / "ticker_to_id.json"),
+            mock.patch.object(dmap, "BACKUP_IDS", self.dir / "ticker_to_id.bak.json"),
+            mock.patch.object(cfg, "KEYWORDS_CSV", self.dir / "keywords.csv"),
+            mock.patch.object(cfg, "LOCK", self.dir / "state.json.lock"),
+            mock.patch.object(cfg, "USER_ID", 42),
             mock.patch.object(rd.time, "sleep", lambda s: None),
         ]
         for p in patches:
