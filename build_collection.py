@@ -920,7 +920,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                    base: str, title: str, user_id: int, default_emoji: str,
                    per_set: int, data_dir: Path, state: dict, bot: str,
                    logo: "BrandLogo | None" = None,
-                   new_set: bool = False) -> tuple[int, int]:
+                   new_set: bool = False,
+                   into_pack: int | None = None) -> tuple[int, int]:
     """Publish all pending items of one format; returns (uploaded, failed).
 
     Duplicate-proof: "already uploaded" is decided by the catalog's per-item
@@ -942,14 +943,30 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     # recorded (crash or ambiguous network failure) are attributed back to
     # their catalog items here, so the pending computation below can never
     # upload them a second time. This also refreshes the live capacity.
-    if fmt_sets:
-        reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
+    #
+    # Which set that is depends on --into-pack: reconciling the LAST one and
+    # then filling a different one would refresh the wrong capacity.
+    cur = fmt_sets[-1] if fmt_sets else None
+    if into_pack is not None:
+        cur = next((s for s in fmt_sets if s["index"] == into_pack), None)
+        if cur is None:
+            raise SetDrift(
+                f"no {fmt} pack {into_pack} in this family; "
+                f"have {sorted(s['index'] for s in fmt_sets) or 'none'}")
+    if cur:
+        reconcile_set(tg, cat, cur, data_dir, base)
         save_json(_state_path(data_dir, base), state)
     # A set holding a position we could not attribute is CLOSED: see
     # _set_is_open. Rolling to a fresh set is the only way to keep keys[] and
     # the live positions aligned once a foreign sticker sits between them.
-    cur = fmt_sets[-1] if fmt_sets else None
     if cur and not _set_is_open(cur):
+        # Asked for THIS pack by number, so silently filling a different one is
+        # not a fallback, it is ignoring the instruction.
+        if into_pack is not None:
+            raise SetDrift(
+                f"{cur['name']} holds live sticker(s) this publisher cannot "
+                f"identify, so appending to it would hand a new key someone "
+                f"else's custom_emoji_id. Refusing --into-pack {into_pack}.")
         log.warning("[%s] %s holds unattributed live sticker(s); publishing "
                     "continues in a new set", fmt, cur["name"])
         cur = None
@@ -964,8 +981,19 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         log.info("[%s] --new-set: %s stays at %d live; this run starts a fresh "
                  "set", fmt, cur["name"], cur.get("live", 0))
         cur = None
+    if into_pack is not None and cur is not None and cur["live"] >= per_set:
+        raise SetDrift(
+            f"{cur['name']} is full ({cur['live']}/{per_set}); "
+            f"--into-pack {into_pack} has nowhere to put anything.")
+    # `target` is the record being FILLED. It is not always fmt_sets[-1] any
+    # more: --into-pack can aim at a half-empty pack in the middle, and writing
+    # the live count or the key order onto the last record instead would leave
+    # the state describing a set the uploads never went to -- the drift the
+    # whole reconcile path exists to prevent.
+    target = None
     if cur and cur["live"] < per_set:
         set_index, set_name, in_set = cur["index"], cur["name"], cur["live"]
+        target = cur
     else:
         set_index = max((s["index"] for s in fmt_sets), default=0)
         set_name, in_set = "", 0
@@ -1055,7 +1083,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 fmt_sets.append({"fmt": fmt, "index": set_index, "name": set_name,
                                  "title": set_title, "live": 1 if logo_png else 0,
                                  "logo": bool(logo_png), "keys": []})
-                state["sets"].append(fmt_sets[-1])
+                target = fmt_sets[-1]
+                state["sets"].append(target)
                 save_json(_state_path(data_dir, base), state)
                 log.info("[%s set %d] %s %s%s", fmt, set_index,
                          "adopted" if adopted else "created", set_name,
@@ -1063,11 +1092,11 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                 if adopted:
                     # Attribute whatever the set already contains (the earlier
                     # create put SOMETHING there), then re-check this item.
-                    in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
+                    in_set = reconcile_set(tg, cat, target, data_dir, base)
                     save_json(_state_path(data_dir, base), state)
                     if cat.is_published(base, key):
                         continue  # this very item was the set's first sticker
-                    if not _set_is_open(fmt_sets[-1]):
+                    if not _set_is_open(target):
                         log.warning("[%s] %s has unattributed live stickers; not "
                                     "adding %s yet (will retry)", fmt, set_name, key)
                         failed += 1
@@ -1090,10 +1119,10 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             log.warning("[%s] %s for %s; reconciling live set", fmt, exc, key)
             if not placed and in_set == 0:
                 set_index -= 1  # the create never registered a set
-            elif fmt_sets:
-                in_set = reconcile_set(tg, cat, fmt_sets[-1], data_dir, base)
+            elif target is not None:
+                in_set = reconcile_set(tg, cat, target, data_dir, base)
                 save_json(_state_path(data_dir, base), state)
-                if not _set_is_open(fmt_sets[-1]):
+                if not _set_is_open(target):
                     in_set = 0   # closed by an unattributed position: new set
             if not cat.is_published(base, key):
                 failed += 1      # still pending -> a later run must retry it
@@ -1117,12 +1146,12 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         st = _confirm_new_upload(tg, cat, set_name, key, before,
                                  data_dir / "tmp")
         in_set += 1
-        fmt_sets[-1]["live"] = in_set
+        target["live"] = in_set
         # Record actual upload order (for cid mapping) + mark uploaded (committed
         # immediately -> crash-safe duplicate guard). The cid comes from the
         # sticker just identified, so it is right even if the set drifts before
         # _record_cids reads it back.
-        fmt_sets[-1].setdefault("keys", []).append(key)
+        target.setdefault("keys", []).append(key)
         cat.mark_uploaded(key, str(st.get("custom_emoji_id") or "") or None,
                           base=base, set_name=set_name)
         n += 1
@@ -1139,7 +1168,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
             # The RECORDED title, not a rebuilt one: rebuilding it here is how
             # the announcement and the actual set name drift apart.
             notify(tg, user_id, state, data_dir, base, set_name,
-                   fmt_sets[-1]["title"])
+                   target["title"])
             in_set = 0
         time.sleep(0.1)
 
@@ -1163,13 +1192,12 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
     # the next clean run announces it. A set that filled to capacity mid-run was
     # already announced above, and that one IS complete by definition.
     incomplete = failed + (len(skipped) - skipped_at_start)
-    if fmt_sets and not incomplete:
-        last = fmt_sets[-1]
-        notify(tg, user_id, state, data_dir, base, last["name"], last["title"])
-    elif fmt_sets:
+    if target is not None and not incomplete:
+        notify(tg, user_id, state, data_dir, base, target["name"], target["title"])
+    elif target is not None:
         log.warning("[%s] not announcing %s: %d item(s) did not make it into "
                     "this run. The link is posted once a run completes cleanly.",
-                    fmt, fmt_sets[-1]["name"], incomplete)
+                    fmt, target["name"], incomplete)
     return n, failed
 
 
@@ -1297,6 +1325,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="Start this run in a FRESH set instead of filling the "
                          "current one. Use to begin the next pack while the "
                          "one before it is deliberately left unfinished.")
+    ap.add_argument("--into-pack", type=int, metavar="N",
+                    help="Add to pack N instead of the newest one, so any pack "
+                         "with room can be topped up. Fails loudly if pack N "
+                         "does not exist, is full, or holds a sticker this "
+                         "publisher cannot identify.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--brand-logo", default=BRAND_LOGO_DEFAULT,
                     help="Logo image used as the FIRST emoji of every set built "
@@ -1314,6 +1347,14 @@ def main(argv: list[str] | None = None) -> int:
         formats = [MIXED] if args.mixed else parse_formats(args.formats)
     except ValueError as exc:
         log.error("%s", exc)
+        return EXIT_USAGE
+    if args.new_set and args.into_pack is not None:
+        log.error("--new-set opens a FRESH pack and --into-pack fills an "
+                  "existing one; they cannot both be right. Pick one.")
+        return EXIT_USAGE
+    if args.into_pack is not None and args.into_pack < 1:
+        log.error("--into-pack takes a pack number (1, 2, ...); got %d.",
+                  args.into_pack)
         return EXIT_USAGE
     if not 1 <= args.per_set <= PER_SET:
         log.error("--per-set must be between 1 and %d (Telegram's cap for a "
@@ -1436,7 +1477,7 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
                 base=base, title=args.title, user_id=args.user_id,
                 default_emoji=args.emoji, per_set=args.per_set,
                 data_dir=data_dir, state=state, bot=bot, logo=logo,
-                new_set=args.new_set)
+                new_set=args.new_set, into_pack=args.into_pack)
             ok += done
             failed += bad
         save_json(_state_path(data_dir, base), state)

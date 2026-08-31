@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `--into-pack N`, so any pack with room can be topped up
+
+- **Publishing always appended to the newest set**, so once a later pack
+  existed, the room left in an earlier one was unreachable — a pack stopped at
+  21/200 could never be filled again. `--into-pack 1` aims the run at that pack.
+- **It fails loudly instead of falling back**, because filling some *other*
+  pack would still look like success: an unknown number, a full pack, or one
+  holding a sticker this publisher cannot identify each stop the run. The last
+  is not fussiness — appending past an unattributable sticker is what hands a
+  new key someone else's `custom_emoji_id`.
+- `--new-set` and `--into-pack` together are rejected as contradictory.
+- **The real hazard was bookkeeping, not upload.** The live count and the
+  recorded key order were written to `fmt_sets[-1]`, which equals the target
+  only while filling the newest pack; aiming at a middle one would have
+  credited the upload to the wrong record — state describing a set the sticker
+  never entered, the exact drift `reconcile_set` exists to catch. Both now
+  follow the set actually written to, pinned by a test that fails (`4 != 0`)
+  when the old expression is restored.
+
 ### Changed — the curate page is an asset, not a string literal in `panel.py`
 
 - **`panel.py` 1622 → 737 lines.** 902 of them were one HTML/CSS/JS string

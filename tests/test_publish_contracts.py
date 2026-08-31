@@ -127,11 +127,21 @@ class PackTitlesAreOneSequence(unittest.TestCase):
                          "a format word in the title reintroduces the split")
 
     def test_the_announcement_uses_the_recorded_title(self):
-        """Rebuilding the title at announce time is how it drifts from the set."""
+        """Rebuilding the title at announce time is how it drifts from the set.
+
+        Asserts the title is READ FROM A RECORD, not which variable holds that
+        record: it was `fmt_sets[-1]` until `--into-pack` made the set being
+        filled something other than the last one. What must never come back is
+        a title rebuilt from the base and a counter.
+        """
         src = Path(bc.__file__).read_text(encoding="utf-8")
         block = src[src.index("if in_set >= per_set:"):]
         block = block[:block.index("time.sleep")]
-        self.assertIn('fmt_sets[-1]["title"]', block)
+        self.assertRegex(block, r'\w+\["title"\]',
+                         "the announcement must read the recorded title")
+        for rebuilt in ("f\"{base}", "set_title =", "FMT_TAG"):
+            self.assertNotIn(rebuilt, block,
+                             "the title must not be reconstructed here")
 
 
 class MixedPublishesOneFamily(unittest.TestCase):

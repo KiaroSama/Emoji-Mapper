@@ -881,6 +881,82 @@ class PublishThroughMain(_CatalogFixture):
         self.assertEqual(len(tg.sets[SET]), 3)        # appended, no new set
         self.assertNotIn(SET2, tg.sets)
 
+    def _two_packs(self, tg):
+        """Leave pack 1 half-empty and pack 2 open, so both have room."""
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg), EXIT_OK)          # fills pack 1
+        self._add_item(2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--new-set"), EXIT_OK)   # opens pack 2
+
+    def test_into_pack_tops_up_an_older_pack_that_still_has_room(self):
+        """The newest pack is not the only one that can be filled.
+
+        Publishing always appended to `fmt_sets[-1]`, so a half-empty pack in
+        the middle could never be topped up again once a later one existed.
+        """
+        tg = FakeTG()
+        self._two_packs(tg)
+        self.assertEqual(len(tg.sets[SET]), 2)
+        self.assertEqual(len(tg.sets[SET2]), 1)
+
+        key3 = self._add_item(3)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--into-pack", "1"), EXIT_OK)
+
+        self.assertEqual(len(tg.sets[SET]), 3, "pack 1 should have taken it")
+        self.assertEqual(len(tg.sets[SET2]), 1, "pack 2 must be untouched")
+        with Catalog(self.data / "catalog.db") as cat:
+            self.assertEqual(cat.custom_emoji_id_for("pk", key3), f"{SET}-2")
+
+    def test_the_record_written_is_the_pack_actually_uploaded_to(self):
+        """The live count and key order must land on the TARGET's record.
+
+        Both were written to `fmt_sets[-1]`, so filling a middle pack would have
+        credited the upload to the LAST pack's record instead -- state
+        describing a set the sticker never went into, which is precisely the
+        drift `reconcile_set` exists to catch. A count check alone would pass.
+        """
+        tg = FakeTG()
+        self._two_packs(tg)
+        key3 = self._add_item(3)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--into-pack", "1"), EXIT_OK)
+
+        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        pack1, pack2 = state["sets"][0], state["sets"][1]
+        self.assertIn(key3, pack1["keys"], "the key belongs to pack 1's record")
+        self.assertNotIn(key3, pack2["keys"], "pack 2's record must not claim it")
+        self.assertEqual(pack1["live"], len(tg.sets[SET]))
+        self.assertEqual(pack2["live"], len(tg.sets[SET2]))
+
+    def test_into_pack_refuses_a_number_that_is_not_there(self):
+        """Silence would fill some other pack and look like success."""
+        tg = FakeTG()
+        self._two_packs(tg)
+        self._add_item(3)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--into-pack", "9"), EXIT_FAILED)
+        self.assertEqual(len(tg.sets[SET]), 2)
+        self.assertEqual(len(tg.sets[SET2]), 1)
+
+    def test_into_pack_refuses_a_full_pack(self):
+        tg = FakeTG()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "2"), EXIT_OK)
+        self._add_item(2)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--per-set", "2",
+                                       "--into-pack", "1"), EXIT_FAILED)
+
+    def test_into_pack_and_new_set_together_are_rejected(self):
+        """One opens a fresh pack, the other fills an old one."""
+        tg = FakeTG()
+        self._two_packs(tg)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self._run(tg, "--new-set", "--into-pack", "1"),
+                             EXIT_USAGE)
+
     # ----- H-11: every recorded set is verified, not just the active one -- #
     def test_an_older_recorded_set_that_disappeared_fails_closed(self):
         tg = FakeTG()

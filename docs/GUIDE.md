@@ -650,6 +650,7 @@ remain the identity, and only the human title moved.
 | `--formats` | `static,video,animated` | Which formats to publish, in order. |
 | `--per-set` | `200` | Emojis per set. |
 | `--new-set` | off | Start this run in a **fresh** set instead of filling the current one. |
+| `--into-pack` | *(newest)* | Add to pack **N** instead of the newest one, so any pack with room can be topped up. |
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--brand-logo` | `assets/yourbrand-emoji-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
@@ -665,6 +666,27 @@ every run afterwards (each one would open another set). The two workarounds it
 replaces are both wrong: a smaller `--per-set` caps every *later* set at the
 same wrong size, and a second `--base` starts a new family whose `publications`
 table is empty, so the entire catalog would be re-uploaded into it.
+
+**Topping up an older pack (`--into-pack N`).** Publishing always appended to
+the newest set, so once pack 3 existed there was no way to put anything back
+into a half-empty pack 1 — its remaining room was unreachable. `--into-pack 1`
+aims this run at that pack instead.
+
+It fails loudly rather than falling back, because a silent fallback would fill
+some *other* pack and still look like success: an unknown number, a full pack,
+or one holding a sticker this publisher cannot identify each stop the run. That
+last case is not fussiness — appending past an unattributable sticker is what
+hands a new key someone else's `custom_emoji_id`.
+
+`--new-set` and `--into-pack` together are rejected: one opens a fresh pack and
+the other fills an existing one, so there is no sensible combined meaning.
+
+The subtle part is bookkeeping, not upload. The live count and the recorded key
+order used to be written to the *last* set's record, which is the same thing as
+the target only while you are filling the newest pack. Filling a middle one
+would have credited the upload to the wrong record — state describing a set the
+sticker never entered, which is exactly the drift `reconcile_set` exists to
+catch. Both now follow the pack actually being written to, and a test pins it.
 
 Only **included** (panel-selected), not-yet-uploaded, non-skipped items are
 published. Per-format sets, drift-proof resume, per-pack manifests.
