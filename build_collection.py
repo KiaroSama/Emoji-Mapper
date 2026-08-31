@@ -211,7 +211,8 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                    per_set: int, data_dir: Path, state: dict, bot: str,
                    logo: "BrandLogo | None" = None,
                    new_set: bool = False,
-                   into_pack: int | None = None) -> tuple[int, int]:
+                   into_pack: int | None = None,
+                   repaint: bool = False) -> tuple[int, int]:
     """Publish all pending items of one format; returns (uploaded, failed).
 
     Duplicate-proof: "already uploaded" is decided by the catalog's per-item
@@ -352,11 +353,13 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                         # sets are allowed (Bot API 7.2+), so a STATIC logo can lead a
                         # static, video or animated set alike.
                         tg.create_emoji_set(user_id, set_name, set_title, logo_png,
-                                            "static", [BRAND_LOGO_EMOJI], BRAND_LOGO_KW)
+                                            "static", [BRAND_LOGO_EMOJI],
+                                            BRAND_LOGO_KW,
+                                            needs_repainting=repaint)
                     else:
                         tg.create_emoji_set(user_id, set_name, set_title, path,
-                                            item.fmt,
-                                            emojis, item.keywords)
+                                            item.fmt, emojis, item.keywords,
+                                            needs_repainting=repaint)
                 except RuntimeError as exc:
                     # If an earlier attempt of THIS name actually landed (network
                     # failure after apply, or a leftover from a crashed run), the
@@ -620,6 +623,13 @@ def main(argv: list[str] | None = None) -> int:
                          "with room can be topped up. Fails loudly if pack N "
                          "does not exist, is full, or holds a sticker this "
                          "publisher cannot identify.")
+    ap.add_argument("--repaint", action="store_true",
+                    help="Create NEW sets with needs_repainting: the client "
+                         "paints every emoji in them the text/accent colour, "
+                         "which is how Telegram's own monochrome marks look "
+                         "right. Whole-set and creation-only -- it cannot be "
+                         "added to an existing pack and it flattens colour "
+                         "art, so give repaintable emoji their own family.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--brand-logo", default=BRAND_LOGO_DEFAULT,
                     help="Logo image used as the FIRST emoji of every set built "
@@ -767,7 +777,8 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
                 base=base, title=args.title, user_id=args.user_id,
                 default_emoji=args.emoji, per_set=args.per_set,
                 data_dir=data_dir, state=state, bot=bot, logo=logo,
-                new_set=args.new_set, into_pack=args.into_pack)
+                new_set=args.new_set, into_pack=args.into_pack,
+                repaint=args.repaint)
             ok += done
             failed += bad
         save_json(_state_path(data_dir, base), state)

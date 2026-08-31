@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `--repaint`, so a monochrome mark can look right
+
+- Telegram's own marks (TopicIcons and friends) are stored BLACK and painted by
+  the client, because their set carries `needs_repainting`. Republished into an
+  ordinary pack they simply look black. `--repaint` sets the flag when a new set
+  is created.
+- **Creation-only and whole-set, both enforced by the API not by us:** the field
+  exists on `Sticker` and on `createNewStickerSet` and nowhere else, so an
+  existing pack can never gain it, and turning it on flattens every full-colour
+  emoji in the same set. Repaintable art needs its own family.
+- Absent by default, not `"false"` — a test pins that, because no existing pack
+  may start claiming a value it never had.
+
+### Changed — the last two files over 800 lines, and the worker's toolchain
+
+- `coins/fetch_paprika.py` 801 → 703, with the CoinPaprika HTTP/search half in
+  `coins/_paprika_api.py`. Chosen because it is the one block with no stake in
+  the state paths the tests redirect; `QUOTA_EXHAUSTED` is an identity sentinel,
+  so importing the name keeps `is` comparisons working, and a test asserts it.
+- `tests/test_resume_safety.py` 807 → 467, with the unknown-live-state cases in
+  `tests/test_unresolved_mutation.py`.
+- `wrangler` 4.125.0 → 4.127.1 and `@cloudflare/workers-types` → 5.20260831.1;
+  the `^` ranges already allowed both, so the manifest floors were raised to the
+  versions actually tested. Worker typecheck clean, 40/40 vitest.
+
+
 ### Removed — one blank-image rule instead of four, and a constant that was a trap
 
 - **`emojikit.media.is_blank_image` is now the only definition.**

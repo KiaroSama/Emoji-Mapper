@@ -487,6 +487,53 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         self.assertEqual(srv.probes, 1, "only the pre-add identity snapshot")
 
 
+class RepaintingIsCreationOnly(unittest.TestCase):
+    """`needs_repainting` can only ever be set while the set is being created.
+
+    The Bot API exposes the field in exactly two places -- the `Sticker` object
+    and `createNewStickerSet` -- so a set created without it can never gain it,
+    and it is a WHOLE-SET property: switching it on flattens every full-colour
+    emoji in the same pack. A repaintable mark therefore needs its own family,
+    and this is the only moment the choice exists.
+
+    Found the hard way: an emoji republished from Telegram's own `TopicIcons`
+    rendered BLACK in our pack. The file was pixel-identical to the original --
+    it is the client that paints those, because the source set carries this flag.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.png = Path(self.tmp.name) / "logo.png"
+        _png(self.png)
+
+    def _created_with(self, **kw) -> dict:
+        seen = {}
+
+        def fake_call(method, *, data=None, files=None, **rest):
+            seen.update({"method": method, "data": data})
+            return {}
+
+        tg = tg_api.Telegram("1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        with mock.patch.object(tg, "_call", fake_call):
+            tg.create_emoji_set(1, "s_by_bot", "T", self.png, "static",
+                                ["😀"], ["kw"], **kw)
+        return seen
+
+    def test_the_flag_is_sent_when_asked_for(self):
+        seen = self._created_with(needs_repainting=True)
+        self.assertEqual(seen["method"], "createNewStickerSet")
+        self.assertEqual(seen["data"].get("needs_repainting"), "true")
+
+    def test_it_is_ABSENT_by_default_not_false(self):
+        """Every existing pack was created without it and must stay that way.
+
+        Sending "false" is not the same as sending nothing to every Bot API
+        field, and no existing set may start claiming a value it never had.
+        """
+        self.assertNotIn("needs_repainting", self._created_with()["data"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
