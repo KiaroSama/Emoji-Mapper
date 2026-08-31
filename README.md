@@ -288,17 +288,23 @@ Then build/rebuild with the coin bot:
 ```
 Emoji Mapper/                  # the whole project
   build_pack.py                # core engine: upload any source dir with any bot
+  telegram_api.py              # the Bot API client + Telegram's caps
+  packstate.py                 # state-file shape + atomic write + pack lock
+  announce.py                  # announce finished packs (Worker, or direct)
   make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
   fetch_pack.py                # collector: download Telegram packs -> catalog
   fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
   add_media.py                 # collector: build emoji from scratch -> catalog
   build_collection.py          # collector: publish catalog -> new packs
+  collection_state.py          # its plan/resume state + the brand logo
+  collection_reconcile.py      # what is live in a set, and whose key it is
   sync_order.py                # reorder a LIVE pack to match the panel
   panel.py                     # curate panel: pick & order what gets published
   emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
   emojikit/                    # shared core toolkit
     logsetup.py                # UTC file logging
-    media.py                   # format detect + hashing + static/video/tgs convert
+    media.py                   # format detect + static/video/tgs convert
+    identity.py                # content keys, perceptual hashes, same_image
     catalog.py                 # content-addressed SQLite catalog (dedup)
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
