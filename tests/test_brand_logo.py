@@ -62,7 +62,8 @@ class FakeTelegram:
                 "file_id": file_id, "file_unique_id": f"{name}-u{i}",
                 "is_animated": fmt == "animated", "is_video": fmt == "video"}
 
-    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+    def create_emoji_set(self, user_id, name, title, path, fmt,
+                         emojis, keywords, *, needs_repainting=False):
         self.sets[name] = [self._stored(name, path, fmt, emojis)]
 
     def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,

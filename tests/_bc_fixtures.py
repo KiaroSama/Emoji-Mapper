@@ -120,7 +120,8 @@ class FakeTG:
         Path(dest).write_bytes(body)
         return dest
 
-    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+    def create_emoji_set(self, user_id, name, title, path, fmt,
+                         emojis, keywords, *, needs_repainting=False):
         self.sets[name] = [self._new(name, path)]
 
     def add_emoji(self, user_id, name, path, fmt, emojis, keywords, *,
