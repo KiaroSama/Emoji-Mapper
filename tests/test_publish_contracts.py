@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_collection as bc  # noqa: E402
+import collection_state as cs  # noqa: E402
 import build_pack as bp  # noqa: E402
 from build_pack import announce_packs  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
@@ -183,14 +184,14 @@ class MixedPublishesOneFamily(unittest.TestCase):
             cat.set_order([f"{f[0]}:item{i:030d}"
                            for i, f in enumerate(["static", "animated",
                                                   "static", "video"])])
-            plan = bc.freeze_plan(cat, data, "b", [bc.MIXED])
+            plan = cs.freeze_plan(cat, data, "b", [cs.MIXED])
 
-        keys = plan[bc.MIXED]
+        keys = plan[cs.MIXED]
         self.assertEqual(len(keys), 4, "every format belongs to the one plan")
         self.assertEqual([k[0] for k in keys], ["s", "a", "s", "v"],
                          "the panel's interleaved order must survive")
         # No format letter in the set name.
-        self.assertEqual(bc.FMT_TAG.get(bc.MIXED, ""), "")
+        self.assertEqual(cs.FMT_TAG.get(cs.MIXED, ""), "")
 
     def test_a_family_started_per_format_cannot_switch_to_mixed(self):
         """state["sets"] and the plan are keyed by format.
@@ -214,20 +215,20 @@ class MixedPublishesOneFamily(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         data = Path(tmp.name)
-        bc.save_json(bc._state_path(data, "b"), {
+        cs.save_json(cs._state_path(data, "b"), {
             "base": "b", "sent": [], "skipped": [],
-            "sets": [{"fmt": bc.MIXED, "index": 1, "name": "b1_by_bot",
+            "sets": [{"fmt": cs.MIXED, "index": 1, "name": "b1_by_bot",
                       "title": "T 1", "live": 1, "logo": True, "keys": []}]})
-        state = bc.load_state(data, "b")          # must not raise
-        self.assertEqual(state["sets"][0]["fmt"], bc.MIXED)
+        state = cs.load_state(data, "b")          # must not raise
+        self.assertEqual(state["sets"][0]["fmt"], cs.MIXED)
 
         # A genuinely unknown format must still be refused.
-        bc.save_json(bc._state_path(data, "c"), {
+        cs.save_json(cs._state_path(data, "c"), {
             "base": "c", "sent": [], "skipped": [],
             "sets": [{"fmt": "sideways", "index": 1, "name": "c1_by_bot",
                       "title": "T", "live": 0, "keys": []}]})
-        with self.assertRaises(bc.StateError):
-            bc.load_state(data, "c")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(data, "c")
 
 
 

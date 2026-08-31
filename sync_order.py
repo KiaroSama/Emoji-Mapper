@@ -31,7 +31,7 @@ import os
 import time
 from pathlib import Path
 
-from build_collection import (_lock_path, _state_path, load_state,
+from collection_state import (_lock_path, _state_path, load_state,
                               save_json)
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, LockBusy, Telegram,
                         exclusive_lock, load_env)

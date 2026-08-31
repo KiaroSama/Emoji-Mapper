@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
+import collection_state as cs  # noqa: E402
 from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
@@ -89,7 +90,7 @@ class BrandLogoPrepare(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_static_logo_is_100x100_png(self):
-        logo = bc.BrandLogo(str(self.png), self.data)
+        logo = cs.BrandLogo(str(self.png), self.data)
         out = logo.static_png()
         self.assertIsNotNone(out)
         self.assertTrue(out.is_file())
@@ -97,11 +98,11 @@ class BrandLogoPrepare(unittest.TestCase):
             self.assertEqual(im.size, (media.SIZE, media.SIZE))
 
     def test_static_png_is_cached(self):
-        logo = bc.BrandLogo(str(self.png), self.data)
+        logo = cs.BrandLogo(str(self.png), self.data)
         self.assertEqual(logo.static_png(), logo.static_png())
 
     def test_missing_source_returns_none(self):
-        logo = bc.BrandLogo(str(self.data / "nope.png"), self.data)
+        logo = cs.BrandLogo(str(self.data / "nope.png"), self.data)
         self.assertFalse(logo.available())
         self.assertIsNone(logo.static_png())
 
@@ -129,7 +130,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
             logo_png = data / "logo.png"
             _make_png(logo_png, color=(0, 200, 0, 255))
             tg = FakeTelegram("YourEmojiBot")
-            logo = bc.BrandLogo(str(logo_png), data)
+            logo = cs.BrandLogo(str(logo_png), data)
             state = {"base": "pk", "sets": [], "sent": []}
             with Catalog(data / "catalog.db") as cat:
                 bc.publish_format(tg, cat, fmt="static", plan_keys=keys,
@@ -140,7 +141,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 set_name = "pks1_by_YourEmojiBot"
                 stickers = tg.sets[set_name]
                 # First emoji must be the brand logo.
-                self.assertEqual(stickers[0]["emojis"], [bc.BRAND_LOGO_EMOJI])
+                self.assertEqual(stickers[0]["emojis"], [cs.BRAND_LOGO_EMOJI])
                 self.assertEqual(len(stickers), 3)  # logo + 2 items
                 # State records the logo flag.
                 self.assertTrue(state["sets"][0]["logo"])
@@ -168,7 +169,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
             logo_png = data / "logo.png"
             _make_png(logo_png, color=(0, 200, 0, 255))
             tg = FakeTelegram("YourEmojiBot")
-            logo = bc.BrandLogo(str(logo_png), data)
+            logo = cs.BrandLogo(str(logo_png), data)
             state = {"base": "pk", "sets": [], "sent": []}
             with Catalog(data / "catalog.db") as cat:
                 bc.publish_format(tg, cat, fmt="animated", plan_keys=keys,
@@ -178,7 +179,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
             stickers = tg.sets["pka1_by_YourEmojiBot"]
             self.assertEqual(len(stickers), 3)             # logo + 2 animated
             self.assertEqual(stickers[0]["fmt"], "static")  # logo is static...
-            self.assertEqual(stickers[0]["emojis"], [bc.BRAND_LOGO_EMOJI])
+            self.assertEqual(stickers[0]["emojis"], [cs.BRAND_LOGO_EMOJI])
             self.assertEqual(stickers[1]["fmt"], "animated")  # ...items are animated
             self.assertEqual(stickers[2]["fmt"], "animated")
 
@@ -211,7 +212,7 @@ class TheDefaultBrandLogoActuallyShips(unittest.TestCase):
     """
 
     def test_the_default_logo_is_a_real_file_inside_the_repo(self):
-        p = Path(bc.BRAND_LOGO_DEFAULT)
+        p = Path(cs.BRAND_LOGO_DEFAULT)
         self.assertTrue(p.is_file(), f"the default brand logo is missing: {p}")
         self.assertTrue(
             str(p.resolve()).startswith(str(ROOT.resolve())),
@@ -220,12 +221,12 @@ class TheDefaultBrandLogoActuallyShips(unittest.TestCase):
 
     def test_the_default_logo_is_not_blank(self):
         """A blank logo would upload as an empty first emoji in every pack."""
-        with Image.open(bc.BRAND_LOGO_DEFAULT) as im:
+        with Image.open(cs.BRAND_LOGO_DEFAULT) as im:
             self.assertFalse(media.is_blank_image(im.convert("RGBA")))
 
     def test_the_main_bot_gets_it_and_the_coin_bot_does_not(self):
-        self.assertIn("youremojibot", bc.BRAND_LOGO_BOTS)
-        self.assertNotIn("yourcoinemojibot", bc.BRAND_LOGO_BOTS,
+        self.assertIn("youremojibot", cs.BRAND_LOGO_BOTS)
+        self.assertNotIn("yourcoinemojibot", cs.BRAND_LOGO_BOTS,
                          "the coin bot is exempt by owner decision")
 
 
