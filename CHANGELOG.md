@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - `sync_order.py --pack N`
+
+Publishing **appends**; it cannot move a sticker that is already live. So after
+arranging a pack in the curate panel and publishing into it, the live order
+still has to be applied with `sync_order.py` - and without a filter that reorders
+the WHOLE family. Arranging pack 2 and syncing found 43 moves there, but also 28
+in pack 5 and 1 in pack 1, neither of which the owner had looked at.
+
+`--pack N` (repeatable) limits the run. An unknown number is a usage error, not
+a silent no-op that reports success having reordered nothing.
+
+`setStickerPositionInSet` moves an existing sticker, so no `custom_emoji_id`
+changes - verified after the live run: all 105 ids the bot inventories name
+still resolve.
+
+
 ### Added — `--repaintable`, a gate on emoji Telegram paints itself
 
 A repaintable emoji carries no colour of its own: the client paints it with the

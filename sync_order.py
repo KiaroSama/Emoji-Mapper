@@ -139,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", required=True, help="Pack family base name.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--token-env", default="GENERAL_BOT_TOKEN")
+    ap.add_argument("--pack", type=int, action="append", default=[],
+                    metavar="N",
+                    help="Only reorder pack N (repeatable). Default: every pack "
+                         "in the family. A run that arranged ONE pack should "
+                         "not move stickers in the others.")
     ap.add_argument("--apply", action="store_true",
                     help="Actually move stickers. Without it, only report.")
     args = ap.parse_args(argv)
@@ -168,6 +173,19 @@ def main(argv: list[str] | None = None) -> int:
             if not sets:
                 log.error("state for %r records no sets.", args.base)
                 return EXIT_USAGE
+            if args.pack:
+                # Fail on an unknown number rather than silently reordering
+                # nothing and reporting success.
+                known = {s["index"] for s in sets}
+                unknown = sorted(set(args.pack) - known)
+                if unknown:
+                    log.error("no pack %s in %r; it has %s.",
+                              ", ".join(map(str, unknown)), args.base,
+                              ", ".join(str(i) for i in sorted(known)))
+                    return EXIT_USAGE
+                sets = [s for s in sets if s["index"] in set(args.pack)]
+                log.info("limited to pack %s",
+                         ", ".join(str(s["index"]) for s in sets))
             tg = Telegram(token)
             cat = Catalog(db_path)
             try:
