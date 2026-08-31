@@ -1229,6 +1229,34 @@ class OnlyOnePanelPerPort(unittest.TestCase):
         self.assertIn("already running", second.stdout + second.stderr)
 
 
+class ThePanelPageActuallyShips(unittest.TestCase):
+    """The page moved out of panel.py into assets/panel.html.
+
+    Every other test in this module reads `p.PAGE` and so would still pass if
+    the asset were missing from a checkout -- the import would simply blow up
+    first, somewhere unrelated. That is not hypothetical: the brand logo was an
+    absolute `F:\\` path once, so on every machine but one the "mandatory" logo
+    silently vanished and nothing failed. Same shape, same guard.
+    """
+
+    def test_the_page_is_a_real_file_inside_the_repo(self):
+        asset = p.ASSET_DIR / "panel.html"
+        self.assertTrue(asset.is_file(), f"the panel page is missing: {asset}")
+        self.assertTrue(
+            str(asset.resolve()).startswith(str(ROOT.resolve())),
+            "the page must ship in the repo, not point at a machine-specific path")
+
+    def test_the_loaded_page_is_the_document_the_handler_expects(self):
+        """Loaded, not just present: an empty or truncated file must not pass."""
+        self.assertTrue(p.PAGE.startswith("<!doctype html>"))
+        self.assertTrue(p.PAGE.rstrip().endswith("</html>"))
+        # Every placeholder the handler substitutes must survive extraction --
+        # a page missing one renders the literal token to the browser.
+        for token in ("__ITEMS__", "__TOKEN__", "__PREVIEW_FPS__",
+                      "__PER_SET__", "__HIDDEN__"):
+            self.assertIn(token, p.PAGE, f"{token} lost in the asset")
+
+
 class OnePackCanBeUnhidden(unittest.TestCase):
     """`--with-pack N` re-opens ONE published set, not all of them.
 
