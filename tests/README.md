@@ -43,11 +43,11 @@ rather than adding an opt-out.
 
 | File | Covers |
 |------|--------|
-| `test_media.py` | format detection, content/perceptual hashing, static→PNG, GIF→WEBM, Lottie→TGS, and the animated contract (512×512 canvas, frame rate, duration, gzip packaging, bounded decompression) |
+| `test_media.py` | format detection (`emojikit/media.py`) and identity (`emojikit/identity.py`): content/perceptual hashing, `same_image`, static→PNG, GIF→WEBM, Lottie→TGS, and the animated contract (512×512 canvas, frame rate, duration, gzip packaging, bounded decompression) |
 | `test_catalog.py` | catalog dedup (exact + perceptual), `file_unique_id` skip, pending/upload tracking, persistence |
 | `test_resume_safety.py` | the duplicate-upload paths, driven through `build_pack.main()`: recorded-cursor resume, write-ahead in-flight record, atomic state writes, refusal to guess on unexplained drift, per-set limits |
-| `test_telegram_client.py` | `build_pack.Telegram` on its own: token redaction, the STICKERSET_INVALID retry scope, and what the client accepts as evidence that an upload landed |
-| `test_pack_locks.py` | `exclusive_lock` mechanics: refusal, release on error, stale reclaim and its races, ownership, heartbeat, and the lock-path helpers. (`test_lock_order.py` checks the documented ORDER of the same locks, by AST.) |
+| `test_telegram_client.py` | `telegram_api.Telegram` on its own: token redaction, the STICKERSET_INVALID retry scope, and what the client accepts as evidence that an upload landed |
+| `test_pack_locks.py` | `packstate.exclusive_lock` mechanics: refusal, release on error, stale reclaim and its races, ownership, heartbeat, and the lock-path helpers. (`test_lock_order.py` checks the documented ORDER of the same locks, by AST.) |
 | `test_rebuild_dedup_state.py` | the `coins/rebuild_dedup.py` mutation walk: plan → validate → delete the old packs → upload, plus its in-flight reconcile and run lock |
 | `test_rebuild_dedup_map.py` | the second phase of the same module: `map_and_fill` resolving `ticker_to_id.json` by image identity under the map lock, and the shared-logo-group guard |
 | `test_publish_dedup.py` | verified retries for non-idempotent Bot API calls, live-set reconcile, adopt-on-occupied, recorded fuids |
@@ -59,16 +59,31 @@ rather than adding an opt-out.
 | `test_coin_http.py` | the one pooled `coins/_http.py` client: retry ladder, `Retry-After`, and the paging delay |
 | `test_coin_ticker_map.py` | every writer of `ticker_to_id.json` — alias/enhance/provider — serialised so none loses another's update, and one inventory implementation |
 | `test_verify_logos.py` | `verify_logos`: the inversion-aware distance, the durable replacement intent bound to its own `--map`, and the fix path's exit codes |
-| `test_panel.py` | brand-logo preview, inert item JSON (no script breakout), and the mutation guard (token, loopback Host/Origin, content type, body cap, exact-permutation order) |
+| `test_panel.py` | what the panel builds from the catalog: brand-logo preview, inert item JSON (no script breakout), the similarity order, the published-item filter, and the save-during-reorder window |
+| `test_panel_guard.py` | the POST guard (token, loopback Host/Origin, content type, body cap, exact-permutation order) and the two behaviours built on it. `MutationGuard` owns nine `test_*` methods and is subclassed twice, so all three classes must stay in one module — importing the base elsewhere would collect it again rather than move it |
+| `test_panel_page.py` | assertions against the served page (`panel.PAGE`): drag-and-drop, undo/redo, the viewport observer, the pack separators and the jump buttons. Those live in the page's own JavaScript, so the document is the only level at which the behaviour exists |
+| `test_panel_server.py` | the panel as a process: which Host may reach it, and who owns the port. Real subprocesses and real sockets, so the slowest of the four |
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
 
-`_pack_fixtures.py`, `_rebuild_fixtures.py`, `_cli_fixtures.py` and
-`_bc_fixtures.py` hold the
+`_pack_fixtures.py`, `_rebuild_fixtures.py`, `_cli_fixtures.py`,
+`_bc_fixtures.py` and `_panel_fixtures.py` hold the
 fakes shared by the modules above them (the PNG builders, `FakeTelegram`,
 `RebuildCase`, and the standalone-script loader every entry-point contract
 module imports). One copy each, because a duplicated fake drifts away from the
 thing it stands in for. The leading underscore is load-bearing:
 `-p "test_*.py"` must not collect them as test modules.
+
+A fixture may only be shared if it carries no `test_*` methods and no
+TestCase base. One that does multiplies with every importer instead of
+moving — which is why `MutationGuard` stays whole in `test_panel_guard.py`.
+
+**Patch the namespace the CALLER reads, not the one that defines the name.**
+`build_pack` does `from telegram_api import Telegram`, so the name lives in
+`build_pack`'s globals and `patch.object(telegram_api, "Telegram")` leaves
+the real client in place — the suite then dials the discard port and sleeps
+through the retry ladder. `announce_via_worker` is the mirror image: its
+only caller is `announce.announce_packs`, so it must be patched on
+`announce`.
 
 `FakeTelegram` binds the **real** `build_pack.Telegram.send_message` rather than
 reimplementing it. The retry count and the link-preview flag are guarantees

@@ -37,8 +37,9 @@ from pathlib import Path
 import requests
 from PIL import Image
 
-from build_pack import (EXIT_FAILED, EXIT_USAGE, Telegram, api_base,
-                        ingest_exit_code, load_env, write_json_atomic)
+from build_pack import (EXIT_FAILED, EXIT_USAGE, ingest_exit_code, load_env)
+from packstate import (write_json_atomic)
+from telegram_api import (Telegram, api_base)
 # The pipeline's single definition of "this image is effectively empty" -- this
 # module used to carry its own copy of the rule and its two constants.
 from emojikit.media import is_blank_image

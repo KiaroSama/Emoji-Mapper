@@ -14,8 +14,7 @@ import logging
 from pathlib import Path
 
 
-from build_pack import (LiveStateUnknown,
-                        SetState)
+from telegram_api import (LiveStateUnknown, SetState)
 from emojikit import identity, media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact

@@ -62,9 +62,9 @@ except ImportError as exc:
     raise SystemExit("coins/remap_ids.py needs numpy: "
                      "pip install -r requirements-coins.txt") from exc
 
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LockBusy,
-                        Telegram, api_base, canonical_map_lock, exclusive_lock,
-                        load_env, pack_family_lock_path, write_json_atomic)
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, load_env)
+from packstate import (LockBusy, canonical_map_lock, exclusive_lock, pack_family_lock_path, write_json_atomic)
+from telegram_api import (Telegram, api_base)
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent

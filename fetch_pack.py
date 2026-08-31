@@ -24,7 +24,8 @@ import logging
 import os
 from pathlib import Path
 
-from build_pack import EXIT_USAGE, Telegram, ingest_exit_code, load_env
+from build_pack import (EXIT_USAGE, ingest_exit_code, load_env)
+from telegram_api import (Telegram)
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, redact, setup_logging

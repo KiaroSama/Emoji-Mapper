@@ -29,7 +29,7 @@ import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
-from build_pack import AmbiguousUploadError, Telegram  # noqa: E402
+from telegram_api import (AmbiguousUploadError, Telegram)  # noqa: E402
 from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 

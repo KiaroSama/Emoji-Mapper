@@ -588,7 +588,8 @@ def _detect_bot_username() -> str:
     (missing .env, no network, bad token) the logo preview is simply skipped.
     """
     try:
-        from build_pack import Telegram, load_env
+        from build_pack import (load_env)
+        from telegram_api import (Telegram)
         load_env()
         token = os.environ.get("GENERAL_BOT_TOKEN", "")
         if not token:
