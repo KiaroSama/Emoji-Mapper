@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — one blank-image rule instead of four, and a constant that was a trap
+
+- **`emojikit.media.is_blank_image` is now the only definition.**
+  `make_emoji_pngs._is_blank` and `coins/_dedup_plan.is_blank` each carried
+  their own copy with their own re-declared `> 10` / `<= 8` — the thresholds
+  media names `VISIBLE_ALPHA` and `BLANK_MAX_VISIBLE` — and the coins one was
+  the slow per-pixel form media had already moved away from. Both delegate now;
+  `_video_is_blank` reads the named constants instead of two more literals. The
+  pipeline's central quality gate had four definitions that could drift apart.
+- **`logsetup.LOG_RETENTION_DAYS` deleted.** Its own comment said nothing that
+  acts on the retention window may read it, because `load_env()` has not run at
+  import — a constant kept only so a test could assert on the parsing it did.
+  `log_retention_days()` is the accessor. With no parse at import there is no
+  import-time failure left, so `LogRetentionParsing` went with it; every value
+  it checked is already covered by `TestRetentionIsReadWhenItIsUsed` against the
+  call-time path, and the one guarantee it held alone — a garbage value must not
+  break the module, not merely return the wrong number — is folded in there.
+- **`make_emoji_pngs._pick_sources` deleted**: no production caller. It was
+  `[g[0] for g in _source_groups(...)]`, and the two tests now read
+  `_source_groups` directly.
+
+Suite 760 → 756: exactly the four methods of the deleted class.
+
+
 ### Changed — six files over 800 lines split along real seams
 
 No behaviour change: 760 tests before, 760 after. Every cut runs one way, so

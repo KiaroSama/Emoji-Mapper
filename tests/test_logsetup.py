@@ -58,6 +58,9 @@ class TestRetentionIsReadWhenItIsUsed(unittest.TestCase):
     def test_a_malformed_value_falls_back_instead_of_raising(self):
         os.environ["EMOJI_LOG_RETENTION_DAYS"] = "not-a-number"
         self.assertEqual(L.log_retention_days(), L.LOG_RETENTION_DEFAULT_DAYS)
+        # A bare int() here once raised at IMPORT, so logging -- and with it
+        # every entry point that imports it -- died before argparse could speak.
+        self.assertTrue(callable(L.setup_logging))
 
     def test_a_negative_value_cannot_mean_prune_everything(self):
         os.environ["EMOJI_LOG_RETENTION_DAYS"] = "-1"

@@ -45,13 +45,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_RETENTION_DEFAULT_DAYS = 30
 
-# The import-time snapshot. Kept because it is part of this module's published
-# surface and because it pins the defensive parsing below -- but nothing that
-# ACTS on the retention window may read it, because at import time load_env()
-# has not run yet. Use log_retention_days().
-LOG_RETENTION_DAYS = safe_int_env("EMOJI_LOG_RETENTION_DAYS",
-                                  LOG_RETENTION_DEFAULT_DAYS, minimum=0)
-
 
 def log_retention_days() -> int:
     """Resolve the retention window per call, not at import.
