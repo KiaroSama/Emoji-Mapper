@@ -25,8 +25,9 @@ import re
 import time
 from pathlib import Path
 
-from build_pack import (BotApiError, Telegram, load_env, safe_int_env,
-                        write_json_atomic)
+from build_pack import (load_env, safe_int_env)
+from packstate import (write_json_atomic)
+from telegram_api import (BotApiError, Telegram)
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 # A custom_emoji_id as Telegram issues it: decimal digits, nothing else. The

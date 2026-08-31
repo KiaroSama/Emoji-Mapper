@@ -41,9 +41,8 @@ import numpy as np  # noqa: E402
 import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
-                        LockBusy, canonical_map_lock, exclusive_lock,
-                        pack_family_lock_path, write_json_atomic)
+from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE)  # noqa: E402
+from packstate import (LockBusy, canonical_map_lock, exclusive_lock, pack_family_lock_path, write_json_atomic)  # noqa: E402
 
 from emojikit import media  # noqa: E402
 

@@ -21,7 +21,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from build_pack import Telegram, load_env
+from build_pack import (load_env)
+from telegram_api import (Telegram)
 from emojikit.logsetup import setup_logging
 
 ROOT = Path(__file__).resolve().parent

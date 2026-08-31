@@ -39,6 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
 from tests._rebuild_fixtures import (  # noqa: E402
     FakeTelegram, RebuildCase, _png, _png_bytes)
@@ -61,7 +63,7 @@ class AmbiguousUploadStopsTheRun(RebuildCase):
         self.write_state(sets=[{"index": 1, "name": "s1", "title": "T 1"}],
                          order=["seed"], cursor=1)
         self.tg = FakeTelegram(live={"s1": 1})
-        self.tg.add_error = bp.AmbiguousUploadError("addStickerToSet: unknown")
+        self.tg.add_error = tg_api.AmbiguousUploadError("addStickerToSet: unknown")
 
     def test_the_second_entry_is_never_uploaded(self):
         code = self.run_build(self.tg)
@@ -86,7 +88,7 @@ class AmbiguousUploadStopsTheRun(RebuildCase):
         # Empty state: the first entry has to create a set.
         self.write_state(sets=[], order=[], cursor=0)
         tg = FakeTelegram()
-        tg.create_error = bp.AmbiguousUploadError("createNewStickerSet: unknown")
+        tg.create_error = tg_api.AmbiguousUploadError("createNewStickerSet: unknown")
         code = self.run_build(tg)
         self.assertEqual(tg.mutations, 1)
         self.assertEqual(code, bp.EXIT_PARTIAL)
@@ -300,7 +302,7 @@ class CursorOrderAndPlanMustDescribeOneWalk(RebuildCase):
     def setUp(self):
         super().setUp()
         self.write_plan(["aaa", "bbb", "ccc"])
-        bp.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
+        ps.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
 
     def _rejects(self, **state) -> str:
         self.write_state(**{"deleted_old": False, **state})
@@ -455,7 +457,7 @@ class RebuildTakesThePackFamilyLock(unittest.TestCase):
     """6: a lock named after this tool's state file excludes nobody else."""
 
     def test_the_lock_is_keyed_on_the_pack_base(self):
-        self.assertEqual(rd.LOCK, bp.pack_family_lock_path(rd.BASE))
+        self.assertEqual(rd.LOCK, ps.pack_family_lock_path(rd.BASE))
 
 
 class LiveStateUnknownStopsTheRun(RebuildCase):
@@ -490,7 +492,7 @@ class OldPackDeletionMustBeConfirmed(RebuildCase):
         super().setUp()
         self.write_plan(["aaa"])
         self.write_state(deleted_old=False)
-        bp.write_json_atomic(self.old_state,
+        ps.write_json_atomic(self.old_state,
                              {"sets": [{"name": "old1"}, {"name": "old2"}]})
 
     def test_a_surviving_pack_leaves_the_phase_open(self):
@@ -567,7 +569,7 @@ class TruncatedPlanFailsClosed(RebuildCase):
         self.assertEqual(tg.mutations, 0)
 
     def test_a_plan_entry_missing_its_fields_is_rejected(self):
-        bp.write_json_atomic(self.plan, [{"rep": "aaa", "tickers": ["aaa"],
+        ps.write_json_atomic(self.plan, [{"rep": "aaa", "tickers": ["aaa"],
                                           "kw": "aaa"},
                                          {"rep": "bbb"}])
         self.write_state()
@@ -589,7 +591,7 @@ class TruncatedPlanFailsClosed(RebuildCase):
         """
         _png(self.emoji / "aaa.png")
         with mock.patch.object(rd, "write_json_atomic",
-                               side_effect=bp.write_json_atomic) as writer:
+                               side_effect=ps.write_json_atomic) as writer:
             rd.build_plan()
         self.assertEqual({c.args[0] for c in writer.call_args_list},
                          {self.plan, self.groups})
@@ -628,8 +630,8 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         self.write_plan(["aaa"])
         self.write_state()
         tg = FakeTelegram()
-        with bp.exclusive_lock(rd.LOCK):
-            with self.assertRaises(bp.LockBusy):
+        with ps.exclusive_lock(rd.LOCK):
+            with self.assertRaises(ps.LockBusy):
                 rd.build(tg, "bot")
         self.assertEqual(tg.mutations, 0)
 
@@ -646,7 +648,7 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         self.write_plan(["aaa"])
         self.write_state()
         tg = _LockWatchingTelegram()
-        tg.create_error = bp.AmbiguousUploadError("createNewStickerSet: unknown")
+        tg.create_error = tg_api.AmbiguousUploadError("createNewStickerSet: unknown")
         with self.assertRaises(SystemExit):
             rd.build(tg, "bot")
         self.assertTrue(tg.held_at_mutation,
@@ -666,7 +668,7 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
     def setUp(self):
         super().setUp()
         self.write_plan(["aaa", "bbb"])
-        bp.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
+        ps.write_json_atomic(self.old_state, {"sets": [{"name": "old1"}]})
 
     def _rejects(self, **state) -> str:
         self.write_state(**{"deleted_old": False, **state})
@@ -764,7 +766,7 @@ class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):
         state = json.loads(self.state.read_text("utf-8"))
         state["in_flight"] = None
         state["order"].append("aaa")
-        bp.write_json_atomic(self.state, state)
+        ps.write_json_atomic(self.state, state)
 
         rd.build(tg, "bot")                     # must now run to completion
         after = json.loads(self.state.read_text("utf-8"))

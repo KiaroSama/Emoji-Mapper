@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — six files over 800 lines split along real seams
+
+No behaviour change: 760 tests before, 760 after. Every cut runs one way, so
+none of the new modules imports the one it was cut from.
+
+- `emojikit/media.py` 978 → 713, with identity in `emojikit/identity.py`.
+  Making a file and *identifying* one are different jobs, and conversion never
+  called a hash. **`identity` imports the media MODULE, not its names**: a bare
+  `from ... import _run` binds once at import, so a test patching `media._run`
+  to count ffmpeg launches would no longer be seen — and that count is exactly
+  what `fingerprint()`'s one-pass guarantee is pinned by.
+- `build_collection.py` 1495 → 782, layered under `collection_state.py` (plan,
+  resume state, brand logo) and `collection_reconcile.py` (what is live in a
+  set, and whose key each sticker is). The reconcile block turned out to be a
+  clean leaf: it called nothing defined below it.
+- `build_pack.py` 1692 → 696, with `telegram_api.py` (the Bot API client, its
+  errors and Telegram's caps), `packstate.py` (state-file shape, atomic write,
+  pack-family lock) and `announce.py`. The client depended on exactly one name
+  from the engine, `api_base`, which went with it.
+- `tests/test_panel.py` 1392 → 641, plus `test_panel_page.py` (assertions on
+  the served document), `test_panel_guard.py` and `test_panel_server.py`.
+  `MutationGuard` travels whole: it owns nine `test_*` methods and is
+  subclassed twice, so sharing it would inflate the count, not move it.
+
+Two traps worth recording, both caught by the suite:
+
+- **`str.splitlines()` is not `split("
+")`.** It also breaks on U+2028/U+2029
+  — which `test_panel.py` embeds deliberately, because escaping them is what
+  `InertItemJson` tests. Every line number past them was off by four.
+- **A monkeypatch must name the namespace the CALLER reads.** Retargeting
+  `patch.object(build_pack, "Telegram")` to `telegram_api` left the real client
+  in place, and the suite spent five real retry sleeps dialling the discard
+  port. `announce_via_worker` is the mirror case: its only caller is
+  `announce.announce_packs`, so it belongs on `announce`.
+
+
 ### Added — `--into-pack N`, so any pack with room can be topped up
 
 - **Publishing always appended to the newest set**, so once a later pack

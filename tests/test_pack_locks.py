@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_pack as bp  # noqa: E402
+import packstate as ps  # noqa: E402
 
 
 class PublisherLock(unittest.TestCase):
@@ -37,19 +38,19 @@ class PublisherLock(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_second_holder_is_refused(self):
-        with bp.exclusive_lock(self.lock):
-            with self.assertRaises(bp.LockBusy):
-                with bp.exclusive_lock(self.lock):
+        with ps.exclusive_lock(self.lock):
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock):
                     self.fail("a second publisher acquired the lock")
 
     def test_lock_is_released_on_exit(self):
-        with bp.exclusive_lock(self.lock):
+        with ps.exclusive_lock(self.lock):
             self.assertTrue(self.lock.exists())
         self.assertFalse(self.lock.exists())
 
     def test_lock_is_released_even_on_error(self):
         with self.assertRaises(ZeroDivisionError):
-            with bp.exclusive_lock(self.lock):
+            with ps.exclusive_lock(self.lock):
                 1 / 0  # noqa: B018 - the point is to leave the block by raising
         self.assertFalse(self.lock.exists())
 
@@ -57,7 +58,7 @@ class PublisherLock(unittest.TestCase):
         self.lock.write_text("pid=999 (crashed)", encoding="utf-8")
         old = time.time() - 10_000
         os.utime(self.lock, (old, old))
-        with bp.exclusive_lock(self.lock, stale_after=3600):
+        with ps.exclusive_lock(self.lock, stale_after=3600):
             pass          # must not raise
 
     def _make_stale(self) -> None:
@@ -79,7 +80,7 @@ class PublisherLock(unittest.TestCase):
         last thing that happens before the old code would have unlinked.
         """
         self._make_stale()
-        real_alive = bp._lock_owner_is_alive
+        real_alive = ps._lock_owner_is_alive
         planted = {"done": False}
 
         def alive(pid):
@@ -90,9 +91,9 @@ class PublisherLock(unittest.TestCase):
                                      encoding="utf-8")
             return gone
 
-        with mock.patch.object(bp, "_lock_owner_is_alive", alive):
-            with self.assertRaises(bp.LockBusy):
-                with bp.exclusive_lock(self.lock, stale_after=3600):
+        with mock.patch.object(ps, "_lock_owner_is_alive", alive):
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock, stale_after=3600):
                     self.fail("took a lock another run was already holding")
         self.assertIn("other", self.lock.read_text(encoding="utf-8"),
                       "the other run's claim was deleted")
@@ -131,8 +132,8 @@ class PublisherLock(unittest.TestCase):
 
         with mock.patch.object(bp.os, "open", counting_open), \
                 mock.patch.object(bp.os, "close", replace_once_our_claim_is_written):
-            with self.assertRaises(bp.LockBusy):
-                with bp.exclusive_lock(self.lock, stale_after=3600):
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock, stale_after=3600):
                     self.fail("proceeded holding a lock another run had taken")
         self.assertIn("someone-else", self.lock.read_text(encoding="utf-8"),
                       "the other run's record was clobbered on the way out")
@@ -158,8 +159,8 @@ class PublisherLock(unittest.TestCase):
             return real_open(path, flags, *a, **kw)
 
         with mock.patch.object(bp.os, "open", racing_open):
-            with self.assertRaises(bp.LockBusy):
-                with bp.exclusive_lock(self.lock, stale_after=3600):
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock, stale_after=3600):
                     self.fail("claimed a lock another run had just taken")
 
 
@@ -174,11 +175,11 @@ class LockOwnership(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_a_live_holder_is_never_reclaimed_however_old(self):
-        with bp.exclusive_lock(self.lock):
+        with ps.exclusive_lock(self.lock):
             old = time.time() - 10 * 24 * 3600
             os.utime(self.lock, (old, old))       # ancient, but WE are alive
-            with self.assertRaises(bp.LockBusy):
-                with bp.exclusive_lock(self.lock, stale_after=1):
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock, stale_after=1):
                     self.fail("stole a lock from a live process")
 
     def test_a_dead_holder_is_reclaimed(self):
@@ -187,7 +188,7 @@ class LockOwnership(unittest.TestCase):
             encoding="utf-8")
         old = time.time() - 10_000
         os.utime(self.lock, (old, old))
-        with bp.exclusive_lock(self.lock, stale_after=3600):
+        with ps.exclusive_lock(self.lock, stale_after=3600):
             pass                                   # must not raise
 
     def test_a_killed_run_can_resume_within_minutes_not_hours(self):
@@ -203,7 +204,7 @@ class LockOwnership(unittest.TestCase):
             encoding="utf-8")
         old = time.time() - 300                    # five minutes ago
         os.utime(self.lock, (old, old))
-        with bp.exclusive_lock(self.lock):         # no stale_after override
+        with ps.exclusive_lock(self.lock):         # no stale_after override
             pass                                   # must not raise
 
     def test_a_lock_still_being_written_is_not_stolen(self):
@@ -214,13 +215,13 @@ class LockOwnership(unittest.TestCase):
         must survive that even though nothing in it says who owns it yet.
         """
         self.lock.write_text("", encoding="utf-8")   # claimed, not yet written
-        with self.assertRaises(bp.LockBusy):
-            with bp.exclusive_lock(self.lock):
+        with self.assertRaises(ps.LockBusy):
+            with ps.exclusive_lock(self.lock):
                 self.fail("stole a lock that was still being claimed")
 
     def test_a_reclaimed_lock_is_not_deleted_by_the_old_holder(self):
         """The bug: the original holder unlinked the REPLACEMENT holder's lock."""
-        cm = bp.exclusive_lock(self.lock)
+        cm = ps.exclusive_lock(self.lock)
         cm.__enter__()
         # Another process takes over the file entirely.
         self.lock.write_text(json.dumps(
@@ -230,7 +231,7 @@ class LockOwnership(unittest.TestCase):
                         "must not remove a lock owned by someone else")
 
     def test_heartbeat_refreshes_the_lock(self):
-        with bp.exclusive_lock(self.lock) as heartbeat:
+        with ps.exclusive_lock(self.lock) as heartbeat:
             old = time.time() - 10_000
             os.utime(self.lock, (old, old))
             heartbeat()
@@ -241,16 +242,16 @@ class PackFamilyLock(unittest.TestCase):
     """Every tool touching one pack family must contend for the SAME lock."""
 
     def test_same_base_yields_the_same_path(self):
-        self.assertEqual(bp.pack_family_lock_path("gvcryptoemoji"),
-                         bp.pack_family_lock_path("gvcryptoemoji"))
+        self.assertEqual(ps.pack_family_lock_path("gvcryptoemoji"),
+                         ps.pack_family_lock_path("gvcryptoemoji"))
 
     def test_different_bases_do_not_collide(self):
-        self.assertNotEqual(bp.pack_family_lock_path("one"),
-                            bp.pack_family_lock_path("two"))
+        self.assertNotEqual(ps.pack_family_lock_path("one"),
+                            ps.pack_family_lock_path("two"))
 
     def test_unsafe_characters_are_normalised(self):
-        p = bp.pack_family_lock_path("../../etc/passwd")
-        self.assertEqual(p.parent, bp.LOCK_DIR)
+        p = ps.pack_family_lock_path("../../etc/passwd")
+        self.assertEqual(p.parent, ps.LOCK_DIR)
         self.assertNotIn("..", p.name)
 
 
@@ -260,40 +261,40 @@ class PosixStaleLockReclaim(unittest.TestCase):
     def test_no_such_process_is_reported_dead(self):
         with mock.patch.object(bp.os, "name", "posix"), \
              mock.patch.object(bp.os, "kill", side_effect=ProcessLookupError):
-            self.assertFalse(bp._lock_owner_is_alive(4242))
+            self.assertFalse(ps._lock_owner_is_alive(4242))
 
     def test_permission_denied_means_it_exists(self):
         with mock.patch.object(bp.os, "name", "posix"), \
              mock.patch.object(bp.os, "kill", side_effect=PermissionError):
-            self.assertTrue(bp._lock_owner_is_alive(4242))
+            self.assertTrue(ps._lock_owner_is_alive(4242))
 
     def test_unknown_failure_stays_conservative(self):
         with mock.patch.object(bp.os, "name", "posix"), \
              mock.patch.object(bp.os, "kill", side_effect=OSError("weird")):
-            self.assertTrue(bp._lock_owner_is_alive(4242))
+            self.assertTrue(ps._lock_owner_is_alive(4242))
 
     def test_a_running_process_is_alive(self):
         with mock.patch.object(bp.os, "name", "posix"), \
              mock.patch.object(bp.os, "kill", return_value=None):
-            self.assertTrue(bp._lock_owner_is_alive(4242))
+            self.assertTrue(ps._lock_owner_is_alive(4242))
 
 
 class CanonicalMapLock(unittest.TestCase):
     """Every writer of ticker_to_id.json must contend for one lock."""
 
     def test_all_callers_get_the_same_path(self):
-        a, b = bp.canonical_map_lock(), bp.canonical_map_lock()
+        a, b = ps.canonical_map_lock(), ps.canonical_map_lock()
         self.assertEqual(a.args[0], b.args[0])
 
     def test_it_actually_excludes(self):
-        with bp.canonical_map_lock():
-            with self.assertRaises(bp.LockBusy):
-                with bp.canonical_map_lock():
+        with ps.canonical_map_lock():
+            with self.assertRaises(ps.LockBusy):
+                with ps.canonical_map_lock():
                     self.fail("two map writers held the lock at once")
 
     def test_it_is_not_the_pack_family_lock(self):
-        with bp.canonical_map_lock():
-            with bp.exclusive_lock(bp.pack_family_lock_path("gvcryptoemoji")):
+        with ps.canonical_map_lock():
+            with ps.exclusive_lock(ps.pack_family_lock_path("gvcryptoemoji")):
                 pass          # different concerns must not block each other
 
 

@@ -27,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 import requests  # noqa: E402
 
 import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
 from tests._pack_fixtures import _png  # noqa: E402
 
 
@@ -34,7 +36,7 @@ class TokenRedaction(unittest.TestCase):
     TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
     def test_exception_text_never_carries_the_token(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         exc = requests.ConnectionError(
             f"HTTPSConnectionPool: /bot{self.TOKEN}/addStickerToSet failed")
         out = tg._safe(exc)
@@ -42,7 +44,7 @@ class TokenRedaction(unittest.TestCase):
         self.assertIn("[REDACTED]", out)
 
     def test_network_retry_output_is_redacted(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         boom = requests.ConnectionError(f"conn to /bot{self.TOKEN}/getMe reset")
         with mock.patch.object(tg.s, "post", side_effect=boom), \
              mock.patch.object(bp.time, "sleep", lambda s: None), \
@@ -64,7 +66,7 @@ class StickerSetInvalidScope(unittest.TestCase):
         return resp
 
     def test_lookup_fails_fast_without_sleeping(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         slept = []
         with mock.patch.object(tg.s, "post", return_value=self._session()), \
              mock.patch.object(bp.time, "sleep", slept.append):
@@ -73,14 +75,14 @@ class StickerSetInvalidScope(unittest.TestCase):
         self.assertEqual(slept, [], "a plain lookup must not sleep on a missing set")
 
     def test_create_still_waits_for_the_name_lock(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         slept = []
         with mock.patch.object(tg.s, "post", return_value=self._session()), \
              mock.patch.object(bp.time, "sleep", slept.append):
             with self.assertRaises(RuntimeError):
                 tg._call("createNewStickerSet", data={"name": "x"}, retries=3)
         self.assertTrue(slept, "a create must still wait for a released name")
-        self.assertLessEqual(sum(slept), bp.NAME_LOCK_TIMEOUT,
+        self.assertLessEqual(sum(slept), tg_api.NAME_LOCK_TIMEOUT,
                              "waiting must be bounded by the deadline")
         self.assertEqual(len(slept), 2, "no sleep after the final attempt")
 
@@ -89,24 +91,24 @@ class TriStateLiveReads(unittest.TestCase):
     """"Unknown" must never be reported as "the set is empty"."""
 
     def _tg(self, probe_result):
-        tg = bp.Telegram("1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        tg = tg_api.Telegram("1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         tg.probe_sticker_set = lambda name: probe_result
         return tg
 
     def test_exists(self):
         tg = self._tg((True, {"stickers": [{}, {}]}))
-        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.EXISTS)
+        self.assertEqual(tg.probe_set_state("s")[0], tg_api.SetState.EXISTS)
         self.assertEqual(tg.live_count_strict("s"), 2)
 
     def test_missing_is_a_real_zero(self):
         tg = self._tg((True, None))
-        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.MISSING)
+        self.assertEqual(tg.probe_set_state("s")[0], tg_api.SetState.MISSING)
         self.assertEqual(tg.live_count_strict("s"), 0)
 
     def test_unknown_raises_instead_of_returning_zero(self):
         tg = self._tg((False, None))
-        self.assertEqual(tg.probe_set_state("s")[0], bp.SetState.UNKNOWN)
-        with self.assertRaises(bp.LiveStateUnknown):
+        self.assertEqual(tg.probe_set_state("s")[0], tg_api.SetState.UNKNOWN)
+        with self.assertRaises(tg_api.LiveStateUnknown):
             tg.live_count_strict("s")
 
 
@@ -123,7 +125,7 @@ class PostAddSizeIsMeasured(unittest.TestCase):
     TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
     def _tg(self, stickers, *, matches):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, {"stickers": stickers})
         tg._sticker_matches = lambda st, src: matches.get(
             str(st.get("file_unique_id")))
@@ -138,13 +140,13 @@ class PostAddSizeIsMeasured(unittest.TestCase):
     def test_a_foreign_arrival_alone_does_not_book_a_size(self):
         live = [{"file_unique_id": "old"}, {"file_unique_id": "THEIRS"}]
         tg = self._tg(live, matches={"THEIRS": False})
-        with self.assertRaises(bp.AmbiguousUploadError):
+        with self.assertRaises(tg_api.AmbiguousUploadError):
             tg._live_after_add("s1", self._fired_check(tg, {"old"}))
 
     def test_an_unverifiable_arrival_does_not_book_a_size(self):
         live = [{"file_unique_id": "old"}, {"file_unique_id": "UNREADABLE"}]
         tg = self._tg(live, matches={"UNREADABLE": None})
-        with self.assertRaises(bp.AmbiguousUploadError):
+        with self.assertRaises(tg_api.AmbiguousUploadError):
             tg._live_after_add("s1", self._fired_check(tg, {"old"}))
 
     def test_our_sticker_present_books_the_true_size(self):
@@ -156,12 +158,12 @@ class PostAddSizeIsMeasured(unittest.TestCase):
         self.assertEqual(tg._live_after_add("s1", self._fired_check(tg, {"old"})), 3)
 
     def test_a_missing_set_is_never_booked_as_zero(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, None)      # MISSING
         check = tg._added_check("s1", 1, known_before={"old"},
                                 source=Path("whatever.png"))
         check.fired = True
-        with self.assertRaises(bp.AmbiguousUploadError):
+        with self.assertRaises(tg_api.AmbiguousUploadError):
             tg._live_after_add("s1", check)
 
 
@@ -184,7 +186,7 @@ class AddedCheckUsesIdentity(unittest.TestCase):
         self.tmp.cleanup()
 
     def _tg(self, after_fuids, *, matches=True):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (
             True, {"stickers": [{"file_unique_id": f} for f in after_fuids]})
         tg._sticker_matches = lambda st, src: matches
@@ -240,16 +242,16 @@ class AddedCheckUsesIdentity(unittest.TestCase):
         answering True from the count attributes a stranger's sticker to us.
         Only UNKNOWN is safe, which makes the caller reconcile.
         """
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (
             True, {"stickers": [{"i": 0}, {"i": 1}]})     # no identities at all
         check = tg._added_check("s", 1, known_before={"None"}, source=self.src)
         self.assertIsNone(check())
 
     def test_duplicate_identities_are_not_trusted(self):
-        self.assertIsNone(bp._usable_fuids(
+        self.assertIsNone(tg_api._usable_fuids(
             [{"file_unique_id": "same"}, {"file_unique_id": "same"}]))
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, {"stickers": [
             {"file_unique_id": "same"}, {"file_unique_id": "same"}]})
         self.assertIsNone(
@@ -257,12 +259,12 @@ class AddedCheckUsesIdentity(unittest.TestCase):
 
     def test_usable_fuids_accepts_a_well_formed_set(self):
         self.assertEqual(
-            bp._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": "b"}]),
+            tg_api._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": "b"}]),
             {"a", "b"})
 
     def test_usable_fuids_rejects_a_missing_id(self):
         self.assertIsNone(
-            bp._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": ""}]))
+            tg_api._usable_fuids([{"file_unique_id": "a"}, {"file_unique_id": ""}]))
 
 
 class CreateAdoptionVerifiesContent(unittest.TestCase):
@@ -279,7 +281,7 @@ class CreateAdoptionVerifiesContent(unittest.TestCase):
         self.tmp.cleanup()
 
     def _tg(self, stickers, matches):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, {"stickers": stickers})
         tg._sticker_matches = lambda st, src: matches
         return tg
@@ -302,7 +304,7 @@ class CreateAdoptionVerifiesContent(unittest.TestCase):
         self.assertIsNone(tg._created_check("s", expect_first=self.src)())
 
     def test_missing_set_is_a_definite_no(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         tg.probe_sticker_set = lambda name: (True, None)
         self.assertIs(tg._created_check("s", expect_first=self.src)(), False)
 
@@ -400,7 +402,7 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         _png(self.src / "b.png", (200, 0, 0, 255))
         _png(self.src / "c.png", (0, 200, 0, 255))
         self.state = self.dir / "state.json"
-        bp.write_json_atomic(self.state, {
+        ps.write_json_atomic(self.state, {
             "base": "t", "per_set": 200, "done": ["a"], "sent": [],
             "sets": [{"name": "t1_by_bot", "title": "T 1", "count": 1, "index": 1}],
             "in_flight": None,
@@ -410,7 +412,7 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         self.tmp.cleanup()
 
     def _tg(self, server):
-        tg = bp.Telegram("TESTTOKEN")
+        tg = tg_api.Telegram("TESTTOKEN")
         tg.s = server
         # Only the stranger's sticker fails the content comparison; the real
         # comparison downloads and decodes, which is covered elsewhere.
@@ -448,9 +450,9 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         srv = _ForeignWriterServer(live=1)
         srv.probe_fails_from = 3          # the size probe after the retry
         tg = self._tg(srv)
-        with self.assertRaises(bp.AmbiguousUploadError):
+        with self.assertRaises(tg_api.AmbiguousUploadError):
             tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
-                           bp.DEFAULT_EMOJI, "kw", expected_before=1)
+                           tg_api.DEFAULT_EMOJI, "kw", expected_before=1)
         self.assertEqual(srv.adds, 2, "the add landed; it must not be re-sent")
 
     def test_a_foreign_sticker_alone_does_not_certify_the_size(self):
@@ -466,9 +468,9 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         srv = _LaggingReadServer(live=1)
         tg = self._tg(srv)
         with mock.patch.object(bp.time, "sleep", lambda s: None):
-            with self.assertRaises(bp.AmbiguousUploadError):
+            with self.assertRaises(tg_api.AmbiguousUploadError):
                 tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
-                               bp.DEFAULT_EMOJI, "kw", expected_before=1)
+                               tg_api.DEFAULT_EMOJI, "kw", expected_before=1)
         self.assertEqual(srv.adds, 2, "the add landed; it must not be re-sent")
         self.assertEqual(len(srv.stickers), 3,
                          "ours really is live -- only the read back lagged, "
@@ -480,7 +482,7 @@ class BookkeepingFollowsLiveState(unittest.TestCase):
         srv.adds = 1                      # skip the foreign-writer attempt
         tg = self._tg(srv)
         live = tg.add_sticker(1, "t1_by_bot", self.src / "b.png",
-                              bp.DEFAULT_EMOJI, "kw", expected_before=1)
+                              tg_api.DEFAULT_EMOJI, "kw", expected_before=1)
         self.assertIsNone(live, "a clean add stays at the assumed +1")
         self.assertEqual(srv.probes, 1, "only the pre-add identity snapshot")
 
@@ -503,7 +505,7 @@ class WaitsReachTheLogFile(unittest.TestCase):
     TOKEN = "1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
     def test_a_flood_wait_is_logged_not_only_printed(self):
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         busy, ok = mock.Mock(), mock.Mock()
         busy.json.return_value = {
             "ok": False, "description": "Too Many Requests: retry after 7",
@@ -520,7 +522,7 @@ class WaitsReachTheLogFile(unittest.TestCase):
 
     def test_a_network_retry_is_logged_with_the_token_redacted(self):
         """New log output must not become a new way to leak the token."""
-        tg = bp.Telegram(self.TOKEN)
+        tg = tg_api.Telegram(self.TOKEN)
         boom = requests.ConnectionError(f"conn to /bot{self.TOKEN}/getMe reset")
         with mock.patch.object(tg.s, "post", side_effect=boom), \
              mock.patch.object(bp.time, "sleep", lambda s: None), \

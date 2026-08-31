@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import build_pack as bp  # noqa: E402
+import packstate as ps  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_OK  # noqa: E402
 from coins import _inventory  # noqa: E402
 from coins import fetch_cmc as coins_cmc  # noqa: E402
@@ -155,7 +155,7 @@ class CanonicalMapWritersCannotLoseAnUpdate(unittest.TestCase):
             with real() as beat:
                 current = json.loads(self.map.read_text("utf-8"))
                 current.update(self.CONCURRENT)
-                bp.write_json_atomic(self.map, current)
+                ps.write_json_atomic(self.map, current)
                 yield beat
 
         return mock.patch.object(mod, "canonical_map_lock", racing)
@@ -252,7 +252,7 @@ class CanonicalMapWritersCannotLoseAnUpdate(unittest.TestCase):
                 with mock.patch.multiple(mod, ROOT=self.tmp,
                                          INV=self.tmp / "inv.md",
                                          OUT_INV=self.tmp / "out.md"), \
-                        bp.canonical_map_lock(), \
+                        ps.canonical_map_lock(), \
                         contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(mod.main(), EXIT_FAILED)
                 self.assertEqual(self.map.read_bytes(), before,

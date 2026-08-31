@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
 
 
@@ -91,10 +92,10 @@ class FakeTelegram:
     # --- live state ---------------------------------------------------- #
     def probe_set_state(self, name: str):
         if name in self.unknown:
-            return bp.SetState.UNKNOWN, None
+            return tg_api.SetState.UNKNOWN, None
         if name in self.missing or name not in self.live:
-            return bp.SetState.MISSING, None
-        return bp.SetState.EXISTS, {
+            return tg_api.SetState.MISSING, None
+        return tg_api.SetState.EXISTS, {
             "stickers": [{"custom_emoji_id": f"{name}-{i}",
                           "file_id": f"{name}#{i}",
                           "file_unique_id": f"{name}#{i}"}
@@ -102,12 +103,12 @@ class FakeTelegram:
 
     def probe_sticker_set(self, name: str):
         state, sset = self.probe_set_state(name)
-        return state is not bp.SetState.UNKNOWN, sset
+        return state is not tg_api.SetState.UNKNOWN, sset
 
     def live_count_strict(self, name: str) -> int:
         state, sset = self.probe_set_state(name)
-        if state is bp.SetState.UNKNOWN:
-            raise bp.LiveStateUnknown(f"live state of {name} is unknown")
+        if state is tg_api.SetState.UNKNOWN:
+            raise tg_api.LiveStateUnknown(f"live state of {name} is unknown")
         return len(sset.get("stickers", [])) if sset else 0
 
     def download_file(self, file_id: str, dest: Path) -> Path:
@@ -119,7 +120,7 @@ class FakeTelegram:
     # a fake that answers it would be testing itself. It only needs
     # download_file, which this class provides, and returns None (unverifiable)
     # for anything it cannot read -- exactly like it does against Telegram.
-    _sticker_matches = bp.Telegram._sticker_matches
+    _sticker_matches = tg_api.Telegram._sticker_matches
 
     # --- mutations ------------------------------------------------------ #
     def add_sticker(self, user_id, name, png, emoji, kw, *, expected_before=None):
@@ -139,7 +140,7 @@ class FakeTelegram:
     # It is what decides `retries=2` and the preview flag, and a fake copy of
     # it would keep passing after the real one changed -- which is exactly the
     # bug the retry test exists to catch.
-    send_message = bp.Telegram.send_message
+    send_message = tg_api.Telegram.send_message
 
     def _call(self, method, *, data=None, **kw):
         if method == "deleteStickerSet":
@@ -207,7 +208,7 @@ class RebuildCase(unittest.TestCase):
         self.tmp_cleanup = self.addCleanup(self.tmp.cleanup)
 
     def write_plan(self, reps: list[str]) -> None:
-        bp.write_json_atomic(self.plan, [
+        ps.write_json_atomic(self.plan, [
             {"rep": r, "tickers": [r], "kw": r, "hash": r} for r in reps])
         for r in reps:
             _png(self.emoji / f"{r}.png")
@@ -216,7 +217,7 @@ class RebuildCase(unittest.TestCase):
         state = {"sets": [], "sent": [], "deleted_old": True, "final_sent": False,
                  "order": [], "cursor": 0, "in_flight": None}
         state.update(kw)
-        bp.write_json_atomic(self.state, state)
+        ps.write_json_atomic(self.state, state)
         return state
 
     def saved(self) -> dict:

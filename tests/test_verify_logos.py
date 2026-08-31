@@ -30,6 +30,8 @@ import requests  # noqa: E402
 from PIL import Image, ImageOps  # noqa: E402
 
 import build_pack as bp  # noqa: E402
+import telegram_api as tg_api  # noqa: E402
+import packstate as ps  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_USAGE  # noqa: E402
 from tests._cli_fixtures import _load_standalone, _noise_png_bytes  # noqa: E402
 
@@ -190,7 +192,7 @@ class VerifyLogosFix(unittest.TestCase):
 
     def _session(self, before, after, **kw):
         session = ReplaceSession(before, after, source=self.src, **kw)
-        tg = bp.Telegram("unit-test-token")
+        tg = tg_api.Telegram("unit-test-token")
         tg.s = session
         return tg, session
 
@@ -352,7 +354,7 @@ class VerifyLogosFix(unittest.TestCase):
         path = self.mod._intent_path()
         legacy = json.loads(path.read_text(encoding="utf-8"))
         legacy.pop("map_target"), legacy.pop("state_target")
-        bp.write_json_atomic(path, legacy)
+        ps.write_json_atomic(path, legacy)
         tg, _ = self._session(["a", NEW_CID, "c"], ["a", NEW_CID, "c"])
         before = self.mapping()
 
@@ -375,7 +377,7 @@ class VerifyLogosFix(unittest.TestCase):
         """
         other = "cid-written-by-the-other-tool"
         self.map_path.write_text(json.dumps({"btc": OLD_CID}), encoding="utf-8")
-        real = bp.canonical_map_lock
+        real = ps.canonical_map_lock
 
         @contextlib.contextmanager
         def racing():
@@ -383,7 +385,7 @@ class VerifyLogosFix(unittest.TestCase):
             with real() as beat:
                 mp = json.loads(self.map_path.read_text("utf-8"))
                 mp["btc"] = other
-                bp.write_json_atomic(self.map_path, mp)
+                ps.write_json_atomic(self.map_path, mp)
                 yield beat
 
         with mock.patch.object(self.mod, "canonical_map_lock", racing):
@@ -408,7 +410,7 @@ class VerifyLogosFix(unittest.TestCase):
         """
         before = self.mapping()
         tg, session = self._session(["a", OLD_CID, "c"], ["a", NEW_CID, "c"])
-        with bp.canonical_map_lock(), self.assertRaises(bp.LockBusy):
+        with ps.canonical_map_lock(), self.assertRaises(ps.LockBusy):
             self.mod.fix_one(tg, 42, self.sets, self.map_path, self.emoji, "btc")
         self.assertEqual(session.method("replaceStickerInSet"), [],
                          "a sticker was replaced while the map was unwritable")
@@ -421,7 +423,7 @@ class VerifyLogosFix(unittest.TestCase):
         # from theirs, so the exclusion it claimed never actually held.
         self.assertEqual(self.mod.SET_BASE, "gvcryptoemoji")
         self.assertEqual(self.mod.PACK_LOCK,
-                         bp.pack_family_lock_path(self.mod.SET_BASE))
+                         ps.pack_family_lock_path(self.mod.SET_BASE))
 
     def test_verified_new_cid_rules(self):
         v = self.mod.verified_new_cid
