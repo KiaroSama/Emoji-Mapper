@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the curate page is an asset, not a string literal in `panel.py`
+
+- **`panel.py` 1622 → 737 lines.** 902 of them were one HTML/CSS/JS string
+  literal, so the module only ever held 720 lines of Python. The page now lives
+  in `assets/panel.html` and is read at import. Not a module split: no boundary
+  moved, no import changed, and `panel.PAGE` is byte-identical (42 156 chars,
+  same SHA) — verified by comparing the loaded value before and against after.
+- Ruff stops linting a JS blob as opaque, editors highlight it as HTML, and a
+  UI change no longer churns the diff of a Python module.
+- **The page is resolved `ROOT`-relative, never absolutely**, and
+  `ThePanelPageActuallyShips` pins it: the asset exists inside the repo, the
+  loaded page still opens `<!doctype html>` and closes `</html>`, and all five
+  `__PLACEHOLDER__` tokens the handler substitutes survive. An absolute asset
+  path is exactly how the "mandatory" brand logo once vanished on every machine
+  but one with no test noticing, so a truncated or missing file now fails loudly
+  rather than serving a blank page.
+
 ### Fixed — an upload check that called every one of its own uploads a stranger
 
 - **`Telegram._sticker_matches` confirmed an upload by exact content key.** That
