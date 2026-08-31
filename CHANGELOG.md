@@ -26,10 +26,17 @@ none of the new modules imports the one it was cut from.
   errors and Telegram's caps), `packstate.py` (state-file shape, atomic write,
   pack-family lock) and `announce.py`. The client depended on exactly one name
   from the engine, `api_base`, which went with it.
+- `tests/test_build_collection_state.py` 1250 → 627, with the CLI half in
+  `test_publish_cli.py`; `tests/test_coin_providers.py` 858 → 467, with the
+  unverified-upload recovery path in `test_coin_recovery.py`.
 - `tests/test_panel.py` 1392 → 641, plus `test_panel_page.py` (assertions on
   the served document), `test_panel_guard.py` and `test_panel_server.py`.
   `MutationGuard` travels whole: it owns nine `test_*` methods and is
   subclassed twice, so sharing it would inflate the count, not move it.
+
+`coins/fetch_paprika.py` (801) and `tests/test_resume_safety.py` (807) were
+left alone: one and seven lines over is the small overage the size policy
+exempts, and cutting either would produce a fragment, not a seam.
 
 Two traps worth recording, both caught by the suite:
 
