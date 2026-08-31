@@ -44,6 +44,7 @@ import resvg_py
 from PIL import Image
 
 from build_pack import EXIT_USAGE, ingest_exit_code
+from emojikit import media
 
 ROOT = Path(__file__).resolve().parent
 # Legacy crypto-coin defaults (used when --in/--out are not provided).
@@ -101,11 +102,6 @@ def _source_groups(in_dir: Path) -> list[list[Path]]:
     return [groups[n] for n in sorted(groups)]
 
 
-def _pick_sources(in_dir: Path) -> list[Path]:
-    """The preferred source per output name (the one tried first)."""
-    return [g[0] for g in _source_groups(in_dir)]
-
-
 def _output_ok(out: Path, src: Path) -> bool:
     """True if ``out`` is already a usable emoji built from the current ``src``.
 
@@ -156,19 +152,15 @@ def _render_svg(path: Path) -> Image.Image | None:
     return Image.open(io.BytesIO(bytes(png))).convert("RGBA")
 
 
-def _is_blank(img: Image.Image, min_visible: int = 8) -> bool:
-    """True if an RGBA image is effectively empty (too few non-transparent pixels).
+def _is_blank(img: Image.Image) -> bool:
+    """True if an RGBA image is effectively empty.
 
-    Counted through the alpha histogram (buckets 11..255 == "a > 10") rather than
-    a per-pixel Python loop: every existing output is now checked on every run,
-    so 10k pixels per image adds up over a large emoji folder.
+    Delegates rather than carrying a copy: this file re-declared the same
+    ``> 10`` / ``<= 8`` pair that emojikit.media names VISIBLE_ALPHA and
+    BLANK_MAX_VISIBLE, so the pipeline's central quality gate had two
+    definitions that could drift apart. coins/fetch_paprika imports this name.
     """
-    if img.mode != "RGBA":
-        img = img.convert("RGBA")
-    alpha = img.getchannel("A")
-    if alpha.getbbox() is None:
-        return True
-    return sum(alpha.histogram()[11:]) <= min_visible
+    return media.is_blank_image(img)
 
 
 def _convert_svg(p: Path, out: Path) -> bool:

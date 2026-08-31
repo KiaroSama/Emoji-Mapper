@@ -24,6 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import EXIT_PARTIAL, load_env, safe_int_env
+from emojikit import media
 from packstate import (pack_family_lock_path, write_json_atomic)
 
 
@@ -73,15 +74,18 @@ def img_hash(path: Path) -> str:
     return hashlib.sha256(im.tobytes()).hexdigest()[:24]
 
 
-def is_blank(path: Path, min_visible: int = 8) -> bool:
-    """True if an image is effectively empty -- never upload a blank emoji."""
+def is_blank(path: Path) -> bool:
+    """True if an image is effectively empty -- never upload a blank emoji.
+
+    Delegates: this carried its own per-pixel loop and its own thresholds, so
+    the rule that decides what ships had a definition here AND in
+    emojikit.media -- and this one was the slow form media had already moved
+    away from.
+    """
     try:
-        alpha = Image.open(path).convert("RGBA").split()[3]
-    except Exception:  # noqa: BLE001
+        return media.is_blank_image(Image.open(path))
+    except Exception:  # noqa: BLE001 - unreadable is not publishable
         return True
-    if alpha.getbbox() is None:
-        return True
-    return sum(1 for v in alpha.get_flattened_data() if v > 10) <= min_visible
 
 
 def load_keywords() -> dict[str, str]:
