@@ -134,3 +134,88 @@ class FakeTG:
 def _sticker(fuid: str, cid: str) -> dict:
     # file_id is what _resolve_sticker_key needs before it will download at all.
     return {"file_unique_id": fuid, "custom_emoji_id": cid, "file_id": f"f-{fuid}"}
+
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from unittest import mock  # noqa: E402
+import build_collection as bc  # noqa: E402
+from emojikit import identity  # noqa: E402
+from emojikit.catalog import Catalog  # noqa: E402
+
+
+SET = "pks1_by_YourEmojiBot"
+SET2 = "pks2_by_YourEmojiBot"
+
+
+def _main(*argv: str) -> int:
+    """Run build_collection.main without touching .env or the log directory."""
+    with mock.patch.object(bc, "load_env", lambda: None), \
+            mock.patch.object(bc, "setup_logging", lambda *a, **k: None):
+        return bc.main(list(argv))
+
+
+class DownloadingTG(FakeTG):
+    """FakeTG that also serves downloads, so CONTENT attribution really runs."""
+
+    def __init__(self, *a, error: str | None = None, **kw):
+        super().__init__(*a, **kw)
+        self.error = error
+        self.downloads = 0
+
+    def download_file(self, file_id, dest):
+        self.downloads += 1
+        if self.error:
+            raise RuntimeError(self.error)
+        Path(dest).write_bytes(b"whatever telegram returned")
+        return dest
+
+
+class _CatalogFixture(unittest.TestCase):
+    """Two static items whose PUBLISHED copies are known as UP-item<i>."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name)
+        self.keys = []
+        with Catalog(self.data / "catalog.db") as cat:
+            for i in range(2):
+                p = self.data / "media" / "static" / f"item{i}.png"
+                _make_png(p, color=(10, 60 * (i + 1), 200, 255))
+                # The REAL content key, not a synthetic one: publishing now
+                # attributes a live sticker by downloading it and hashing the
+                # pixels, so a made-up key could never match and every upload
+                # would look unidentifiable.
+                key = identity.content_key(p, "static")
+                cat.add(content_key=key, fmt="static", file_path=p,
+                        emojis=["\U0001F600"], keywords=[f"item{i}"])
+                cat.record_file_unique_id(f"UP-item{i}", key)
+                self.keys.append(key)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _state_set(self, keys=None, live=2, logo=False) -> dict:
+        return {"fmt": "static", "index": 1, "name": SET, "title": "Pack 1",
+                "live": live, "logo": logo,
+                "keys": list(self.keys if keys is None else keys)}
+
+    def _add_item(self, i: int) -> str:
+        """Catalogue one more static item, as a later curate pass would."""
+        p = self.data / "media" / "static" / f"item{i}.png"
+        _make_png(p, color=(10, 30 * (i + 1), 90, 255))
+        key = identity.content_key(p, "static")
+        with Catalog(self.data / "catalog.db") as cat:
+            cat.add(content_key=key, fmt="static", file_path=p,
+                    emojis=["\U0001F600"], keywords=[f"item{i}"])
+            cat.record_file_unique_id(f"UP-item{i}", key)
+        return key
+
+    def _read_back(self, *keys: str) -> None:
+        """Pretend a previous run already stored these keys' custom_emoji_ids.
+
+        That is the moment a position's live identity becomes known, and it is
+        what makes an unknown identity there proof of a replacement.
+        """
+        with Catalog(self.data / "catalog.db") as cat:
+            for i, key in enumerate(keys):
+                cat.mark_uploaded(key, f"c{i}", base="pk", set_name=SET)
