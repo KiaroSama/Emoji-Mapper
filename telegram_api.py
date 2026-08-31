@@ -571,14 +571,29 @@ class Telegram:
         raise RuntimeError(f"download failed for file_id {file_id}")
 
     def create_emoji_set(self, user_id: int, name: str, title: str, path: Path,
-                         fmt: str, emoji_list: list[str], keywords: list[str]) -> None:
-        """Create a custom-emoji set whose first emoji is ``path`` (any format)."""
-        self._call("createNewStickerSet", data={
+                         fmt: str, emoji_list: list[str], keywords: list[str],
+                         *, needs_repainting: bool = False) -> None:
+        """Create a custom-emoji set whose first emoji is ``path`` (any format).
+
+        ``needs_repainting`` asks the CLIENT to paint every emoji in the set
+        with the text/accent colour, which is how Telegram's own monochrome
+        marks (TopicIcons and friends) look right anywhere. It is settable ONLY
+        here: the Bot API exposes the field on `Sticker` and on this method and
+        nowhere else, so a set created without it can never gain it. It is also
+        a WHOLE-SET property -- switching it on flattens every full-colour emoji
+        in the same pack -- which is why repaintable art needs its own set.
+        """
+        data = {
             "user_id": user_id, "name": name, "title": title,
             "sticker_type": "custom_emoji",
             "stickers": json.dumps([_input_sticker(fmt, emoji_list, keywords)]),
-        }, files={"file0": (path.name, path.read_bytes(), _mime_for_path(path))},
-            applied_check=self._created_check(name, expect_first=path))
+        }
+        if needs_repainting:
+            data["needs_repainting"] = "true"
+        self._call("createNewStickerSet", data=data,
+                   files={"file0": (path.name, path.read_bytes(),
+                                    _mime_for_path(path))},
+                   applied_check=self._created_check(name, expect_first=path))
 
     def add_emoji(self, user_id: int, name: str, path: Path, fmt: str,
                   emoji_list: list[str], keywords: list[str], *,
