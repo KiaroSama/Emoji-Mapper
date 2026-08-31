@@ -34,7 +34,7 @@ from PIL import Image  # noqa: E402
 
 import add_media  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_USAGE  # noqa: E402
-from emojikit import media  # noqa: E402
+from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import (Catalog, PHASH_BITS,  # noqa: E402
                               PHASH_MAX_THRESHOLD, check_phash_threshold)
 
@@ -94,16 +94,16 @@ class TestChildProcessTimeout(unittest.TestCase):
             ("to_video_webm",
              lambda: media.to_video_webm(self.sample, self.tmp / "out.webm")),
             ("_video_content_digest",
-             lambda: media._video_content_digest(self.sample)),
+             lambda: identity._video_content_digest(self.sample)),
             # fingerprint() shares that decode now. It used to catch the
             # failure and return a byte-hash key instead -- a key that looks
             # valid, never dedups, and hides the fact that ffmpeg hung.
             ("fingerprint",
-             lambda: media.fingerprint(self.sample, "video")),
+             lambda: identity.fingerprint(self.sample, "video")),
             ("_video_frames_rgba",
-             lambda: media._video_frames_rgba(self.sample)),
+             lambda: identity._video_frames_rgba(self.sample)),
             ("_first_video_frame",
-             lambda: media._first_video_frame(self.sample)),
+             lambda: identity._first_video_frame(self.sample)),
         ):
             with self.subTest(call=name):
                 self._assert_bounded(call)
@@ -163,7 +163,7 @@ class TestPhashThresholdRange(unittest.TestCase):
     def test_unrelated_images_survive_the_widest_allowed_threshold(self):
         """The bound is what stops a whole catalog collapsing into one emoji."""
         a, b = _pseudo_noise(1), _pseudo_noise(2)
-        distance = media.hamming(media._dhash(a), media._dhash(b))
+        distance = identity.hamming(identity._dhash(a), identity._dhash(b))
         # Two unrelated pictures land near half the hash. The old ceiling (64)
         # is >= any distance at all, so it merged them; the new one cannot.
         self.assertGreater(distance, PHASH_MAX_THRESHOLD)
@@ -171,10 +171,10 @@ class TestPhashThresholdRange(unittest.TestCase):
 
         with self._catalog(PHASH_MAX_THRESHOLD) as cat:
             cat.add(content_key="k-a", fmt="static", file_path=self._file("a.png"),
-                    phash=media._dhash(a))
+                    phash=identity._dhash(a))
             _, is_new = cat.add(content_key="k-b", fmt="static",
                                 file_path=self._file("b.png"),
-                                phash=media._dhash(b))
+                                phash=identity._dhash(b))
             self.assertTrue(is_new, "unrelated image merged into the first one")
             self.assertEqual(len(cat.all_items()), 2)
 

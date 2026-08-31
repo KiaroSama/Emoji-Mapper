@@ -30,7 +30,7 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import ingest_exit_code
-from emojikit import media
+from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, setup_logging
 
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
                 # One decode for both keys: separately, a video paid two ffmpeg
                 # launches over the same clip -- the priciest step in ingest,
                 # doubled.
-                key, phash = media.fingerprint(tmp, fmt)
+                key, phash = identity.fingerprint(tmp, fmt)
                 dest = _media_path(data_dir, fmt, key)
                 if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)

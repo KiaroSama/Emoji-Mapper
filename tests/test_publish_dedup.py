@@ -30,7 +30,7 @@ from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
 from build_pack import AmbiguousUploadError, Telegram  # noqa: E402
-from emojikit import media  # noqa: E402
+from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 
@@ -306,7 +306,7 @@ class PublishDedupTest(unittest.TestCase):
                 _make_png(p, color=(10, 40 * (i + 1) % 255, 200, 255))
                 # The REAL content key: publishing attributes a live sticker by
                 # hashing its pixels, so a synthetic key resolves to nothing.
-                key = media.content_key(p, "static")
+                key = identity.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["😀"], keywords=[f"item{i}"],
                         file_unique_id=f"SRC-item{i}")

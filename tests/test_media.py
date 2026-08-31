@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image, ImageDraw  # noqa: E402
 
-from emojikit import media  # noqa: E402
+from emojikit import identity, media  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # Generating a 2-second clip takes well under a second; anything near this bound
@@ -100,14 +100,14 @@ class TestStaticHashing(unittest.TestCase):
         # Same pixels saved twice (different files) -> identical content key.
         a = _make_png(self.tmp / "a.png", (200, 30, 30, 255))
         b = _make_png(self.tmp / "b.png", (200, 30, 30, 255))
-        self.assertEqual(media.content_key(a, "static"),
-                         media.content_key(b, "static"))
+        self.assertEqual(identity.content_key(a, "static"),
+                         identity.content_key(b, "static"))
 
     def test_different_content_different_key(self):
         a = _make_png(self.tmp / "a.png", (200, 30, 30, 255))
         c = _make_png(self.tmp / "c.png", (30, 200, 30, 255))
-        self.assertNotEqual(media.content_key(a, "static"),
-                            media.content_key(c, "static"))
+        self.assertNotEqual(identity.content_key(a, "static"),
+                            identity.content_key(c, "static"))
 
     def test_to_static_png_is_100(self):
         src = _make_png(self.tmp / "s.png", (10, 20, 30, 255), size=(40, 90))
@@ -120,9 +120,9 @@ class TestStaticHashing(unittest.TestCase):
         # Re-encode as webp (lossless) -> visually identical, near-zero distance.
         b = self.tmp / "b.webp"
         Image.open(a).save(b, format="WEBP", lossless=True)
-        ha, hb = media.perceptual_hash(a, "static"), media.perceptual_hash(b, "static")
+        ha, hb = identity.perceptual_hash(a, "static"), identity.perceptual_hash(b, "static")
         self.assertIsNotNone(ha)
-        self.assertLessEqual(media.hamming(ha, hb), 5)
+        self.assertLessEqual(identity.hamming(ha, hb), 5)
 
 
 class TestAnimated(unittest.TestCase):
@@ -143,8 +143,8 @@ class TestAnimated(unittest.TestCase):
                                      self.tmp / "1.tgs")
         out2 = media.to_animated_tgs(FIXTURES / "lottie" / "red_circle_512.json",
                                      self.tmp / "2.tgs")
-        self.assertEqual(media.content_key(out1, "animated"),
-                         media.content_key(out2, "animated"))
+        self.assertEqual(identity.content_key(out1, "animated"),
+                         identity.content_key(out2, "animated"))
 
     def test_valid_512_canvas_is_preserved(self):
         """The canvas must survive: rewriting it to 100x100 broke the artwork."""
@@ -278,19 +278,19 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
 
     def test_static_agrees_with_content_key_and_perceptual_hash(self):
         png = _make_png(self.tmp / "a.png", (200, 40, 60, 255))
-        key, phash = media.fingerprint(png, "static")
-        self.assertEqual(key, media.content_key(png, "static"))
-        self.assertEqual(phash, media.perceptual_hash(png, "static"))
+        key, phash = identity.fingerprint(png, "static")
+        self.assertEqual(key, identity.content_key(png, "static"))
+        self.assertEqual(phash, identity.perceptual_hash(png, "static"))
         self.assertTrue(key.startswith("s:"))
         self.assertIsNotNone(phash)
 
     def test_video_agrees_with_content_key_and_perceptual_hash(self):
         gif = _make_anim_gif(self.tmp / "anim.gif")
         webm = media.to_video_webm(gif, self.tmp / "anim.webm")
-        key, phash = media.fingerprint(webm, "video")
-        self.assertEqual(key, media.content_key(webm, "video"),
+        key, phash = identity.fingerprint(webm, "video")
+        self.assertEqual(key, identity.content_key(webm, "video"),
                          "the merged decode changed the catalog primary key")
-        self.assertEqual(phash, media.perceptual_hash(webm, "video"),
+        self.assertEqual(phash, identity.perceptual_hash(webm, "video"),
                          "frame 0 of the digest stream is not the frame the "
                          "separate call hashed")
         self.assertTrue(key.startswith("v:"))
@@ -338,7 +338,7 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
             return real_run(cmd, *a, **kw)
 
         with mock.patch.object(media, "_run", counting):
-            media.fingerprint(webm, "video")
+            identity.fingerprint(webm, "video")
         self.assertEqual(len(calls), 1,
                          "the whole point of fingerprint() is one ffmpeg launch")
 
@@ -347,8 +347,8 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
                   "layers": []}
         tgs = self.tmp / "x.tgs"
         tgs.write_bytes(gzip.compress(json.dumps(lottie).encode("utf-8")))
-        key, phash = media.fingerprint(tgs, "animated")
-        self.assertEqual(key, media.content_key(tgs, "animated"))
+        key, phash = identity.fingerprint(tgs, "animated")
+        self.assertEqual(key, identity.content_key(tgs, "animated"))
         self.assertIsNone(phash)
 
     def test_an_unreadable_source_fails_the_same_way_it_always_did(self):
@@ -358,9 +358,9 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
         bad = self.tmp / "bad.png"
         bad.write_bytes(b"not an image at all")
         with self.assertRaises(Exception) as old:
-            media.content_key(bad, "static")
+            identity.content_key(bad, "static")
         with self.assertRaises(type(old.exception)):
-            media.fingerprint(bad, "static")
+            identity.fingerprint(bad, "static")
 
 
 class TestBlankDetection(unittest.TestCase):
@@ -407,7 +407,7 @@ class TestVideo(unittest.TestCase):
     def test_video_content_key(self):
         gif = _make_anim_gif(self.tmp / "anim.gif")
         out = media.to_video_webm(gif, self.tmp / "anim.webm")
-        key = media.content_key(out, "video")
+        key = identity.content_key(out, "video")
         self.assertTrue(key.startswith("v:"))
 
     # --- validation must see what Telegram actually constrains -------------
@@ -526,9 +526,9 @@ class TestReencodeGivesUsOurOwnBytes(unittest.TestCase):
     def test_the_content_key_survives_so_dedup_still_works(self):
         """content_key hashes normalized pixels, not container bytes."""
         src = _make_png(self.dir / "b.webp", (10, 180, 60, 255), fmt="WEBP")
-        before = media.content_key(src, "static")
+        before = identity.content_key(src, "static")
         media.reencode_in_place(src, "static")
-        self.assertEqual(media.content_key(src, "static"), before,
+        self.assertEqual(identity.content_key(src, "static"), before,
                          "re-encoding moved the catalog's dedup key")
 
     def test_animated_tgs_regzips_to_the_same_animation(self):
@@ -622,13 +622,13 @@ class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
     def test_the_key_survives_a_reencode(self):
         src = self._one_frame_webm("one.webm")
         before_bytes = src.read_bytes()
-        key_before = media.content_key(src, "video")
+        key_before = identity.content_key(src, "video")
 
         self.assertTrue(media.reencode_in_place(src, "video"),
                         "nothing was rewritten, so this proves nothing")
         self.assertNotEqual(src.read_bytes(), before_bytes,
                             "owner rule 1: our bytes must differ from theirs")
-        self.assertEqual(media.content_key(src, "video"), key_before,
+        self.assertEqual(identity.content_key(src, "video"), key_before,
                          "the primary key moved on a -c copy remux, which "
                          "orphans the catalog row and the media path")
 
@@ -642,15 +642,15 @@ class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
         a single-frame video changed on every run.
         """
         src = self._one_frame_webm("agree.webm")
-        key, _phash = media.fingerprint(src, "video")
-        self.assertEqual(key, media.content_key(src, "video"))
+        key, _phash = identity.fingerprint(src, "video")
+        self.assertEqual(key, identity.content_key(src, "video"))
 
     def test_the_key_is_stable_across_runs(self):
         src = self._one_frame_webm("stable.webm")
-        first = media.content_key(src, "video")
-        self.assertEqual(first, media.content_key(src, "video"))
+        first = identity.content_key(src, "video")
+        self.assertEqual(first, identity.content_key(src, "video"))
         media.reencode_in_place(src, "video")
-        self.assertEqual(media.content_key(src, "video"), first,
+        self.assertEqual(identity.content_key(src, "video"), first,
                          "a remux rewrites the container's random SegmentUID; "
                          "a key that follows it is a byte hash, not identity")
 
@@ -664,8 +664,8 @@ class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
                        timeout=FFMPEG_TIMEOUT)
         self.assertNotEqual(src.read_bytes(), clone.read_bytes(),
                             "the two files are byte-identical; nothing tested")
-        self.assertEqual(media.content_key(src, "video"),
-                         media.content_key(clone, "video"),
+        self.assertEqual(identity.content_key(src, "video"),
+                         identity.content_key(clone, "video"),
                          "two encodes of one frame must dedup onto one key")
 
 
@@ -716,23 +716,23 @@ class SameImageSurvivesAReEncode(unittest.TestCase):
         """If it did not, this whole function would be unnecessary."""
         src = self._art("a.png")
         enc = self._lossy(src, "a.webp")
-        self.assertNotEqual(media.content_key(src, "static"),
-                            media.content_key(enc, "static"),
+        self.assertNotEqual(identity.content_key(src, "static"),
+                            identity.content_key(enc, "static"),
                             "no drift: the fixture cannot exercise the bug")
 
     def test_a_re_encode_of_the_same_picture_is_the_same_picture(self):
         src = self._art("a.png")
-        self.assertIs(media.same_image(self._lossy(src, "a.webp"), src, "static"),
+        self.assertIs(identity.same_image(self._lossy(src, "a.webp"), src, "static"),
                       True)
 
     def test_an_identical_file_takes_the_exact_path(self):
         src = self._art("a.png")
-        self.assertIs(media.same_image(src, src, "static"), True)
+        self.assertIs(identity.same_image(src, src, "static"), True)
 
     def test_a_different_picture_is_still_rejected(self):
         """The tolerance must not have swallowed the guard it replaced."""
         a, b = self._art("a.png", seed=0), self._art("b.png", seed=9)
-        self.assertIs(media.same_image(self._lossy(a, "a.webp"), b, "static"),
+        self.assertIs(identity.same_image(self._lossy(a, "a.webp"), b, "static"),
                       False)
 
     def test_animated_cannot_be_decided_and_says_so(self):
@@ -742,7 +742,7 @@ class SameImageSurvivesAReEncode(unittest.TestCase):
         the strength of a comparison that was never made.
         """
         a, b = self._art("a.png", seed=0), self._art("b.png", seed=9)
-        self.assertIsNone(media.same_image(a, b, "animated"))
+        self.assertIsNone(identity.same_image(a, b, "animated"))
 
     def test_the_same_shape_in_another_colour_is_not_our_upload(self):
         """dHash is grayscale, so structure alone cannot answer this.
@@ -766,17 +766,17 @@ class SameImageSurvivesAReEncode(unittest.TestCase):
         ours = square("ours.png", (200, 30, 30, 255))
         theirs = square("theirs.png", (10, 200, 40, 255))
         self.assertLessEqual(
-            media.hamming(media.perceptual_hash(ours, "static"),
-                          media.perceptual_hash(theirs, "static")),
-            media.UPLOAD_PHASH_TOLERANCE,
+            identity.hamming(identity.perceptual_hash(ours, "static"),
+                          identity.perceptual_hash(theirs, "static")),
+            identity.UPLOAD_PHASH_TOLERANCE,
             "fixture no longer exercises the hole: structure alone must accept these")
-        self.assertIs(media.same_image(ours, theirs, "static"), False)
+        self.assertIs(identity.same_image(ours, theirs, "static"), False)
 
     def test_an_unreadable_file_is_undecidable_not_negative(self):
         good = self._art("a.png")
         bad = self.d / "torn.png"
         bad.write_bytes(b"not an image")
-        self.assertIsNone(media.same_image(bad, good, "static"))
+        self.assertIsNone(identity.same_image(bad, good, "static"))
 
 
 if __name__ == "__main__":
