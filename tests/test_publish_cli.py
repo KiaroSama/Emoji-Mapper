@@ -105,7 +105,8 @@ class OccupiedNameTG(FakeTG):
     that merely failed.
     """
 
-    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+    def create_emoji_set(self, user_id, name, title, path, fmt,
+                         emojis, keywords, *, needs_repainting=False):
         raise RuntimeError("BAD_REQUEST: sticker set name is already occupied")
 
 

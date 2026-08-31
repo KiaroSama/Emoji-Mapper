@@ -274,7 +274,8 @@ class FakeTelegram:
             raise RuntimeError(f"no such file: {file_id}")
         Path(dest).write_bytes(body)
 
-    def create_emoji_set(self, user_id, name, title, path, fmt, emojis, keywords):
+    def create_emoji_set(self, user_id, name, title, path, fmt,
+                         emojis, keywords, *, needs_repainting=False):
         self.sets[name] = []
         self.sets[name].append(self._sticker(name, path, fmt, emojis))
 
@@ -372,7 +373,7 @@ class PublishDedupTest(unittest.TestCase):
 
             class OccupiedTG(FakeTelegram):
                 def create_emoji_set(self, user_id, name, title, path, fmt,
-                                     emojis, keywords):
+                                     emojis, keywords, *, needs_repainting=False):
                     if name in self.sets:
                         raise RuntimeError("createNewStickerSet failed: sticker "
                                            "set name is already occupied")
