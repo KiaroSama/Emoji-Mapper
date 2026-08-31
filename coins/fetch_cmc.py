@@ -38,9 +38,9 @@ from coins._inventory import base_ticker
 # Reuse proven helpers from the CoinPaprika fetcher -- including the ONE
 # verified publisher, so this fetcher cannot drift back into its own copy.
 # Package-qualified so the module also imports as ``coins.fetch_cmc``.
+from coins._paprika_api import classify, http_bytes, to_emoji_png
 from coins.fetch_paprika import (
-    TICKER_IDS, classify, http_bytes, incoming_dir, parse_missing,
-    publish_logos, refill_inventory, to_emoji_png,
+    TICKER_IDS, incoming_dir, parse_missing, publish_logos, refill_inventory,
 )
 
 MAP = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map?symbol="

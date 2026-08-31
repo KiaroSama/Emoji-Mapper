@@ -37,6 +37,7 @@ from build_pack import EXIT_FAILED, EXIT_OK  # noqa: E402
 from coins import _inventory  # noqa: E402
 from coins import fetch_cmc as coins_cmc  # noqa: E402
 from coins import fetch_paprika as coins_fp  # noqa: E402
+from coins import _paprika_api as coins_api  # noqa: E402
 from coins import _dedup_map as coins_dmap  # noqa: E402
 from tests._cli_fixtures import _load_standalone, _noise_png_bytes  # noqa: E402
 
@@ -292,7 +293,9 @@ class OneInventoryImplementation(unittest.TestCase):
     def test_the_explicit_aliases_now_reach_the_fetchers(self):
         self.assertEqual(_inventory.base_ticker("avaxc"), "avax")
         self.assertEqual(_inventory.base_ticker("bttc"), "btt")
-        self.assertIs(coins_fp.base_ticker, _inventory.base_ticker)
+        # The paprika search moved to coins._paprika_api; assert on the module
+        # that CALLS it, not on one that only used to re-export it.
+        self.assertIs(coins_api.base_ticker, _inventory.base_ticker)
         self.assertIs(coins_cmc.base_ticker, _inventory.base_ticker)
 
     def test_the_suffix_rules_are_unchanged(self):

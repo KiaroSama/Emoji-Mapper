@@ -54,6 +54,7 @@ Emoji Mapper/
     identity.py            content keys, perceptual hashes, same_image
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
   coins/                   the crypto-coin component (see §7)
+    _paprika_api.py        CoinPaprika HTTP + candidate search + logo decode
   scripts/check.ps1        byte-compile + full unit suite (CI runs this too)
   tests/                   unit tests + fixtures (see tests/README.md and §10)
   docs/GUIDE.md            this file
@@ -543,6 +544,7 @@ Examples:
 | `--state` | `state_<base>.json` | Resume file (per pack, never clobbered). |
 | `--dry-run` | off | Validate inputs without calling Telegram. |
 | `--preflight` | off | Ask Telegram to validate every queued file, then stop. Publishes nothing; non-zero exit if any file is refused. |
+| `--repaint` | off | Create NEW sets with `needs_repainting`, so the client paints every emoji in them the text/accent colour. Whole-set and creation-only: it cannot be added later and it flattens colour art. |
 
 Resumable: progress is saved to `state_<base>.json`; an interrupted/flood-limited
 run continues without recreating existing sets. Use `--dry-run` first.
