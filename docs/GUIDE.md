@@ -724,6 +724,7 @@ Disable with `--no-brand-logo`. The logo occupies position 0, so item
 | `--base <name>` | *(required)* | The published family to reorder. |
 | `--data-dir <dir>` | `collection` | Catalog/state directory. |
 | `--token-env <VAR>` | `GENERAL_BOT_TOKEN` | Which token owns the packs. |
+| `--pack N` | *(all)* | Only reorder pack N (repeatable). Publishing appends, so the live order still has to be applied separately - and applying it family-wide would move stickers in packs you never arranged. |
 | `--apply` | off | Actually move stickers. Without it, report only. |
 
 Rearranging the panel after a pack is live does **not** mean republishing it.

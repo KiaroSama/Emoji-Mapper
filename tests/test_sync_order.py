@@ -7,14 +7,19 @@ run on a pack people have already installed.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import tempfile
 import sys
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import collection_state as cs  # noqa: E402
 import sync_order as so  # noqa: E402
 
 
@@ -129,6 +134,83 @@ class TheRecordedOrderFollowsTheLiveOne(unittest.TestCase):
         rec = {"name": "pk1_by_bot", "logo": True, "keys": ["s:b", "s:a"]}
         so.sync_set(tg, cat, rec, apply=False)
         self.assertEqual(rec["keys"], ["s:b", "s:a"], "a dry run must write nothing")
+
+
+class OnePackAtATime(unittest.TestCase):
+    """A run that arranged ONE pack must not move stickers in the others.
+
+    Publishing appends; it cannot move a sticker that is already live. So after
+    arranging pack 2 in the panel and publishing into it, the live order still
+    has to be applied separately -- and applying it to the WHOLE family would
+    also reorder packs the owner never looked at. Pack 5 was 28 moves away and
+    pack 1 one move away at the time this was added.
+    """
+
+    INDEXES = (1, 2, 5)
+
+    def setUp(self):
+        # main() refuses before the loop when the catalog file is missing, so a
+        # made-up data dir makes every one of these pass for the wrong reason --
+        # the unknown-pack test did exactly that until this was added.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name)
+        (self.data / "catalog.db").write_bytes(b"")
+        # A REAL state file, not a patched load_state: main() checks the file
+        # exists before it ever calls the loader, so patching the loader alone
+        # left every case exiting early -- passing for the wrong reason.
+        cs.save_json(cs._state_path(self.data, "pk"), {
+            "base": "pk", "sent": [], "skipped": [],
+            "sets": [{"index": i, "name": f"pks{i}_by_bot", "fmt": "static",
+                      "title": f"Pack {i}", "live": 2, "logo": True,
+                      "keys": [f"s:{i}"]} for i in self.INDEXES]})
+
+    @property
+    def argv(self) -> list[str]:
+        return ["--base", "pk", "--data-dir", str(self.data)]
+
+    def _run(self, argv, synced):
+        def fake_sync(tg, cat, rec, *, apply):
+            synced.append(rec["index"])
+            return 0
+
+        patches = [
+            mock.patch.object(so, "sync_set", fake_sync),
+            mock.patch.object(so, "Telegram", lambda t: mock.Mock()),
+            mock.patch.object(so, "Catalog", lambda p: mock.Mock()),
+            mock.patch.object(so, "exclusive_lock",
+                              lambda p: contextlib.nullcontext()),
+            mock.patch.dict(so.os.environ, {"GENERAL_BOT_TOKEN": "x"}),
+            mock.patch.object(so, "setup_logging", lambda *a, **k: None),
+            mock.patch.object(so, "load_env", lambda: None),
+            redirect_stdout(io.StringIO()),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            return so.main(argv)
+
+    def test_without_the_flag_every_pack_is_visited(self):
+        seen = []
+        self._run(self.argv, seen)
+        self.assertEqual(seen, [1, 2, 5])
+
+    def test_pack_limits_the_run_to_that_set(self):
+        seen = []
+        self._run(self.argv + ["--pack", "2"], seen)
+        self.assertEqual(seen, [2], "the other packs must not be touched")
+
+    def test_pack_is_repeatable(self):
+        seen = []
+        self._run(self.argv + ["--pack", "2", "--pack", "5"], seen)
+        self.assertEqual(seen, [2, 5])
+
+    def test_an_unknown_pack_is_a_usage_error_not_a_silent_no_op(self):
+        """Reporting success having reordered nothing is the worse failure."""
+        seen = []
+        rc = self._run(self.argv + ["--pack", "9"], seen)
+        self.assertEqual(rc, so.EXIT_USAGE)
+        self.assertEqual(seen, [])
 
 
 if __name__ == "__main__":
