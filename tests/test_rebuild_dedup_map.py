@@ -27,7 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import packstate as ps  # noqa: E402
-from coins import rebuild_dedup as rd  # noqa: E402
+from coins import _dedup_plan as cfg  # noqa: E402
+from coins import _dedup_map as dmap  # noqa: E402
 from tests._rebuild_fixtures import FakeTelegram, RebuildCase, _png_bytes  # noqa: E402
 
 
@@ -58,7 +59,7 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         return json.loads(self.map.read_text(encoding="utf-8"))
 
     def test_the_untouched_pack_maps_by_content(self):
-        rd.map_and_fill(self.tg)
+        dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping(),
                          {"aaa": "s1-0", "bbb": "s1-1", "ccc": "s1-2"})
 
@@ -67,7 +68,7 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         # position 0 now holds ccc's art.
         imgs = self.tg.images["s1"]
         imgs[0], imgs[2] = imgs[2], imgs[0]
-        rd.map_and_fill(self.tg)
+        dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping()["aaa"], "s1-2",
                          "aaa must follow its IMAGE, not its upload position")
         self.assertEqual(self.mapping()["ccc"], "s1-0")
@@ -79,7 +80,7 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.images["s1"][1] = _png_bytes("someone-elses-logo")
         with self.assertRaises(SystemExit) as caught:
-            rd.map_and_fill(self.tg)
+            dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"},
                          "unprovable identity must leave the canonical map alone")
         self.assertIn("s1-1", str(caught.exception.code))
@@ -90,21 +91,21 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.images["s1"][1] = b"not an image at all"
         with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
+            dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"})
 
     def test_a_missing_source_image_refuses_to_map(self):
         ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         (self.emoji / "bbb.png").unlink()
         with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
+            dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"})
 
     def test_an_extra_live_sticker_refuses_to_map(self):
         ps.write_json_atomic(self.map, {"aaa": "keep-me"})
         self.tg.append("s1", _png_bytes("appended-by-a-concurrent-tool"))
         with self.assertRaises(SystemExit):
-            rd.map_and_fill(self.tg)
+            dmap.map_and_fill(self.tg)
         self.assertEqual(self.mapping(), {"aaa": "keep-me"})
 
     def test_the_canonical_map_is_written_under_the_shared_lock(self):
@@ -112,9 +113,9 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         # must block the rebuild's own write rather than let it interleave.
         with ps.canonical_map_lock():
             with self.assertRaises(ps.LockBusy):
-                rd.map_and_fill(self.tg)
+                dmap.map_and_fill(self.tg)
         self.assertFalse(self.map.exists())
-        self.assertFalse(rd.LOCK.exists(),
+        self.assertFalse(cfg.LOCK.exists(),
                          "the pack lock outlived the run that took it")
 
     def test_a_provider_cannot_change_the_map_during_the_snapshot(self):
@@ -140,7 +141,7 @@ class MapIsResolvedByImageIdentity(RebuildCase):
             return real_call(method, data=data, **kw)
 
         self.tg._call = a_provider_runs_mid_read
-        rd.map_and_fill(self.tg)
+        dmap.map_and_fill(self.tg)
         self.assertIsInstance(
             attempts[0], ps.LockBusy,
             "the map was writable while its own replacement was being read; "
@@ -152,9 +153,9 @@ class MapIsResolvedByImageIdentity(RebuildCase):
         Pack-family lock FIRST, canonical map lock SECOND -- the documented
         order, and the reason this can be taken while a build cannot.
         """
-        with ps.exclusive_lock(rd.LOCK):
+        with ps.exclusive_lock(cfg.LOCK):
             with self.assertRaises(ps.LockBusy):
-                rd.map_and_fill(self.tg)
+                dmap.map_and_fill(self.tg)
         self.assertFalse(self.map.exists(),
                          "the map was rebuilt from live sets a concurrent "
                          "build was still appending to")
@@ -164,27 +165,27 @@ class SharedLogoGuard(unittest.TestCase):
     """The detector that would have caught the 129-ticker collision."""
 
     def setUp(self):
-        from coins import rebuild_dedup as rd
-        self.rd = rd
+        from coins import _dedup_map as dmap
+        self.dmap = dmap
 
     def test_unreviewed_many_to_one_group_is_reported(self):
         mapping = {t: "SAME" for t in ("apt", "arkm", "hbar", "near", "tao")}
         mapping["btc"] = "OWN"
-        with mock.patch.object(self.rd, "approved_shared_tickers", return_value=set()):
-            bad = self.rd.unapproved_shared_groups(mapping)
+        with mock.patch.object(self.dmap, "approved_shared_tickers", return_value=set()):
+            bad = self.dmap.unapproved_shared_groups(mapping)
         self.assertEqual(list(bad), ["SAME"])
         self.assertEqual(len(bad["SAME"]), 5)
 
     def test_reviewed_shared_group_is_accepted(self):
         mapping = {"usdt": "T", "usdtbsc": "T", "usdterc20": "T"}
         approved = {"usdt", "usdtbsc", "usdterc20"}
-        with mock.patch.object(self.rd, "approved_shared_tickers", return_value=approved):
-            self.assertEqual(self.rd.unapproved_shared_groups(mapping), {})
+        with mock.patch.object(self.dmap, "approved_shared_tickers", return_value=approved):
+            self.assertEqual(self.dmap.unapproved_shared_groups(mapping), {})
 
     def test_one_to_one_map_is_clean(self):
         mapping = {"btc": "1", "eth": "2", "sol": "3"}
-        with mock.patch.object(self.rd, "approved_shared_tickers", return_value=set()):
-            self.assertEqual(self.rd.unapproved_shared_groups(mapping), {})
+        with mock.patch.object(self.dmap, "approved_shared_tickers", return_value=set()):
+            self.assertEqual(self.dmap.unapproved_shared_groups(mapping), {})
 
     def test_the_real_committed_map_is_checked_against_the_real_groups(self):
         """The shipped map must not regain an unreviewed collision."""
@@ -192,7 +193,7 @@ class SharedLogoGuard(unittest.TestCase):
         if not ids.is_file():
             self.skipTest("no committed ticker map")
         mapping = json.loads(ids.read_text(encoding="utf-8"))
-        bad = self.rd.unapproved_shared_groups(mapping)
+        bad = self.dmap.unapproved_shared_groups(mapping)
         biggest = max((len(v) for v in bad.values()), default=0)
         self.assertLess(biggest, 20,
                         f"an emoji id is shared by {biggest} unreviewed tickers; "
