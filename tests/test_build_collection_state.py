@@ -41,6 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_collection as bc  # noqa: E402
+import collection_state as cs  # noqa: E402
+import collection_reconcile as cr  # noqa: E402
 import build_pack as bp  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
                         LiveStateUnknown, exclusive_lock)
@@ -129,48 +131,48 @@ class _CatalogFixture(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class StateFileContract(_CatalogFixture):
     def test_absent_file_uses_the_default(self):
-        self.assertEqual(bc.load_json(self.data / "nope.json", {"d": 1}), {"d": 1})
+        self.assertEqual(cs.load_json(self.data / "nope.json", {"d": 1}), {"d": 1})
 
     def test_truncated_state_refuses_to_start_from_scratch(self):
-        path = bc._state_path(self.data, "pk")
+        path = cs._state_path(self.data, "pk")
         path.write_text('{"base": "pk", "sets": [{"name": "pks1', encoding="utf-8")
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_truncated_plan_refuses_to_refreeze(self):
-        bc._plan_path(self.data, "pk").write_text('{"static": ["s:a"',
+        cs._plan_path(self.data, "pk").write_text('{"static": ["s:a"',
                                                   encoding="utf-8")
-        with self.assertRaises(bc.StateError):
-            bc.load_plan(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_plan(self.data, "pk")
 
     def test_plan_of_the_wrong_shape_is_rejected(self):
-        bc._plan_path(self.data, "pk").write_text('{"static": "s:a"}',
+        cs._plan_path(self.data, "pk").write_text('{"static": "s:a"}',
                                                   encoding="utf-8")
-        with self.assertRaises(bc.StateError):
-            bc.load_plan(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_plan(self.data, "pk")
 
     def test_state_of_another_pack_family_is_rejected(self):
-        bc.save_json(bc._state_path(self.data, "pk"),
+        cs.save_json(cs._state_path(self.data, "pk"),
                      {"base": "other", "sets": [], "sent": []})
-        with self.assertRaises(bc.StateError) as ctx:
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError) as ctx:
+            cs.load_state(self.data, "pk")
         self.assertIn("other", str(ctx.exception))
 
     def test_state_schema_is_checked(self):
-        bc.save_json(bc._state_path(self.data, "pk"),
+        cs.save_json(cs._state_path(self.data, "pk"),
                      {"base": "pk", "sets": [{"name": SET, "fmt": "nope",
                                               "index": 1}], "sent": []})
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_a_failed_write_leaves_the_previous_state_intact(self):
-        path = bc._state_path(self.data, "pk")
-        bc.save_json(path, {"base": "pk", "sets": [], "sent": ["first"]})
+        path = cs._state_path(self.data, "pk")
+        cs.save_json(path, {"base": "pk", "sets": [], "sent": ["first"]})
         # Simulate the process dying at the very end of the write: with a
         # non-atomic write_text the destination is already truncated by then.
         with mock.patch("build_pack.os.replace", side_effect=OSError("boom")):
             with self.assertRaises(OSError):
-                bc.save_json(path, {"base": "pk", "sets": [], "sent": ["second"]})
+                cs.save_json(path, {"base": "pk", "sets": [], "sent": ["second"]})
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sent"],
                          ["first"])
 
@@ -178,7 +180,7 @@ class StateFileContract(_CatalogFixture):
     def _bad_state(self, *sets, **top) -> None:
         state = {"base": "pk", "sets": list(sets), "sent": []}
         state.update(top)
-        bc.save_json(bc._state_path(self.data, "pk"), state)
+        cs.save_json(cs._state_path(self.data, "pk"), state)
 
     def _set(self, **over) -> dict:
         s = {"fmt": "static", "index": 1, "name": SET, "title": "Pack 1",
@@ -188,76 +190,76 @@ class StateFileContract(_CatalogFixture):
 
     def test_a_wholly_consistent_state_is_accepted(self):
         self._bad_state(self._set())
-        self.assertEqual(len(bc.load_state(self.data, "pk")["sets"]), 1)
+        self.assertEqual(len(cs.load_state(self.data, "pk")["sets"]), 1)
 
     def test_the_same_index_in_two_formats_is_fine(self):
         self._bad_state(self._set(keys=[self.keys[0]], live=1),
                         self._set(fmt="video", name="pkv1_by_bot", live=1,
                                   keys=[self.keys[1]]))
-        self.assertEqual(len(bc.load_state(self.data, "pk")["sets"]), 2)
+        self.assertEqual(len(cs.load_state(self.data, "pk")["sets"]), 2)
 
     def test_a_negative_live_count_is_rejected(self):
         self._bad_state(self._set(live=-1, keys=[]))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_a_live_count_above_telegrams_cap_is_rejected(self):
         self._bad_state(self._set(live=201, keys=[]))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_more_recorded_keys_than_live_stickers_is_rejected(self):
         # The cid mapping reads live[i + offset] for every key, so this state
         # would index past the end -- or worse, onto somebody else's sticker.
         self._bad_state(self._set(live=1))
-        with self.assertRaises(bc.StateError) as ctx:
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError) as ctx:
+            cs.load_state(self.data, "pk")
         self.assertIn("records 2", str(ctx.exception))
 
     def test_the_logo_slot_counts_towards_that_bound(self):
         self._bad_state(self._set(live=2, logo=True))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_one_emoji_recorded_twice_in_a_set_is_rejected(self):
         self._bad_state(self._set(keys=[self.keys[0], self.keys[0]]))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_one_emoji_recorded_in_two_sets_is_rejected(self):
         self._bad_state(self._set(keys=[self.keys[0]], live=1),
                         self._set(index=2, name=SET2, live=1,
                                   keys=[self.keys[0]]))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_two_sets_sharing_a_name_are_rejected(self):
         self._bad_state(self._set(keys=[self.keys[0]], live=1),
                         self._set(index=2, keys=[self.keys[1]], live=1))
-        with self.assertRaises(bc.StateError):
-            bc.load_state(self.data, "pk")
+        with self.assertRaises(cs.StateError):
+            cs.load_state(self.data, "pk")
 
     def test_a_repeated_or_backwards_index_is_rejected(self):
         for second in ({"index": 1}, {"index": 0}):
             self._bad_state(self._set(index=2, keys=[self.keys[0]], live=1),
                             self._set(name=SET2, keys=[self.keys[1]], live=1,
                                       **second))
-            with self.assertRaises(bc.StateError):
-                bc.load_state(self.data, "pk")
+            with self.assertRaises(cs.StateError):
+                cs.load_state(self.data, "pk")
 
     def test_malformed_field_types_are_rejected(self):
         for over in ({"keys": "not-a-list"}, {"keys": [1, 2]}, {"logo": "yes"},
                      {"live": "two"}, {"live": True}, {"index": True},
                      {"title": ""}, {"name": ""}):
             self._bad_state(self._set(**over))
-            with self.assertRaises(bc.StateError):
-                bc.load_state(self.data, "pk")
+            with self.assertRaises(cs.StateError):
+                cs.load_state(self.data, "pk")
 
     def test_malformed_sent_and_skipped_entries_are_rejected(self):
         for top in ({"sent": [None]}, {"sent": [""]}, {"skipped": [{"k": 1}]}):
             self._bad_state(**top)
-            with self.assertRaises(bc.StateError):
-                bc.load_state(self.data, "pk")
+            with self.assertRaises(cs.StateError):
+                cs.load_state(self.data, "pk")
 
     def test_a_broken_state_stops_the_run_before_any_mutation(self):
         self._bad_state(self._set(live=1))       # records more than it holds
@@ -272,10 +274,10 @@ class StateFileContract(_CatalogFixture):
         self.assertEqual(tg.uploaded, [])        # no Telegram mutation at all
         self.assertEqual(tg.sets, {})
         # ...not even the frozen plan was rewritten from the bad state.
-        self.assertFalse(bc._plan_path(self.data, "pk").exists())
+        self.assertFalse(cs._plan_path(self.data, "pk").exists())
 
     def test_main_stops_on_an_unreadable_plan(self):
-        bc._plan_path(self.data, "pk").write_text("{oops", encoding="utf-8")
+        cs._plan_path(self.data, "pk").write_text("{oops", encoding="utf-8")
         self.assertEqual(_main("--base", "pk", "--title", "T",
                                "--data-dir", str(self.data), "--dry-run"),
                          EXIT_FAILED)
@@ -287,7 +289,7 @@ class StateFileContract(_CatalogFixture):
 class LiveSetDrift(_CatalogFixture):
     def _reconcile(self, tg, s):
         with Catalog(self.data / "catalog.db") as cat:
-            return bc.reconcile_set(tg, cat, s, self.data, "pk")
+            return cr.reconcile_set(tg, cat, s, self.data, "pk")
 
     def test_unknown_live_state_aborts_instead_of_guessing(self):
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
@@ -299,19 +301,19 @@ class LiveSetDrift(_CatalogFixture):
 
     def test_deleted_set_is_reported_not_treated_as_the_recorded_count(self):
         tg = FakeTG(sets={})                    # owner deleted the whole pack
-        with self.assertRaises(bc.SetDrift) as ctx:
+        with self.assertRaises(cs.SetDrift) as ctx:
             self._reconcile(tg, self._state_set())
         self.assertIn("no longer exists", str(ctx.exception))
 
     def test_shrunk_set_is_drift(self):
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0")]})
-        with self.assertRaises(bc.SetDrift):
+        with self.assertRaises(cs.SetDrift):
             self._reconcile(tg, self._state_set())
 
     def test_reordered_set_is_drift(self):
         tg = FakeTG(sets={SET: [_sticker("UP-item1", "c1"),
                                 _sticker("UP-item0", "c0")]})
-        with self.assertRaises(bc.SetDrift) as ctx:
+        with self.assertRaises(cs.SetDrift) as ctx:
             self._reconcile(tg, self._state_set())
         self.assertIn("position 0", str(ctx.exception))
 
@@ -323,7 +325,7 @@ class LiveSetDrift(_CatalogFixture):
                                 _sticker("MANUAL", "cx"),
                                 _sticker("UP-item1", "c1")]})
         s = self._state_set(keys=[self.keys[0]])
-        with self.assertRaises(bc.SetDrift):
+        with self.assertRaises(cs.SetDrift):
             self._reconcile(tg, s)
         self.assertEqual(s["keys"], [self.keys[0]])   # nothing mis-attributed
 
@@ -331,7 +333,7 @@ class LiveSetDrift(_CatalogFixture):
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
                                 _sticker("UP-item1", "c1"),
                                 _sticker("UP-item0", "c2")]})
-        with self.assertRaises(bc.SetDrift) as ctx:
+        with self.assertRaises(cs.SetDrift) as ctx:
             self._reconcile(tg, self._state_set())
         self.assertIn("twice", str(ctx.exception))
 
@@ -347,7 +349,7 @@ class LiveSetDrift(_CatalogFixture):
         # Same length, but position 1 now holds item0's picture.
         tg = FakeTG(sets={SET: [_sticker("UP-item0", "c0"),
                                 _sticker("UP-item0", "cX")]})
-        with self.assertRaises(bc.SetDrift):
+        with self.assertRaises(cs.SetDrift):
             self._reconcile(tg, self._state_set())
 
     def test_matching_manifest_reconciles_the_tail(self):
@@ -363,7 +365,7 @@ class LiveSetDrift(_CatalogFixture):
         tg = FakeTG(sets={SET: [_sticker("UP-item1", "wrong-0"),
                                 _sticker("UP-item0", "wrong-1")]})
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift):
+            with self.assertRaises(cs.SetDrift):
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertIsNone(cat.get(self.keys[0]).custom_emoji_id)
             self.assertIsNone(cat.get(self.keys[1]).custom_emoji_id)
@@ -390,7 +392,7 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
         tg = FakeTG(sets={SET: [_sticker("NEVER-SEEN", "foreign-cid"),
                                 _sticker("UP-item1", "c1")]})
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift) as ctx:
+            with self.assertRaises(cs.SetDrift) as ctx:
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertIn("position 0", str(ctx.exception))
             # The foreign sticker's id never reached our item.
@@ -402,8 +404,8 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
                                 _sticker("NEVER-SEEN", "foreign-cid")]})
         s = self._state_set()
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift):
-                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            with self.assertRaises(cs.SetDrift):
+                cr.reconcile_set(tg, cat, s, self.data, "pk")
 
     def test_content_resolution_rescues_a_re_uploaded_identical_picture(self):
         # A new id is not automatically a different emoji: if the bytes still
@@ -413,9 +415,9 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
         self._read_back(*self.keys)
         tg = DownloadingTG(sets={SET: [_sticker("RE-UPLOADED", "c9"),
                                        _sticker("UP-item1", "c1")]})
-        with mock.patch.object(bc.identity, "content_key",
+        with mock.patch.object(cr.identity, "content_key",
                                lambda p, fmt: self.keys[0]), \
-                mock.patch.object(bc.media, "telegram_sticker_format",
+                mock.patch.object(cr.media, "telegram_sticker_format",
                                   lambda st: "static"):
             with Catalog(self.data / "catalog.db") as cat:
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
@@ -450,7 +452,7 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
         tg = FakeTG(sets={SET: [_sticker("FRESH-1", "c1"),
                                 _sticker("FRESH-0", "c0")]})
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift):
+            with self.assertRaises(cs.SetDrift):
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
             self.assertIsNone(cat.custom_emoji_id_for("pk", self.keys[0]))
             self.assertIsNone(cat.custom_emoji_id_for("pk", self.keys[1]))
@@ -462,7 +464,7 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
                                        _sticker("FRESH-1", "c1")]},
                            error="connection reset")
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift):
+            with self.assertRaises(cs.SetDrift):
                 bc._record_cids(tg, cat, [self._state_set()], "pk", self.data)
         self.assertEqual(tg.downloads, 1)   # tried identity first, then stopped
 
@@ -476,9 +478,9 @@ class UnattributedTail(_CatalogFixture):
                                 _sticker("OWNER", "cx")]})
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 2)
+            self.assertEqual(cr.reconcile_set(tg, cat, s, self.data, "pk"), 2)
         self.assertEqual(s["keys"], [self.keys[0]])   # the tail stayed unowned
-        self.assertFalse(bc._set_is_open(s))
+        self.assertFalse(cr._set_is_open(s))
 
     def test_a_tail_whose_download_fails_is_refused_not_closed(self):
         """Closing the set on a failed fetch is how the emoji gets duplicated.
@@ -495,8 +497,8 @@ class UnattributedTail(_CatalogFixture):
                            error="connection reset")
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift) as ctx:
-                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            with self.assertRaises(cs.SetDrift) as ctx:
+                cr.reconcile_set(tg, cat, s, self.data, "pk")
         self.assertIn("could not be examined", str(ctx.exception))
         self.assertEqual(tg.downloads, 1)
         self.assertEqual(s["keys"], [self.keys[0]])   # nothing was recorded
@@ -516,8 +518,8 @@ class UnattributedTail(_CatalogFixture):
         tg.undownloadable.add("FRESH-item1")
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift) as ctx:
-                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            with self.assertRaises(cs.SetDrift) as ctx:
+                cr.reconcile_set(tg, cat, s, self.data, "pk")
         self.assertIn("could not be examined", str(ctx.exception))
         self.assertEqual(s["keys"], [self.keys[0]])
 
@@ -526,8 +528,8 @@ class UnattributedTail(_CatalogFixture):
                                 _sticker("UP-item1", "c1")]})
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            bc.reconcile_set(tg, cat, s, self.data, "pk")
-        self.assertTrue(bc._set_is_open(s))
+            cr.reconcile_set(tg, cat, s, self.data, "pk")
+        self.assertTrue(cr._set_is_open(s))
 
 
 # --------------------------------------------------------------------------- #
@@ -561,8 +563,8 @@ class OurEmojiBehindAForeignSticker(_CatalogFixture):
         tg.sets[SET].append(self._unrecorded(tg, 1))
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift) as ctx:
-                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            with self.assertRaises(cs.SetDrift) as ctx:
+                cr.reconcile_set(tg, cat, s, self.data, "pk")
             # Still pending would mean re-uploaded; the run refuses instead.
             self.assertFalse(cat.is_published("pk", self.keys[1]))
         self.assertIn(self.keys[1], str(ctx.exception))
@@ -577,8 +579,8 @@ class OurEmojiBehindAForeignSticker(_CatalogFixture):
         tg.sets[SET] += [self._unrecorded(tg, 1), _sticker("OWNER2", "owner-cid2")]
         s = self._state_set(keys=[self.keys[0]], live=1)
         with Catalog(self.data / "catalog.db") as cat:
-            with self.assertRaises(bc.SetDrift):
-                bc.reconcile_set(tg, cat, s, self.data, "pk")
+            with self.assertRaises(cs.SetDrift):
+                cr.reconcile_set(tg, cat, s, self.data, "pk")
         self.assertEqual(tg.downloaded, ["OWNER", "FRESH-item1"])
 
     def test_a_foreign_sticker_at_the_very_end_still_stops_quietly(self):
@@ -590,9 +592,9 @@ class OurEmojiBehindAForeignSticker(_CatalogFixture):
                                 _sticker("OWNER", "owner-cid")]})
         s = self._state_set(live=2)
         with Catalog(self.data / "catalog.db") as cat:
-            self.assertEqual(bc.reconcile_set(tg, cat, s, self.data, "pk"), 3)
+            self.assertEqual(cr.reconcile_set(tg, cat, s, self.data, "pk"), 3)
         self.assertEqual(s["keys"], self.keys)
-        self.assertFalse(bc._set_is_open(s))
+        self.assertFalse(cr._set_is_open(s))
         self.assertEqual(tg.downloaded, ["OWNER"])   # nothing past the stop
 
 
@@ -715,14 +717,14 @@ class CliContract(_CatalogFixture):
         return rc, out.getvalue()
 
     def test_second_publisher_fails_fast_while_the_lock_is_held(self):
-        with exclusive_lock(bc._lock_path(self.data, "pk")):
+        with exclusive_lock(cs._lock_path(self.data, "pk")):
             rc, _ = self._dry_run()
         self.assertEqual(rc, EXIT_FAILED)
 
     def test_the_lock_is_released_again(self):
         self.assertEqual(self._dry_run()[0], EXIT_OK)
         self.assertEqual(self._dry_run()[0], EXIT_OK)
-        self.assertFalse(bc._lock_path(self.data, "pk").exists())
+        self.assertFalse(cs._lock_path(self.data, "pk").exists())
 
     def test_unknown_format_is_a_usage_error(self):
         self.assertEqual(self._dry_run("--formats", "garbage")[0], EXIT_USAGE)
@@ -799,7 +801,7 @@ class PublishThroughMain(_CatalogFixture):
             self.assertEqual(self._run(tg), EXIT_OK)
         self.assertEqual(tg.uploaded, ["item0", "item1"])
 
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(state["sets"][0]["keys"], self.keys)
         with Catalog(self.data / "catalog.db") as cat:
             self.assertEqual(cat.get(self.keys[0]).custom_emoji_id, f"{SET}-0")
@@ -866,7 +868,7 @@ class PublishThroughMain(_CatalogFixture):
         self.assertEqual(len(tg.sets[SET2]), 1)       # the new pack holds it
         with Catalog(self.data / "catalog.db") as cat:
             self.assertEqual(cat.custom_emoji_id_for("pk", key2), f"{SET2}-0")
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual([s["index"] for s in state["sets"]], [1, 2])
         self.assertEqual(state["sets"][1]["keys"], [key2])
 
@@ -923,7 +925,7 @@ class PublishThroughMain(_CatalogFixture):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(self._run(tg, "--into-pack", "1"), EXIT_OK)
 
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         pack1, pack2 = state["sets"][0], state["sets"][1]
         self.assertIn(key3, pack1["keys"], "the key belongs to pack 1's record")
         self.assertNotIn(key3, pack2["keys"], "pack 2's record must not claim it")
@@ -1020,7 +1022,7 @@ class PublishThroughMain(_CatalogFixture):
         out = io.StringIO()
         with redirect_stdout(out):
             self._run(tg)
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(len(state.get("skipped", [])), 1,
                          "the refused file must be recorded, not left pending")
 
@@ -1045,7 +1047,7 @@ class PublishThroughMain(_CatalogFixture):
         with Catalog(self.data / "catalog.db") as cat:
             keys = [it.content_key for it in cat.all_items()]
             cat.set_inclusion({keys[0]})            # deselect one
-            plan = bc.freeze_plan(cat, self.data, "pk", ["static"])
+            plan = cs.freeze_plan(cat, self.data, "pk", ["static"])
             queued = bc.pending_keys(cat, plan, "static", "pk", set())
             self.assertNotIn(keys[0], queued, "a deselected item is not queued")
             self.assertEqual(len(queued), len(keys) - 1)
@@ -1148,14 +1150,14 @@ class PublishThroughMain(_CatalogFixture):
         tg.add_emoji = refuse_the_first
         with redirect_stdout(io.StringIO()):
             self._run(tg)
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(state.get("sent", []), [],
                          "an incomplete pack must not be announced")
 
         # The NEXT run has nothing left to lose, so the link goes out then.
         with redirect_stdout(io.StringIO()):
             self._run(tg)
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(len(state.get("sent", [])), 1,
                          "a clean run must still announce the pack")
 
@@ -1163,7 +1165,7 @@ class PublishThroughMain(_CatalogFixture):
         tg = FakeTG()
         with redirect_stdout(io.StringIO()):
             self.assertEqual(self._run(tg), EXIT_OK)
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(len(state.get("sent", [])), 1)
 
     def test_a_transient_failure_is_still_retried(self):
@@ -1181,7 +1183,7 @@ class PublishThroughMain(_CatalogFixture):
         tg.add_emoji = flaky
         with redirect_stdout(io.StringIO()):
             self._run(tg)
-        state = json.loads(bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+        state = json.loads(cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual(state.get("skipped", []), [],
                          "a transient failure must stay retryable")
 
@@ -1224,9 +1226,9 @@ class PublishThroughMain(_CatalogFixture):
         self.assertNotIn("DONE", out.getvalue())    # stopped, not "finished"
 
         state = json.loads(
-            bc._state_path(self.data, "pk").read_text(encoding="utf-8"))
+            cs._state_path(self.data, "pk").read_text(encoding="utf-8"))
         self.assertEqual([s["name"] for s in state["sets"]], [SET])
-        bc.load_state(self.data, "pk")              # a later run can still start
+        cs.load_state(self.data, "pk")              # a later run can still start
 
     def test_skipped_blank_media_is_not_counted_as_a_failure(self):
         # A permanent, recorded exclusion is not retryable work: the run that

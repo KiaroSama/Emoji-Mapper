@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from build_collection import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
+from collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
                               PER_SET)
 from emojikit.catalog import PHASH_BITS, Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
