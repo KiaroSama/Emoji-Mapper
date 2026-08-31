@@ -39,7 +39,7 @@ from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
                         LockBusy, SetState, Telegram, exclusive_lock,
                         ingest_exit_code, announce_packs, load_env,
                         safe_int_env, write_json_atomic)
-from emojikit import media
+from emojikit import identity, media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 from PIL import Image
@@ -458,7 +458,7 @@ class Unresolvable(Exception):
 
 
 # The upload tolerance now lives with the comparison it belongs to, in
-# media.same_image: the Bot API client needs the identical rule when it checks
+# identity.same_image: the Bot API client needs the identical rule when it checks
 # whether its own add landed, and two copies of "is this the same picture"
 # drifting apart is how one caller starts accusing a sticker the other accepts.
 #
@@ -479,14 +479,14 @@ SEARCH_PHASH_TOLERANCE = 2
 def _same_image(tg, st: dict, source: Path, tmp_dir: Path) -> bool | None:
     """Is this live sticker the image in ``source``? None = could not tell.
 
-    Fetching is this layer's job; deciding is ``media.same_image``'s, which the
+    Fetching is this layer's job; deciding is ``identity.same_image``'s, which the
     Bot API client asks the same question of.
     """
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp = tmp_dir / f"verify_{st.get('file_unique_id') or 'x'}.dl"
     try:
         tg.download_file(st["file_id"], tmp)
-        return media.same_image(tmp, source, media.telegram_sticker_format(st))
+        return identity.same_image(tmp, source, media.telegram_sticker_format(st))
     except Exception as exc:  # noqa: BLE001 - a failed probe is not a "no"
         log.warning("upload verify failed for %s: %s", source.name, redact(str(exc)))
         return None
@@ -504,12 +504,12 @@ def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
     Animated is vector and has no raster hash, so there is nothing to compare:
     its content key survives a re-gzip exactly, and a miss there is a real miss.
     """
-    probe = media.perceptual_hash(path, fmt)
+    probe = identity.perceptual_hash(path, fmt)
     if probe is None:
         return None
     close = [it.content_key for it in cat.all_items()
              if it.fmt == fmt and it.phash is not None
-             and media.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
+             and identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
     if len(close) > 1:
         return "ambiguous"
     return close[0] if close else None
@@ -541,7 +541,7 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
     tmp_kept = tmp
     try:
         tg.download_file(file_id, tmp)
-        key = media.content_key(tmp, media.telegram_sticker_format(st))
+        key = identity.content_key(tmp, media.telegram_sticker_format(st))
     except Exception as exc:
         tmp.unlink(missing_ok=True)
         log.warning("reconcile download failed (%s): %s", fuid or file_id,

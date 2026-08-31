@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
-from emojikit import media  # noqa: E402
+from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 
@@ -116,7 +116,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 _make_png(p, color=(10, 20 * (i + 1), 200, 255))
                 # The REAL content key: publishing attributes a live sticker by
                 # hashing its pixels, so a synthetic key resolves to nothing.
-                key = media.content_key(p, "static")
+                key = identity.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["😀"], keywords=[f"item{i}"])
                 keys.append(key)
@@ -161,7 +161,7 @@ class PublishFormatLogoFirst(unittest.TestCase):
                     p = data / "media" / "animated" / f"a{i}.tgs"
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_bytes(b"\x1f\x8b" + b"x" * (50 + i))  # gzip-magic dummy
-                    key = media.content_key(p, "animated")
+                    key = identity.content_key(p, "animated")
                     cat.add(content_key=key, fmt="animated", file_path=p,
                             emojis=["😀"], keywords=[f"a{i}"])
                     keys.append(key)

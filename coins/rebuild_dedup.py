@@ -49,7 +49,7 @@ from build_pack import (EXIT_OK, EXIT_PARTIAL, AmbiguousUploadError,
                         canonical_map_lock, exclusive_lock, load_env,
                         pack_family_lock_path, safe_int_env, write_json_atomic)
 from coins._inventory import refill_inventory
-from emojikit.media import _dhash, hamming
+from emojikit.identity import _dhash, hamming
 
 ROOT = Path(__file__).resolve().parent
 EMOJI = ROOT / "logos" / "emoji"

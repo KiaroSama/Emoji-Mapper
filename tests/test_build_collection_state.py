@@ -44,7 +44,7 @@ import build_collection as bc  # noqa: E402
 import build_pack as bp  # noqa: E402
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,  # noqa: E402
                         LiveStateUnknown, exclusive_lock)
-from emojikit import media  # noqa: E402
+from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 from tests._bc_fixtures import FakeTG, _make_png, _sticker  # noqa: E402
@@ -88,7 +88,7 @@ class _CatalogFixture(unittest.TestCase):
                 # attributes a live sticker by downloading it and hashing the
                 # pixels, so a made-up key could never match and every upload
                 # would look unidentifiable.
-                key = media.content_key(p, "static")
+                key = identity.content_key(p, "static")
                 cat.add(content_key=key, fmt="static", file_path=p,
                         emojis=["\U0001F600"], keywords=[f"item{i}"])
                 cat.record_file_unique_id(f"UP-item{i}", key)
@@ -106,7 +106,7 @@ class _CatalogFixture(unittest.TestCase):
         """Catalogue one more static item, as a later curate pass would."""
         p = self.data / "media" / "static" / f"item{i}.png"
         _make_png(p, color=(10, 30 * (i + 1), 90, 255))
-        key = media.content_key(p, "static")
+        key = identity.content_key(p, "static")
         with Catalog(self.data / "catalog.db") as cat:
             cat.add(content_key=key, fmt="static", file_path=p,
                     emojis=["\U0001F600"], keywords=[f"item{i}"])
@@ -413,7 +413,7 @@ class ForeignIdentityOnARecordedPosition(_CatalogFixture):
         self._read_back(*self.keys)
         tg = DownloadingTG(sets={SET: [_sticker("RE-UPLOADED", "c9"),
                                        _sticker("UP-item1", "c1")]})
-        with mock.patch.object(bc.media, "content_key",
+        with mock.patch.object(bc.identity, "content_key",
                                lambda p, fmt: self.keys[0]), \
                 mock.patch.object(bc.media, "telegram_sticker_format",
                                   lambda st: "static"):

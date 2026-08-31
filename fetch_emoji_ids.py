@@ -31,7 +31,7 @@ import re
 from pathlib import Path
 
 from build_pack import Telegram, ingest_exit_code, load_env
-from emojikit import media
+from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
@@ -174,8 +174,8 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
             # byte-identical clone of the source sticker. Before the
             # fingerprint, so the key describes what is actually on disk.
             media.reencode_in_place(tmp, fmt)
-            # One decode for both keys -- see media.fingerprint.
-            key, phash = media.fingerprint(tmp, fmt)
+            # One decode for both keys -- see identity.fingerprint.
+            key, phash = identity.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
             dest = _media_path(data_dir, fmt, key, ext)
             if not dest.exists():
