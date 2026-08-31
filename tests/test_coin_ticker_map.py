@@ -37,7 +37,7 @@ from build_pack import EXIT_FAILED, EXIT_OK  # noqa: E402
 from coins import _inventory  # noqa: E402
 from coins import fetch_cmc as coins_cmc  # noqa: E402
 from coins import fetch_paprika as coins_fp  # noqa: E402
-from coins import rebuild_dedup as coins_rd  # noqa: E402
+from coins import _dedup_map as coins_dmap  # noqa: E402
 from tests._cli_fixtures import _load_standalone, _noise_png_bytes  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +309,7 @@ class OneInventoryImplementation(unittest.TestCase):
         self.assertEqual(copies, ["_inventory.py"])
 
     def test_every_tool_re_fills_through_the_same_function(self):
-        self.assertIs(coins_rd.refill_inventory, _inventory.refill_inventory)
+        self.assertIs(coins_dmap.refill_inventory, _inventory.refill_inventory)
         self.assertIs(coins_cmc.refill_inventory, coins_fp.refill_inventory,
                       "fetch_cmc must not grow its own copy again")
 

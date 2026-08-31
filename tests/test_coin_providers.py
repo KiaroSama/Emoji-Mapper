@@ -38,7 +38,8 @@ from PIL import Image  # noqa: E402
 import build_pack as bp  # noqa: E402
 import telegram_api as tg_api  # noqa: E402
 import packstate as ps  # noqa: E402
-from coins import fetch_cmc, fetch_paprika as fp, rebuild_dedup as rd  # noqa: E402
+from coins import fetch_cmc, fetch_paprika as fp  # noqa: E402
+from coins import _dedup_plan as cfg  # noqa: E402
 
 SET = "cryptoemoji1_by_bot"
 
@@ -266,8 +267,8 @@ class VerifiedPublish(unittest.TestCase):
     def test_a_rebuild_holding_the_family_lock_blocks_a_top_up(self):
         """Only real if both tools name the SAME lock (see OnePackFamilyOneLock)."""
         tg = FakeTelegram(existing=2)
-        with mock.patch.object(rd, "LOCK", self.lock), \
-             ps.exclusive_lock(rd.LOCK):
+        with mock.patch.object(cfg, "LOCK", self.lock), \
+             ps.exclusive_lock(cfg.LOCK):
             self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
         self.assertEqual(tg.adds, [])
 
@@ -672,9 +673,9 @@ class OnePackFamilyOneLock(unittest.TestCase):
     def test_every_coin_tool_locks_on_the_pack_base(self):
         family = ps.pack_family_lock_path(fp.SET_BASE)
         self.assertEqual(fp.PACK_LOCK, family)
-        self.assertEqual(rd.LOCK, family,
+        self.assertEqual(cfg.LOCK, family,
                          "the rebuild appends to the very same sets")
-        self.assertEqual(rd.BASE, fp.SET_BASE)
+        self.assertEqual(cfg.BASE, fp.SET_BASE)
 
 
 class CommandExitCodes(unittest.TestCase):
@@ -764,8 +765,8 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
     """
 
     def test_both_tools_name_the_same_state_file(self):
-        self.assertEqual(fp.STATE, rd.STATE)
-        self.assertNotEqual(fp.STATE, rd.OLD_STATE,
+        self.assertEqual(fp.STATE, cfg.STATE)
+        self.assertNotEqual(fp.STATE, cfg.OLD_STATE,
                             "the providers must not use the pack list the "
                             "rebuild deletes")
         # fetch_cmc publishes through fetch_paprika's publisher, so it inherits
@@ -796,7 +797,7 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
         # And a record shaped like theirs must satisfy the rebuild's validator.
         state = {"sets": [{"index": 1, "name": "s1", "title": "T", "live": 1}],
                  "order": [], "cursor": 0, "in_flight": None}
-        self.assertEqual(rd._state_problem(state, None), "")
+        self.assertEqual(cfg._state_problem(state, None), "")
 
     def test_the_provider_intent_cannot_collide_with_the_rebuild_s(self):
         """One file, two writers, two intents -- so two distinct keys.
@@ -813,13 +814,13 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
                   "order": [], "cursor": 0, "in_flight": None,
                   fp.INTENT_KEY: intent}
         # The rebuild must accept a state carrying the provider's intent...
-        self.assertEqual(rd._state_problem(shared, None), "")
+        self.assertEqual(cfg._state_problem(shared, None), "")
         # ...and must reject it if it were put under its own key instead.
         collided = dict(shared)
         collided.pop(fp.INTENT_KEY)
         collided["in_flight"] = intent
         self.assertNotEqual(
-            rd._state_problem(collided, [{"rep": "zzz"}]), "",
+            cfg._state_problem(collided, [{"rep": "zzz"}]), "",
             "this is why the provider needs its own key")
 
     def test_a_provider_top_up_does_not_brick_the_next_rebuild(self):
@@ -837,7 +838,7 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
         # 3 live = 2 recorded by the rebuild + 1 topped up by a provider.
         self.assertEqual(
             len(state["order"]) + len(state["provider_added"]), 3)
-        self.assertEqual(rd._state_problem(state, None), "")
+        self.assertEqual(cfg._state_problem(state, None), "")
 
     def test_the_tally_never_counts_one_upload_twice(self):
         """A recovery re-confirming a recorded upload must not inflate it.
@@ -848,7 +849,7 @@ class TheProvidersAndTheRebuildShareOneStateFile(unittest.TestCase):
         state = {"provider_added": ["aaa"]}
         fp._record_provider_add(state, "aaa")
         self.assertEqual(state["provider_added"], ["aaa"])
-        self.assertIn("repeats", rd._state_problem(
+        self.assertIn("repeats", cfg._state_problem(
             {"sets": [], "order": [], "cursor": 0,
              "provider_added": ["aaa", "aaa"]}, None))
 

@@ -47,7 +47,7 @@ from packstate import (LockBusy, canonical_map_lock, exclusive_lock, pack_family
 from emojikit import media  # noqa: E402
 
 import check_all_packs as cap  # noqa: E402
-import rebuild_dedup  # noqa: E402  - imported for its BASE, see PackFamilyLockTest
+from coins import _dedup_plan as rd_cfg  # noqa: E402  - imported for its BASE, see PackFamilyLockTest
 import remap_ids  # noqa: E402
 
 
@@ -476,8 +476,8 @@ class PackFamilyLockTest(unittest.TestCase):
         this same base name; a drifted copy here reads as locked and excludes
         nobody.
         """
-        self.assertEqual(remap_ids.SET_BASE, rebuild_dedup.BASE)
-        self.assertEqual(remap_ids.PACK_LOCK, rebuild_dedup.LOCK)
+        self.assertEqual(remap_ids.SET_BASE, rd_cfg.BASE)
+        self.assertEqual(remap_ids.PACK_LOCK, rd_cfg.LOCK)
         self.assertEqual(remap_ids.PACK_LOCK,
                          pack_family_lock_path(remap_ids.SET_BASE))
 
