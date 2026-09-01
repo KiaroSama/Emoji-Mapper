@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - dHash read RGB from underneath transparent pixels
+
+`_dhash` called `img.convert("L")` on an RGBA image. **That conversion discards
+alpha and reads the raw RGB**, and RGB beneath a fully transparent pixel is
+undefined - every encoder rewrites it. The same trap owner rule 1 meets with
+`exact=True`, and the one `_premultiplied` was written for; `_dhash` simply did
+not use it.
+
+Caught by a real upload, not by reasoning: a logo measured **10** dHash bits
+from Telegram's re-encode of *itself* (tolerance 6), which failed the
+upload-verification gate and stranded a sticker that had in fact landed. Its
+alpha channel was byte-identical and its premultiplied colour delta was 1.23 -
+deep inside the calibrated same-image range of 0.02..2.35. Premultiplied first,
+the distance is **0**, and a genuinely different image still measures **23**.
+
+- A fully opaque image is unaffected: premultiplying by 255 is the identity.
+- 492 of 550 stored catalog hashes changed, because emoji art is nearly all
+  transparent - those values had been describing encoder noise. They were
+  self-consistent among files this pipeline produced, which is why near-duplicate
+  search never looked broken: it just could not match one logo against another
+  source's copy of the same picture.
+- Three tests pin it: invisible pixels cannot move the hash, genuinely different
+  art stays far apart, and an opaque image hashes exactly as before.
+
+
 ### Added - `sync_order.py --pack N`
 
 Publishing **appends**; it cannot move a sticker that is already live. So after
