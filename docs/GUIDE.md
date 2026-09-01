@@ -208,6 +208,10 @@ Guarantees (root-cause fixes — do not regress these):
 `to_video_webm` (ffmpeg, VP9, ≤256 KB), `to_animated_tgs` (Lottie→gzip),
 `validate_video`, `validate_tgs`, `reencode_in_place`.
 
+`perceptual_hash` premultiplies by alpha before reducing to grey, because
+`convert("L")` on RGBA discards alpha and the RGB under a transparent pixel
+is whatever the last encoder left there.
+
 `emojikit/identity.py` cheat-sheet: `content_key` (the catalog's primary
 key), `perceptual_hash`, `fingerprint` (both in one pass), `same_image`
 (did OUR file produce THAT sticker? `None` when undecidable), `hamming`.

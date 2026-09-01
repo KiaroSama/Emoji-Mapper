@@ -275,7 +275,24 @@ def _first_video_frame(path: Path) -> Image.Image:
 
 
 def _dhash(img: Image.Image, hash_size: int = 8) -> int:
-    """Difference hash: compare adjacent pixels of a (hash_size+1) x hash_size gray image."""
+    """Difference hash: compare adjacent pixels of a (hash_size+1) x hash_size gray image.
+
+    The image is premultiplied by its own alpha first. ``convert("L")`` on an
+    RGBA image DISCARDS alpha and reads the raw RGB, and RGB underneath a fully
+    transparent pixel is undefined -- encoders rewrite it freely, which is the
+    same trap ``_premultiplied`` and owner rule 1's ``exact=True`` exist for.
+    Without this, one logo measured 10 bits away from Telegram's re-encode of
+    ITSELF (tolerance 6) while its alpha channel was byte-identical and its
+    premultiplied colour delta was 1.23; premultiplied, the distance is 0 and a
+    genuinely different image still measures 23.
+
+    A fully opaque image is unaffected: premultiplying by 255 is the identity.
+    """
+    if img.mode == "RGBA":
+        r, g, b, a = img.split()
+        img = Image.merge("RGBA", (ImageChops.multiply(r, a),
+                                   ImageChops.multiply(g, a),
+                                   ImageChops.multiply(b, a), a))
     gray = img.convert("L").resize((hash_size + 1, hash_size), Image.LANCZOS)
     px = gray.tobytes()  # one byte per pixel for mode "L"
     row_stride = hash_size + 1
