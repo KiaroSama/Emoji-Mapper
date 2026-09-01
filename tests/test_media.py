@@ -96,6 +96,50 @@ class TestStaticHashing(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_rgb_under_transparent_pixels_cannot_move_the_hash(self):
+        """convert("L") on RGBA DISCARDS alpha and reads the raw RGB.
+
+        RGB beneath a fully transparent pixel is undefined and every encoder
+        rewrites it -- the same trap owner rule 1 meets with ``exact=True``.
+        A real logo measured 10 dHash bits from Telegram's re-encode of ITSELF
+        (tolerance 6) with a byte-identical alpha channel, which failed the
+        upload check and stranded a published sticker.
+        """
+        shape = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for x in range(10, 40):
+            for y in range(8, 52):
+                shape.putpixel((x, y), (30, 160, 220, 255))
+        # Same picture, different garbage under the invisible pixels.
+        other = shape.copy()
+        for x in range(64):
+            for y in range(64):
+                if other.getpixel((x, y))[3] == 0:
+                    other.putpixel((x, y), ((x * 7) % 256, (y * 13) % 256, 90, 0))
+
+        self.assertEqual(identity._dhash(shape), identity._dhash(other),
+                         "invisible pixels must not reach the hash")
+
+    def test_the_hash_still_separates_genuinely_different_art(self):
+        """The alpha fix must not flatten everything into one hash."""
+        a = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for x in range(4, 30):
+            for y in range(4, 60):
+                a.putpixel((x, y), (200, 40, 40, 255))
+        b = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for x in range(34, 60):
+            for y in range(4, 60):
+                b.putpixel((x, y), (200, 40, 40, 255))
+        self.assertGreater(identity.hamming(identity._dhash(a), identity._dhash(b)), 6,
+                           "a bar on the left and a bar on the right are not the same")
+
+    def test_an_opaque_image_hashes_exactly_as_before(self):
+        """Premultiplying by 255 is the identity, so nothing opaque moved."""
+        im = Image.new("RGB", (40, 40), (10, 90, 200))
+        for x in range(0, 40, 3):
+            for y in range(40):
+                im.putpixel((x, y), (240, 240, 10))
+        self.assertEqual(identity._dhash(im), identity._dhash(im.convert("RGBA")))
+
     def test_identical_content_same_key(self):
         # Same pixels saved twice (different files) -> identical content key.
         a = _make_png(self.tmp / "a.png", (200, 30, 30, 255))
