@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - the repaintable warning claimed the art is black; measured, it often is not
+
+`--repaintable` told the operator that a repaintable emoji's "stored art is
+usually flat black" and "will look black" in one of our packs. That was
+generalised from one sample, Telegram's built-in `TopicIcons`. Two ids from
+`vector_icons_by_fStikBot` tripped the gate on a real ingest and were skipped on
+that advice; rendering their Lottie showed a **blue** verified badge (mean RGB
+62,162,222) and a **purple/pink** star (133,102,240). The flag does not mean the
+art has no colour, it means the client OVERRIDES whatever colour is there - so
+the source pack is precisely where you cannot see what you would be publishing.
+
+The gate now says that, and says to look first. Nothing about its behaviour
+changed: `ask` with no terminal still skips, because skipping is still the
+reversible half.
+
+Re-verified against the live Bot API while correcting this: `needs_repainting`
+appears in exactly two places, the `Sticker` object (read-only) and
+`createNewStickerSet` (whole-set, at creation, custom-emoji sets only). It is
+**not** a field of `InputSticker`, so `addStickerToSet` cannot carry it, and no
+setter exists. It is not a property of the file either - it cannot be injected
+into an asset before upload.
+
+
 ### Fixed - dHash read RGB from underneath transparent pixels
 
 `_dhash` called `img.convert("L")` on an RGBA image. **That conversion discards
