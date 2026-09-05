@@ -938,6 +938,20 @@ do nothing.
 
 The header's **↑ Top / ↓ Bottom** buttons jump to the ends of the grid.
 
+**Dragging shows where the card lands, because the card goes there.** While you
+drag, the tile is moved into the slot it would take and drawn translucent with
+a dashed outline; releasing just adopts that order. Which half of a tile the
+pointer is on decides before-or-after, so the last slot of a row is reachable.
+Let go outside the grid, or press Escape, and the card returns to where it
+started. It can never be carried ahead of the brand logo.
+
+**Nothing animates while you scroll.** Every card holds frame 0 from the first
+scroll event until 180 ms after it settles, and only cards actually in the
+viewport animate at rest. A pack of a hundred is mostly animated previews of
+30-45 frames each, and scrolling is the one moment that decoding buys nothing.
+Switching to another tab freezes them all. `Animation: Off` is still the
+lightest the grid can be — nothing decodes at all.
+
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One

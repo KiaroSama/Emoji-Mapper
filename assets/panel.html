@@ -137,8 +137,11 @@ body.bg-gray  .thumb{background:#808a96}
   background:var(--fmtBg,#06121b);border:1px solid var(--fmtLine,#1c3a44);
   border-radius:6px;padding:2px 5px}
 .card{cursor:grab}
-.card.drag{opacity:.5;cursor:grabbing}
-.card.over{border-color:#f472b6;box-shadow:inset 0 0 0 2px #f472b688}
+/* The dragged card is MOVED to its prospective slot while you drag, so this
+   translucent tile IS the preview of where it lands. There is no separate
+   highlight to keep in sync with it -- and nothing for the preview and the
+   drop to disagree about, which is what the old index arithmetic did. */
+.card.drag{opacity:.35;cursor:grabbing;outline:2px dashed var(--neon2);outline-offset:-4px}
 /* The logo has no format, but it still gets an inner frame -- amber, to
    match its badge, so the two frames mean the same thing on every card. */
 /* A pack boundary. Deliberately NOT .card: the drop handler resolves its
@@ -155,9 +158,13 @@ body.bg-gray  .thumb{background:#808a96}
 .card.logo:hover{border-color:#fbbf24}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
 .card.logo .lbl{color:#fbbf24}
+/* The whole card toggles, but the tick is what reads as the switch -- and the
+   card is cursor:grab because it is also the drag handle, which the tick would
+   otherwise inherit and offer a hand for a click. */
 .tick{position:absolute;top:0;right:0;width:22px;height:22px;border-radius:7px;
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
-  border:1px solid var(--line);background:#0b1422;color:#06202a}
+  border:1px solid var(--line);background:#0b1422;color:#06202a;cursor:pointer}
+.tick:hover{filter:brightness(1.25)}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
@@ -418,7 +425,8 @@ const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
     const want = live ? t.dataset.anim : t.dataset.still;
     if (want && t.getAttribute('src') !== want) t.src = want;
   }
-}, {root: null, rootMargin: '120px'}) : null;
+}, {root: null, rootMargin: '0px'}) : null;   // see freezeAll(): a band
+// beyond the viewport animated a row nobody was looking at, above AND below.
 
 // play() rejects when the element is detached or the browser refuses; that is
 // not an error worth surfacing, but it MUST be caught or it becomes an
@@ -442,21 +450,40 @@ function observeAnimated(){
   }
 }
 
+/** Hold every card on frame 0. Costs no request: the still is the same
+ *  immutable-cached URL the card was built with. */
+function freezeAll(){
+  grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, false));
+  grid.querySelectorAll('img[data-anim]').forEach(img => {
+    if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still;
+  });
+}
+
 // Switching to another tab or window used to change nothing: 147 animated
 // WebPs and every visible video kept decoding for a page nobody was looking at.
 // The browser throttles rAF for a hidden tab but not image animation, so this
 // has to be explicit. Coming back re-evaluates visibility rather than assuming
 // what was on screen before.
 document.addEventListener('visibilitychange', ()=>{
-  if (document.hidden) {
-    grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, false));
-    grid.querySelectorAll('img[data-anim]').forEach(img => {
-      if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still;
-    });
-  } else {
-    applyAnim();
-  }
+  if (document.hidden) freezeAll(); else applyAnim();
 });
+
+// Scrolling is when this grid feels heavy, and it is the one moment the work is
+// pure waste: the compositor is already busy, every visible animated WebP keeps
+// decoding, and the frames go past too fast to see. This pack shows 76 animated
+// previews (median 36 frames each) and 15 videos, so a scroll through it was
+// decoding several thousand frames nobody could read.
+//
+// Freeze on the first scroll event, thaw once it settles. The debounce is long
+// enough that a flick does not thaw mid-flight and short enough that stopping
+// feels immediate.
+let scrollThaw = null;
+addEventListener('scroll', ()=>{
+  if(!ANIM_ON || RM) return;
+  if(scrollThaw === null) freezeAll();
+  else clearTimeout(scrollThaw);
+  scrollThaw = setTimeout(()=>{ scrollThaw = null; applyAnim(); }, 180);
+}, {passive:true});
 
 // Master switch. Off = every card holds frame 0 and nothing decodes at all,
 // which is the lightest the grid can be; the observer stops swapping so it
@@ -730,58 +757,76 @@ setInterval(async ()=>{
 addEventListener('beforeunload', e=>{
   if(pendingOrder){ e.preventDefault(); e.returnValue = ''; }
 });
+// The dragged card is moved through the grid as you drag, so what you see IS
+// where it will land. The old scheme highlighted the card under the pointer and
+// then computed an index at drop time, which was both invisible until too late
+// and OFF BY ONE in one direction: `splice(from,1)` then `splice(to,0)` with a
+// `to` measured BEFORE the removal drops everything after `from` one slot, so
+// dragging DOWN landed the card one past the tile you aimed at while dragging
+// UP landed it exactly there. Two behaviours from one gesture.
+//
+// Now the DOM is the model during a drag and the drop only commits it. They
+// cannot disagree, because there is only one of them.
+let dragHome;                 // sibling the card came from, to undo a cancel
+
 grid.addEventListener('dragstart',e=>{
   const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
   const it = ITEMS.find(x=>x.key===card.dataset.key);
   if(!it || it.isLogo){ e.preventDefault(); return; }   // logo is fixed first
-  dragKey=card.dataset.key; card.classList.add('drag');
+  dragKey=card.dataset.key;
+  dragHome=card.nextSibling;
+  card.classList.add('drag');
   e.dataTransfer.effectAllowed='move';
   try{e.dataTransfer.setData('text/plain',dragKey);}catch(_){}
 });
-let overCard = null;
+
 grid.addEventListener('dragover',e=>{
   if(dragKey===null) return;
   e.preventDefault(); e.dataTransfer.dropEffect='move';
   const card=e.target.closest('.card');
-  if(card === overCard) return;
-  if(overCard) overCard.classList.remove('over');
-  const it = card && ITEMS.find(x=>x.key===card.dataset.key);
-  overCard = (it && !it.isLogo) ? card : null;
-  if(overCard) overCard.classList.add('over');
+  if(!card || card.dataset.key===dragKey) return;
+  const it = ITEMS.find(x=>x.key===card.dataset.key);
+  if(!it || it.isLogo) return;             // never ahead of the brand logo
+  const node = cards.get(dragKey);
+  if(!node) return;
+  // Which SIDE of the tile the pointer is on decides before-or-after, so the
+  // last slot of a row is reachable and the gesture reads the way it looks.
+  const r = card.getBoundingClientRect();
+  const ref = (e.clientX > r.left + r.width/2) ? card.nextSibling : card;
+  if(ref !== node && ref !== node.nextSibling) grid.insertBefore(node, ref);
 });
+
 grid.addEventListener('drop',e=>{
   if(dragKey===null) return;
   e.preventDefault();
   stopEdgeScroll();
-  // A drop that is not ON a card is not an instruction. This used to fall back
-  // to ITEMS.length-1, so releasing over a grid gap -- and the gaps between
-  // cards are a large target -- silently threw the emoji to the very end.
-  const card=e.target.closest('.card');
-  if(!card){ endDrag(); return; }
-  const from = ITEMS.findIndex(x=>x.key===dragKey);
-  let to = ITEMS.findIndex(x=>x.key===card.dataset.key);
-  const firstMovable = ITEMS.findIndex(x=>!x.isLogo);
-  if(to < firstMovable) to = firstMovable;            // never before the logo
-  if(from>=0 && to>=0 && to!==from){
-    remember();
-    const [moved]=ITEMS.splice(from,1);
-    ITEMS.splice(to,0,moved);
-    // Move the one node instead of rebuilding every card (which would drop
-    // every loaded thumbnail and lottie player and re-request them all).
-    const node = cards.get(moved.key);
-    const ref = cards.get(ITEMS[to+1] ? ITEMS[to+1].key : null);
-    grid.insertBefore(node, ref || null);
-    renumber();
-    saveOrder();
-  }
-  endDrag();
+  commitDrag();
+  endDrag(true);
 });
-grid.addEventListener('dragend',endDrag);
+grid.addEventListener('dragend',()=>endDrag(false));
 
-function endDrag(){
-  dragKey=null;
+/** Adopt the DOM order the drag preview left behind. */
+function commitDrag(){
+  const at = new Map();
+  grid.querySelectorAll('.card').forEach((c,i)=>at.set(c.dataset.key, i));
+  const next = ITEMS.slice().sort((a,b)=>(at.get(a.key) ?? 0) - (at.get(b.key) ?? 0));
+  if(next.every((x,i)=>x===ITEMS[i])) return;      // released where it started
+  remember();
+  ITEMS.length = 0; ITEMS.push(...next);
+  renumber();
+  saveOrder();
+}
+
+function endDrag(committed){
+  // A cancelled drag has to put the node back: ITEMS never changed, so leaving
+  // the preview where it is would make the grid disagree with what saves.
+  if(!committed && dragKey !== null){
+    const node = cards.get(dragKey);
+    if(node) grid.insertBefore(node,
+      (dragHome && dragHome.parentNode === grid) ? dragHome : null);
+  }
+  dragKey=null; dragHome=undefined;
   stopEdgeScroll();
-  if(overCard){ overCard.classList.remove('over'); overCard=null; }
   grid.querySelectorAll('.card.drag').forEach(c=>c.classList.remove('drag'));
 }
 
@@ -827,12 +872,12 @@ document.addEventListener('dragover',e=>{
   e.preventDefault();
   edgeScroll(e.clientY);
 });
-document.addEventListener('dragend',endDrag);
+document.addEventListener('dragend',()=>endDrag(false));
 // A drop anywhere outside the grid: cancel rather than reorder by guesswork.
 document.addEventListener('drop',e=>{
   if(dragKey===null) return;
   e.preventDefault();
-  if(!e.target.closest('#grid')) endDrag();
+  if(!e.target.closest('#grid')) endDrag(false);
 });
 
 // Plain document scrolling, NOT scrollIntoView. scrollIntoView aligns the
