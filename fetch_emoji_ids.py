@@ -132,9 +132,11 @@ def _media_path(data_dir: Path, fmt: str, content_key: str, ext: str | None = No
 
 
 def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
-              tmp_dir: Path, repaintable: str = "ask") -> dict[str, int]:
+              tmp_dir: Path, repaintable: str = "ask",
+              tint: tuple[int, int, int] | None = None) -> dict[str, int]:
     """Resolve + download the given unique IDs; return run counts."""
-    counts = {"new": 0, "dedup": 0, "failed": 0, "missing": 0, "repaintable": 0}
+    counts = {"new": 0, "dedup": 0, "failed": 0, "missing": 0, "repaintable": 0,
+              "repainted": 0}
 
     # 1) Resolve every ID to its Sticker object (batches of 200).
     resolved: dict[str, dict] = {}
@@ -157,10 +159,14 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
     #    arrive black in a pack that lacks the flag, and that is only cheap to
     #    undo while they are still out of the catalog.
     repainted = [cid for cid, st in resolved.items() if media.is_repaintable(st)]
-    if repainted and not repaintable_gate(repainted, mode=repaintable):
+    # --tint IS the answer to the gate: it bakes the colour the client would
+    # have applied, so there is nothing left to warn about.
+    if repainted and tint is None and not repaintable_gate(repainted, mode=repaintable):
         for cid in repainted:
             resolved.pop(cid)
         counts["repaintable"] = len(repainted)
+    if repainted and tint is not None:
+        log.info("repainting %d emoji to #%02X%02X%02X", len(repainted), *tint)
 
     # 3) Download + ingest each remaining sticker.
     for n, (cid, st) in enumerate(resolved.items(), 1):
@@ -170,7 +176,11 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
         # Keep provenance: the source premium id lives in keywords for traceability.
         keywords = [f"premium-id:{cid}"]
 
-        known = cat.seen_file_unique_id(fuid) if fuid else None
+        recolour = tint is not None and cid in repainted
+        # A recoloured emoji is a DIFFERENT picture, so the source-sticker
+        # shortcut must not merge it into the untinted row it came from.
+        # content_key still dedups a repeated run: same art, same key.
+        known = cat.seen_file_unique_id(fuid) if fuid and not recolour else None
         if known:
             cat.merge_labels(known, emojis=emojis, keywords=keywords,
                              source="bot-inventory", file_unique_id=fuid)
@@ -185,6 +195,9 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
             # byte-identical clone of the source sticker. Before the
             # fingerprint, so the key describes what is actually on disk.
             media.reencode_in_place(tmp, fmt)
+            if recolour and media.repaint_in_place(tmp, fmt, tint):
+                keywords.append(f"tint:#{tint[0]:02X}{tint[1]:02X}{tint[2]:02X}")
+                counts["repainted"] += 1
             # One decode for both keys -- see identity.fingerprint.
             key, phash = identity.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
@@ -227,9 +240,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="Hamming distance for near-duplicate merging "
                          "(-1 disables, else 0..16).")
     ap.add_argument("--repaintable", choices=REPAINT_MODES, default="ask",
-                    help="Emoji Telegram repaints (they arrive black in our "
-                         "packs): ask (default), skip, or keep.")
+                    help="Emoji Telegram repaints: ask (default), skip, keep. "
+                         "The client overrides their colour, so the source pack "
+                         "does not show the art you would publish.")
+    ap.add_argument("--tint", metavar="#RRGGBB",
+                    help="Bake the repaint ourselves: flatten every REPAINTABLE "
+                         "emoji to this colour, keeping its shape. Answers "
+                         "--repaintable, since there is then nothing to warn "
+                         "about. e.g. --tint #FFFFFF for a dark theme.")
     args = ap.parse_args(argv)
+
+    tint = None
+    if args.tint:
+        try:
+            tint = media.parse_tint(args.tint)
+        except media.MediaError as exc:
+            log.error("%s", exc)
+            return 2
 
     if not args.ids_file and not args.inline_ids:
         log.error("provide --ids-file and/or --id")
@@ -258,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
-        counts = fetch_ids(tg, cat, ids, data_dir, tmp_dir, args.repaintable)
+        counts = fetch_ids(tg, cat, ids, data_dir, tmp_dir, args.repaintable, tint)
         stats = cat.stats()
 
     # Clean the scratch download directory (keep the catalog + media).
@@ -268,12 +295,15 @@ def main(argv: list[str] | None = None) -> int:
         tmp_dir.rmdir()
 
     log.info("TOTAL: unique_ids=%d new=%d dedup=%d failed=%d missing=%d "
-             "repaintable_skipped=%d", len(ids), counts["new"], counts["dedup"],
-             counts["failed"], counts["missing"], counts["repaintable"])
+             "repaintable_skipped=%d repainted=%d", len(ids), counts["new"],
+             counts["dedup"], counts["failed"], counts["missing"],
+             counts["repaintable"], counts["repainted"])
     print(f"Done. unique_ids={len(ids)} new={counts['new']} dedup={counts['dedup']} "
           f"failed={counts['failed']} missing={counts['missing']}"
           + (f" repaintable_skipped={counts['repaintable']}"
-             if counts["repaintable"] else ""), flush=True)
+             if counts["repaintable"] else "")
+          + (f" repainted={counts['repainted']}"
+             if counts["repainted"] else ""), flush=True)
     for fmt, s in sorted(stats.items()):
         print(f"  catalog {fmt}: {s['total']} total ({s['pending']} pending upload)", flush=True)
     # A requested id Telegram could not resolve is a real miss, not a success.
