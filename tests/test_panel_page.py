@@ -26,21 +26,54 @@ class DragAndDropOrdering(unittest.TestCase):
     to call. What these assert is exactly what regressed.
     """
 
-    def test_a_drop_outside_a_card_never_reorders(self):
-        """It used to fall back to the LAST position.
+    def test_the_drop_commits_the_preview_instead_of_recomputing_it(self):
+        """Two bugs came from drop-time index arithmetic; there is none now.
 
-        `to = card ? indexOf(card) : ITEMS.length-1` meant releasing over a grid
-        gap -- and the gaps between cards are a large target -- silently threw
-        the emoji to the end of the pack.
+        It once fell back to `ITEMS.length-1` when the release was not on a
+        card, so a drop in a grid gap threw the emoji to the end. Then it used
+        `splice(from,1)` followed by `splice(to,0)` with a `to` measured BEFORE
+        the removal -- which lands the card one slot past the tile you aimed at
+        when dragging DOWN and exactly on it when dragging UP.
+
+        The drag now moves the real node, so the grid IS the proposal and the
+        drop only adopts it. No index is derived at drop time, so neither bug
+        has anywhere to live.
         """
         page = p.PAGE
         self.assertNotIn("card ? ITEMS.findIndex(x=>x.key===card.dataset.key) "
                          ": ITEMS.length-1", page)
-        drop = page[page.index("addEventListener('drop'"):]
-        guard = drop.index("if(!card){ endDrag(); return; }")
-        seek = drop.index("ITEMS.findIndex(x=>x.key===card.dataset.key)")
-        self.assertLess(guard, seek,
-                        "the no-card guard must run before any index is chosen")
+        drop = page[page.index("grid.addEventListener('drop'"):]
+        drop = drop[:drop.index("grid.addEventListener('dragend'")]
+        self.assertIn("commitDrag()", drop)
+        for arithmetic in ("findIndex", "splice", "ITEMS.length"):
+            self.assertNotIn(arithmetic, drop,
+                             f"the drop handler must not reach for {arithmetic}")
+        commit = page[page.index("function commitDrag(){"):]
+        commit = commit[:commit.index("function endDrag")]
+        self.assertIn("grid.querySelectorAll('.card')", commit,
+                      "the committed order must be read off the DOM preview")
+
+    def test_a_cancelled_drag_puts_the_card_back(self):
+        """The preview mutates the DOM, so ITEMS and the grid disagree until
+        the drop. An escape or a drop outside must undo it, or the page shows
+        an order that is not the one it would save."""
+        page = p.PAGE
+        start = page[page.index("grid.addEventListener('dragstart'"):]
+        self.assertIn("dragHome=card.nextSibling", start[:start.index("});")])
+        end = page[page.index("function endDrag(committed){"):]
+        end = end[:end.index("// --- Auto-scroll")]
+        self.assertIn("if(!committed", end)
+        self.assertIn("grid.insertBefore(node", end)
+
+    def test_the_preview_side_decides_before_or_after(self):
+        """Without it the last slot of a row is unreachable: every hover would
+        mean "before this card"."""
+        page = p.PAGE
+        over = page[page.index("grid.addEventListener('dragover'"):]
+        over = over[:over.index("grid.addEventListener('drop'")]
+        self.assertIn("getBoundingClientRect", over)
+        self.assertIn("r.left + r.width/2", over)
+        self.assertIn("card.nextSibling", over)
 
     def test_dragging_to_an_edge_scrolls_the_page(self):
         """Without this the drag is trapped in the current viewport.
@@ -154,7 +187,7 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         for label, marker, mutation in (
             ("select all / invert", "function setAll(fn){", "it.included = fn(it)"),
             ("card toggle", "if(i < 0 || ITEMS[i].isLogo) return;", "ITEMS[i].included=!ITEMS[i].included"),
-            ("drag reorder", "if(from>=0 && to>=0 && to!==from){", "ITEMS.splice(from,1)"),
+            ("drag reorder", "function commitDrag(){", "ITEMS.length = 0"),
         ):
             block = page[page.index(marker):]
             block = block[:block.index(mutation)]
@@ -197,12 +230,12 @@ class UndoRedoAndFormatColours(unittest.TestCase):
             rule = page[page.index(f".card.fmt-{fmt}"):]
             colours[fmt] = rule[rule.index("--fmt:") + 6:rule.index(";")]
         self.assertEqual(len(set(colours.values())), 3, colours)
-        # The drag-over highlight must not be any format's colour, or a drop
-        # target reads as "this card is animated".
-        over = page[page.index(".card.over{"):]
-        over = over[:over.index("}")]
+        # The drag affordance must not be any format's colour, or the card
+        # being carried reads as "this one is animated".
+        drag = page[page.index(".card.drag{"):]
+        drag = drag[:drag.index("}")]
         for fmt, c in colours.items():
-            self.assertNotIn(c, over, f"drop target uses the {fmt} colour")
+            self.assertNotIn(c, drag, f"the dragged card uses the {fmt} colour")
 
     def test_two_frames_answer_two_questions(self):
         """Inner frame = the format, outer frame = whether it is selected.
@@ -225,6 +258,28 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         card_on = page[page.index(".card.on{"):]
         self.assertIn("#22c55e", card_on[:card_on.index("}")],
                       "the selected frame must be green")
+
+    def test_the_tick_offers_a_click_not_a_grab(self):
+        """The card is cursor:grab because it is the drag handle, and cursor
+        inherits -- so the switch you are aiming at offered a hand for a drag."""
+        page = p.PAGE
+        tick = page[page.index(".tick{"):]
+        self.assertIn("cursor:pointer", tick[:tick.index("}")])
+
+    def test_scrolling_holds_every_card_on_frame_zero(self):
+        """The one moment the decoding is pure waste: the frames go past too
+        fast to read while the compositor is already busy."""
+        page = p.PAGE
+        self.assertIn("function freezeAll(){", page)
+        scroll = page[page.index("addEventListener('scroll'"):]
+        scroll = scroll[:scroll.index("}, {passive:true});")]
+        self.assertIn("freezeAll()", scroll)
+        self.assertIn("applyAnim()", scroll, "it must thaw again when you stop")
+        self.assertIn("passive", page[page.index("addEventListener('scroll'"):][:400],
+                      "a non-passive scroll listener blocks the scroll it watches")
+        # The band beyond the viewport animated a row nobody was looking at.
+        self.assertIn("rootMargin: '0px'", page)
+        self.assertNotIn("rootMargin: '120px'", page)
 
     def test_the_animation_control_is_a_switch(self):
         """On/off state shown by the control itself, not only by its label."""

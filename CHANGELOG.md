@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - three things wrong with the curate grid
+
+**Drag and drop moved the card somewhere you had not aimed.** The drop handler
+did `splice(from,1)` and then `splice(to,0,…)` with a `to` measured BEFORE the
+removal. Removing the card shifts everything after it down one, so dragging
+DOWN landed it one slot past the tile you released on while dragging UP landed
+it exactly there - one gesture, two behaviours - and nothing showed where it
+would go until it was already there.
+
+The card is now MOVED as you drag, so the grid is the proposal: it sits
+translucent (`opacity:.35`, dashed outline) in the slot it would take, and the
+drop only adopts the DOM order. Preview and result cannot disagree because
+there is only one of them, and no index is computed at drop time. Which half of
+a tile the pointer is on decides before-or-after, so the last slot of a row is
+reachable. A cancelled drag puts the node back, because `ITEMS` never changed
+and a grid showing an order it would not save is worse than no preview at all.
+
+**The tick offered a hand for a drag.** `cursor` inherits and the card is
+`cursor:grab` because it is also the drag handle, so the one control that reads
+as a switch showed the wrong affordance. `.tick` is `cursor:pointer` now.
+
+**Animation stayed heavy.** This grid holds 76 animated previews (median 36
+frames each) and 15 videos. Two changes, both about not decoding what nobody is
+looking at: the IntersectionObserver band drops from `120px` to `0px` (it was
+animating roughly a row above and below the viewport), and everything holds
+frame 0 while you scroll, thawing 180 ms after it settles. Scrolling is the one
+moment the work is pure waste - the compositor is already busy and the frames
+go past too fast to read. The still is the same immutable-cached URL, so
+freezing and thawing costs no request.
+
 ### Fixed - the grid drew no boundary between two published packs
 
 `--with-pack 2 --with-pack 5` returned both packs as one unbroken run of 192
