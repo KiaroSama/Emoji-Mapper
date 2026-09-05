@@ -95,10 +95,11 @@ def repaintable_gate(labels: list[str], *, mode: str = "ask",
         shown += f", ... (+{n - _REPAINT_SAMPLE} more)"
     warning = "\n".join((
         f"WARNING: {n} of these emoji are REPAINTABLE: {shown}",
-        "  Telegram paints them with the text/accent colour, so the stored art"
-        " is usually flat black.",
-        "  Published into a pack without that flag they will look black, and"
-        " the flag cannot be added to an existing set.",
+        "  Telegram OVERRIDES their colours with the text/accent colour, so"
+        " what you see in the source pack is not the stored art.",
+        "  In a pack without the flag they show that stored art instead --"
+        " sometimes flat black, sometimes full colour, so LOOK before deciding.",
+        "  The flag is set once per set at creation; it cannot be added later.",
     ))
     log.warning("%d repaintable emoji in this batch: %s", n, shown)
     print(warning, file=sys.stderr)

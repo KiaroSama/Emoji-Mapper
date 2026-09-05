@@ -567,7 +567,7 @@ run continues without recreating existing sets. Use `--dry-run` first.
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--phash-threshold` | `-1` (off) | Hamming distance for near-dup merging; `-1` keeps look-alikes. |
 | `--limit <n>` | `0` (all) | Max new items per pack. |
-| `--repaintable` | `ask` | What to do with emoji Telegram REPAINTS (`ask`/`skip`/`keep`). They carry no colour of their own, so they arrive black in our packs; with no terminal to answer, `ask` skips them. |
+| `--repaintable` | `ask` | What to do with emoji Telegram REPAINTS (`ask`/`skip`/`keep`). The client overrides their colours, so the source pack does not show the stored art: in one of ours they render that art instead — sometimes flat black, sometimes full colour. Look before you decide; with no terminal to answer, `ask` skips them. |
 
 Re-running is cheap: stickers whose `file_unique_id` was already ingested are
 skipped without downloading; identical media collapse to one catalog row.
@@ -589,7 +589,7 @@ is fetched at most once, resolved via `getCustomEmojiStickers` (batched,
 | `--token-env` | `GENERAL_BOT_TOKEN` | Bot token env var (any bot can resolve IDs). |
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--phash-threshold` | `-1` (off) | Near-dup merge threshold; `-1` keeps look-alikes. |
-| `--repaintable` | `ask` | What to do with emoji Telegram REPAINTS (`ask`/`skip`/`keep`). They carry no colour of their own, so they arrive black in our packs; with no terminal to answer, `ask` skips them. |
+| `--repaintable` | `ask` | What to do with emoji Telegram REPAINTS (`ask`/`skip`/`keep`). The client overrides their colours, so the source pack does not show the stored art: in one of ours they render that art instead — sometimes flat black, sometimes full colour. Look before you decide; with no terminal to answer, `ask` skips them. |
 
 Two levels of de-duplication protect you: **ID-level** (repeated IDs across
 files fetched once) and **content-level** (two different IDs pointing at the
