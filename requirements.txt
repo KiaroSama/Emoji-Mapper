@@ -13,7 +13,7 @@ Pillow>=12.3.0          # image decode / 100x100 fitting
 # no system cairo, no build toolchain, and it renders gradients (the previous
 # svglib/reportlab backend produced a blank image for those, and reportlab's
 # bundled renderPM C backend was removed upstream in reportlab 5.0).
-resvg-py>=0.4           # note: the import name is resvg_py
+resvg-py>=0.5.0           # note: the import name is resvg_py
 # Lottie -> animated WebP, for the curate panel's animated thumbnails. Bundles
 # rlottie (the same renderer Telegram's own clients use), so there is no system
 # library to install. Only panel.py imports it, and only through
