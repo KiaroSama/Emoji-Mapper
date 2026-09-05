@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - `--tint`, baking Telegram's repaint into the asset ourselves
+
+`needs_repainting` cannot be set on an existing pack - the Bot API exposes it on
+the `Sticker` object (read-only) and on `createNewStickerSet` (whole-set, at
+creation) and nowhere else, it is not a field of `InputSticker`, and it is not
+stored in the file. So the flag is out of reach. The *look* is not: a repainted
+sticker is just its silhouette filled with one colour, and we can do that.
+
+`fetch_emoji_ids.py --tint '#RRGGBB'` flattens every REPAINTABLE emoji in the
+batch to that colour and leaves everything else alone. It answers
+`--repaintable` on its own - once the repaint is baked there is nothing left to
+warn about - and records `tint:#RRGGBB` on the item beside its `premium-id:`,
+because a recoloured asset does not resemble its source and nothing else says
+why.
+
+`media.repaint_in_place()` does the work, next to `reencode_in_place()` and
+under the same rule: it runs BEFORE the fingerprint, so the content key
+describes what is on disk.
+
+- **animated** goes through the Lottie tree, not the raster - flattening frames
+  would throw the animation away. Solid fills, strokes and gradient stops are
+  all rewritten; gradient OFFSETS are kept, so the ramp's shape survives.
+- **static** fills through the original alpha. Anti-aliased edges survive, and
+  so do cut-outs: the tick inside a verified badge is a HOLE, not a dark shape,
+  which is why it still reads correctly against any background.
+- **video** is refused rather than silently passed through, since a no-op here
+  would publish untouched art under a name that claims otherwise.
+- The .tgs size cap is re-checked afterwards; over it, the original is kept.
+
 ### Fixed - the repaintable warning claimed the art is black; measured, it often is not
 
 `--repaintable` told the operator that a repaintable emoji's "stored art is
