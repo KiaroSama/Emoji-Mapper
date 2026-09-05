@@ -123,14 +123,20 @@ def copy_id_for(label: str) -> str:
     return m.group(1) if m else ""
 
 
-def packs_named(data_dir: Path, wanted: set[int]) -> set[str]:
-    """Set names for the given pack indices, across every published family.
+def packs_named(data_dir: Path, wanted: set[int]) -> dict[str, int]:
+    """``{set name: pack index}`` for the given indices, across every family.
 
     Read from the publishers' own state files: the index is theirs, and
     deriving a name from the base plus a number would guess at a convention
     the state file already records exactly.
+
+    The index travels WITH the name because the grid has to draw the boundary
+    between two already-published packs, and their real sizes (95 and 96, say)
+    have nothing to do with the per-set capacity the splits are otherwise
+    computed from. A dict is still a container of names, so every membership
+    test on it reads the same as before.
     """
-    names: set[str] = set()
+    names: dict[str, int] = {}
     for state in sorted(data_dir.glob("publish_*.json")):
         try:
             data = json.loads(state.read_text(encoding="utf-8"))
@@ -139,13 +145,13 @@ def packs_named(data_dir: Path, wanted: set[int]) -> set[str]:
             continue
         for rec in data.get("sets") or []:
             if rec.get("index") in wanted and rec.get("name"):
-                names.add(rec["name"])
+                names[rec["name"]] = int(rec["index"])
     return names
 
 
 def build_view(cat: Catalog, bot_username: str = "",
                show_published: bool = False,
-               keep_sets: set[str] | None = None) -> tuple[list[dict], dict, int]:
+               keep_sets: dict[str, int] | None = None) -> tuple[list[dict], dict, int]:
     """The cards to render, and where each one's file lives.
 
     An emoji already live in a pack is hidden by default: the grid is what the
@@ -180,6 +186,7 @@ def build_view(cat: Catalog, bot_username: str = "",
         cat.set_meta("order_seeded", "1")
     items = cat.all_items()  # saved manual/seeded order (by position)
     hidden = 0
+    pack_of: dict[str, int] = {}
     if not show_published:
         live = cat.published_keys()
         if keep_sets:
@@ -188,6 +195,7 @@ def build_view(cat: Catalog, bot_username: str = "",
             # recorded set name is genuinely unanswerable, so it stays hidden.
             where = cat.published_set_names()
             live = {k for k in live if where.get(k) not in keep_sets}
+            pack_of = {k: keep_sets[n] for k, n in where.items() if n in keep_sets}
         keep = [it for it in items if it.content_key not in live]
         hidden = len(items) - len(keep)
         items = keep
@@ -209,14 +217,20 @@ def build_view(cat: Catalog, bot_username: str = "",
     for it in items:
         label = (it.keywords[0] if it.keywords else
                  (it.emojis[0] if it.emojis else it.content_key[2:10]))
-        view.append({
+        card = {
             "key": it.content_key,
             "fmt": it.fmt,
             "label": label,
             "copyId": copy_id_for(label),
             "emoji": it.emojis[0] if it.emojis else "",
             "included": it.included,
-        })
+        }
+        # Only for an emoji that is ALREADY live somewhere: the grid then draws
+        # its boundaries from real membership instead of capacity arithmetic,
+        # which cannot find the seam between two packs of unequal size.
+        if (n := pack_of.get(it.content_key)) is not None:
+            card["pack"] = n
+        view.append(card)
         by_key[it.content_key] = Path(it.file_path)
     return view, by_key, hidden
 
@@ -659,7 +673,7 @@ def main() -> int:
 
     bot_username = _detect_bot_username()
 
-    keep_sets = packs_named(data_dir, set(args.with_pack)) if args.with_pack else set()
+    keep_sets = packs_named(data_dir, set(args.with_pack)) if args.with_pack else {}
     if args.with_pack and not keep_sets:
         # Silence here would look identical to "that pack holds nothing".
         log.error("no published pack matches %s in %s",
