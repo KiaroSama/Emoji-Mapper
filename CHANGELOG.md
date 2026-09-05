@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - the grid drew no boundary between two published packs
+
+`--with-pack 2 --with-pack 5` returned both packs as one unbroken run of 192
+cards. The splits were computed purely from capacity: count included items,
+start a new pack every `PER_SET - 1`. That is right for the pack being BUILT,
+where a flat candidate list really is sliced into equal packs. It cannot work
+for packs that already exist: pack 2 holds 95 and pack 5 holds 96, neither is
+199, so counting to capacity found no seam at all and `starts.length < 2`
+returned before drawing anything.
+
+An already-live emoji knows which pack it is in - `--with-pack` resolves that
+through the publishers' own state files - so `packs_named()` now returns
+`{name: index}` instead of just names, `build_view` tags each already-live card
+with `pack`, and `renumber()` splits on a CHANGE OF PACK whenever any card
+carries one. Capacity arithmetic still runs for a grid of pure candidates,
+which is the case it was written for.
+
+A candidate carries no pack, so a mixed grid groups them under "Not in a pack
+yet" rather than claiming they belong to the last one. A dict is still a
+container of names, so every membership test on `keep_sets` reads as before.
+
 ### Added - `--tint`, baking Telegram's repaint into the asset ourselves
 
 `needs_repainting` cannot be set on an existing pack - the Bot API exposes it on

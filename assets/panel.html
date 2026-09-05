@@ -324,7 +324,7 @@ function makeCard(it){
 // A pack boundary marker. Rebuilt from scratch on every renumber() and held
 // only in the DOM -- never in ITEMS, never in `cards`, never saved. That is
 // what keeps drag/drop, /api/order and /api/save completely unaware of it.
-function makeSep(pack, from, to){
+function makeSep(title, from, to){
   const box = el('div','packsep');
   const logo = ITEMS.find(x=>x.isLogo);
   if(logo){
@@ -333,7 +333,7 @@ function makeSep(pack, from, to){
     img.alt = '';
     box.appendChild(img);
   }
-  box.appendChild(el('span','', 'Pack ' + pack));
+  box.appendChild(el('span','', title));
   box.appendChild(el('span','n', to ? `#${from}–#${to}` : `from #${from}`));
   return box;
 }
@@ -354,16 +354,34 @@ function renumber(){
   const logo = ITEMS.find(x=>x.isLogo);
   const capacity = PER_SET - (logo ? 1 : 0);   // items that fit beside the logo
 
+  // An emoji already live in a pack knows WHICH pack (--with-pack sets it), and
+  // then membership decides the boundaries. Capacity arithmetic cannot: two
+  // published packs of 95 and 96 are neither of them PER_SET, so counting to
+  // capacity finds no seam at all and the grid draws none -- which is exactly
+  // how two packs came to look like one long list.
+  const byMembership = ITEMS.some(x => x.pack != null && x.included);
+
   // Pass 1: grid number per item, and where each pack begins.
-  const starts = [];                 // {index, gridNo}
-  let n = 0, inPack = 0;
+  const starts = [];                 // {index, gridNo, pack}
+  let n = 0, inPack = 0, cur;
   for(let i = 0; i < ITEMS.length; i++){
     const it = ITEMS[i];
     n++;
     if(!it.isLogo && it.included){
-      if(inPack === 0) starts.push({index: i, gridNo: n});
-      inPack++;
-      if(inPack >= capacity) inPack = 0;
+      if(byMembership){
+        // A run ends when the pack number changes. Candidates carry none, so
+        // they group into their own run -- which is the truth: they are not in
+        // a pack yet.
+        const pk = it.pack != null ? it.pack : null;
+        if(!starts.length || pk !== cur){
+          starts.push({index: i, gridNo: n, pack: pk});
+          cur = pk;
+        }
+      } else {
+        if(inPack === 0) starts.push({index: i, gridNo: n, pack: null});
+        inPack++;
+        if(inPack >= capacity) inPack = 0;
+      }
     }
     const card = cards.get(it.key);
     const pos = card && card.querySelector('.pos');
@@ -379,7 +397,11 @@ function renumber(){
     if(!card) continue;
     // Pack 1 opens at the head logo, which already sits above its first item.
     const anchor = (p === 0 && logo) ? cards.get(logo.key) || card : card;
-    grid.insertBefore(makeSep(p + 1, starts[p].gridNo, to), anchor);
+    const pk = starts[p].pack;
+    const title = pk != null ? 'Pack ' + pk
+                : byMembership ? 'Not in a pack yet'
+                : 'Pack ' + (p + 1);
+    grid.insertBefore(makeSep(title, starts[p].gridNo, to), anchor);
   }
 }
 
