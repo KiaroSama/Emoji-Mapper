@@ -729,3 +729,89 @@ def reencode_in_place(path: Path, fmt: str) -> bool:
         return False
     path.write_bytes(out)
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Baking Telegram's repaint ourselves
+# --------------------------------------------------------------------------- #
+def parse_tint(text: str) -> tuple[int, int, int]:
+    """``#RRGGBB`` / ``RRGGBB`` -> (r, g, b). Raises MediaError on anything else."""
+    s = text.strip().lstrip("#")
+    if len(s) != 6 or any(c not in "0123456789abcdefABCDEF" for c in s):
+        raise MediaError(f"tint must be #RRGGBB, got {text!r}")
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+
+def _tint_lottie(node, k: list[float]) -> None:
+    """Rewrite every solid colour and gradient stop in a Lottie tree, in place."""
+    if isinstance(node, dict):
+        colour = node.get("c")
+        if (isinstance(colour, dict) and isinstance(colour.get("k"), list)
+                and all(isinstance(v, (int, float)) for v in colour["k"])):
+            colour["k"] = k[:len(colour["k"])]
+        grad = node.get("g")
+        if isinstance(grad, dict) and isinstance(grad.get("k"), dict):
+            stops = grad["k"].get("k")
+            if isinstance(stops, list) and all(isinstance(v, (int, float)) for v in stops):
+                # [offset, r, g, b, offset, r, g, b, ...]; keep the offsets so the
+                # shape of the ramp survives, flatten only the colour.
+                for base in range(0, len(stops) - 3, 4):
+                    stops[base + 1:base + 4] = k[:3]
+        for value in node.values():
+            _tint_lottie(value, k)
+    elif isinstance(node, list):
+        for value in node:
+            _tint_lottie(value, k)
+
+
+def repaint_in_place(path: Path, fmt: str, rgb: tuple[int, int, int]) -> bool:
+    """Flatten ``path`` to one colour, keeping its shape. True when rewritten.
+
+    This is what a client does to a `needs_repainting` sticker: the artwork is
+    only a silhouette, the colour comes from the theme. We cannot ask for that
+    flag -- the Bot API exposes it on `Sticker` (read-only) and on
+    `createNewStickerSet` (whole-set, at creation) and nowhere else -- so for a
+    pack that already exists the only way to get the look is to bake it.
+
+    Animated goes through the Lottie tree rather than the raster, because
+    flattening frames would throw the animation away. Static fills through the
+    original alpha, so anti-aliased edges and cut-outs (the tick inside a
+    verified badge is a HOLE, not a dark shape) both survive.
+
+    Video is refused: there is no cheap colour-exact route, and a silent
+    no-op would publish the untouched art under a name that says otherwise.
+
+    Call this BEFORE fingerprinting -- like `reencode_in_place`, it moves the
+    bytes and the content key must describe what is on disk.
+    """
+    try:
+        if fmt == "animated":
+            data = _load_lottie(path)
+            _tint_lottie(data, [c / 255 for c in rgb] + [1])
+            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+            buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+                gz.write(raw)
+            out = buf.getvalue()
+            if len(out) > TGS_MAX_BYTES:
+                log.warning("repaint of %s would be %d bytes, over the %d cap; "
+                            "keeping the original", path.name, len(out), TGS_MAX_BYTES)
+                return False
+        elif fmt == "static":
+            with Image.open(path) as im:
+                rgba = im.convert("RGBA")
+            flat = Image.new("RGBA", rgba.size, (*rgb, 255))
+            flat.putalpha(rgba.getchannel("A"))
+            buf = io.BytesIO()
+            flat.save(buf, format="WEBP", lossless=True, quality=100,
+                      method=6, exact=True)
+            out = buf.getvalue()
+        else:
+            log.warning("repaint not supported for %s (%s)", path.name, fmt)
+            return False
+    except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
+        log.warning("repaint skipped for %s (%s): %s", path.name, fmt, exc)
+        return False
+
+    path.write_bytes(out)
+    return True

@@ -590,6 +590,7 @@ is fetched at most once, resolved via `getCustomEmojiStickers` (batched,
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--phash-threshold` | `-1` (off) | Near-dup merge threshold; `-1` keeps look-alikes. |
 | `--repaintable` | `ask` | What to do with emoji Telegram REPAINTS (`ask`/`skip`/`keep`). The client overrides their colours, so the source pack does not show the stored art: in one of ours they render that art instead — sometimes flat black, sometimes full colour. Look before you decide; with no terminal to answer, `ask` skips them. |
+| `--tint <#RRGGBB>` | *(off)* | Bake the repaint into the asset: flatten every REPAINTABLE emoji to this colour, keeping its silhouette — the same thing a client does, done by us because the flag itself cannot be set on an existing set. Answers `--repaintable`, so nothing is skipped. Animated goes through the Lottie so the animation survives; static fills through the alpha; video is refused. Recorded on the item as `tint:#RRGGBB`. |
 
 Two levels of de-duplication protect you: **ID-level** (repeated IDs across
 files fetched once) and **content-level** (two different IDs pointing at the

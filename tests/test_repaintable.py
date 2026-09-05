@@ -1,9 +1,10 @@
 """Emoji Telegram repaints must be flagged before they reach the catalog.
 
-A repaintable emoji carries no colour of its own: the client paints it with the
-text or accent colour, so the stored asset is typically flat black. Republished
-into one of our sets -- which are created without that flag, and the Bot API has
-no method to add it afterwards -- it arrives black.
+A repaintable emoji does not keep the colour you see: the client OVERRIDES it
+with the text or accent colour. Republished into one of our sets -- which are
+created without that flag, and the Bot API has no method to add it afterwards --
+it renders its STORED art instead, which may be flat black or may be full
+colour. The source pack is precisely where you cannot tell which.
 
 That is not hypothetical. `5354899958329784877` from Telegram's built-in
 `TopicIcons` was ingested, published into pack 2, reported as "why is it black?",
@@ -13,7 +14,9 @@ caught at ingest instead.
 
 from __future__ import annotations
 
+import gzip
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -231,6 +234,135 @@ class BothEntryPointsOfferTheSameChoice(unittest.TestCase):
             with self.subTest(mod=mod.__name__):
                 src = Path(mod.__file__).read_text(encoding="utf-8")
                 self.assertIn('choices=REPAINT_MODES, default="ask"', src)
+
+
+class TintParsing(unittest.TestCase):
+    """A bad colour must fail at the CLI, not halfway through a download."""
+
+    def test_it_accepts_both_spellings(self):
+        for text in ("#FF8800", "ff8800"):
+            with self.subTest(text=text):
+                self.assertEqual(media.parse_tint(text), (255, 136, 0))
+
+    def test_it_refuses_anything_else(self):
+        for text in ("white", "#FFF", "#GGGGGG", "#FF88000", ""):
+            with self.subTest(text=text):
+                with self.assertRaises(media.MediaError):
+                    media.parse_tint(text)
+
+
+def _tgs_bytes(doc: dict) -> bytes:
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+        gz.write(json.dumps(doc).encode("utf-8"))
+    return buf.getvalue()
+
+
+_LOTTIE = {
+    "v": "5.5", "fr": 30, "ip": 0, "op": 30, "w": 512, "h": 512,
+    "layers": [{"ty": 4, "ks": {}, "shapes": [{"ty": "gr", "it": [
+        {"ty": "fl", "c": {"a": 0, "k": [1.0, 0.0, 0.0, 1.0]}},
+        {"ty": "st", "c": {"a": 0, "k": [0.0, 1.0, 0.0, 1.0]}},
+        {"ty": "gf", "g": {"p": 2, "k": {"a": 0, "k": [
+            0.0, 0.0, 0.0, 1.0,
+            1.0, 1.0, 1.0, 0.0]}}},
+    ]}]}],
+}
+
+
+class BakingTheRepaintOurselves(unittest.TestCase):
+    """The flag cannot be set, but the look can be reproduced in the asset."""
+
+    TINT = (255, 255, 255)
+
+    def test_a_static_emoji_keeps_its_shape_and_loses_its_hue(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "s.png"
+            src.write_bytes(_png_bytes(3))
+            with Image.open(src) as im:
+                before = im.convert("RGBA").getchannel("A").tobytes()
+
+            self.assertTrue(media.repaint_in_place(src, "static", self.TINT))
+
+            with Image.open(src) as im:
+                after = im.convert("RGBA")
+            # The silhouette is the point: alpha must survive byte for byte.
+            self.assertEqual(after.getchannel("A").tobytes(), before)
+            visible = [p for p in after.get_flattened_data() if p[3] > 0]
+            self.assertTrue(visible)
+            self.assertEqual({p[:3] for p in visible}, {self.TINT})
+
+    def test_an_animated_emoji_is_recoloured_through_its_lottie(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "a.tgs"
+            src.write_bytes(_tgs_bytes(_LOTTIE))
+
+            self.assertTrue(media.repaint_in_place(src, "animated", self.TINT))
+
+            doc = json.loads(gzip.decompress(src.read_bytes()).decode("utf-8"))
+            items = doc["layers"][0]["shapes"][0]["it"]
+            # Fill AND stroke, because a mark drawn as an outline is still a mark.
+            self.assertEqual(items[0]["c"]["k"], [1.0, 1.0, 1.0, 1.0])
+            self.assertEqual(items[1]["c"]["k"], [1.0, 1.0, 1.0, 1.0])
+            # A gradient keeps its OFFSETS (0.0 and 1.0) and loses its colours,
+            # or the ramp collapses and the shape changes.
+            self.assertEqual(items[2]["g"]["k"]["k"],
+                             [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+            # Still a real animation, not a flattened frame.
+            self.assertEqual(doc["op"], 30)
+
+    def test_video_is_refused_rather_than_silently_skipped(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = Path(t) / "v.webm"
+            src.write_bytes(b"not really a webm")
+            before = src.read_bytes()
+            self.assertFalse(media.repaint_in_place(src, "video", self.TINT))
+            self.assertEqual(src.read_bytes(), before)
+
+
+class TintAnswersTheGate(unittest.TestCase):
+    """--tint fixes what the gate warns about, so it must not also skip."""
+
+    IDS = ["101", "102", "103"]
+
+    def _fetch(self, tg, data: Path, mode: str, tint):
+        tmp = data / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        with Catalog(data / "catalog.db") as cat:
+            with redirect_stderr(io.StringIO()):
+                counts = fetch_emoji_ids.fetch_ids(tg, cat, self.IDS, data, tmp,
+                                                   mode, tint)
+            rows = {i.content_key: i for i in cat.all_items()}                 if hasattr(cat, "all_items") else {}
+        return counts, rows
+
+    def test_a_tinted_run_ingests_what_skip_would_have_dropped(self):
+        with tempfile.TemporaryDirectory() as t:
+            tg = _IdsTG(marked=("102",))
+            counts, _ = self._fetch(tg, Path(t), "skip", (255, 255, 255))
+        self.assertEqual(counts["new"], 3, "the repaintable one must be kept")
+        self.assertEqual(counts["repaintable"], 0)
+        self.assertEqual(counts["repainted"], 1, "only the flagged one is tinted")
+
+    def test_without_a_tint_skip_still_drops_it(self):
+        with tempfile.TemporaryDirectory() as t:
+            tg = _IdsTG(marked=("102",))
+            counts, _ = self._fetch(tg, Path(t), "skip", None)
+        self.assertEqual(counts["new"], 2)
+        self.assertEqual(counts["repaintable"], 1)
+        self.assertEqual(counts["repainted"], 0)
+
+    def test_the_tint_is_recorded_on_the_item(self):
+        with tempfile.TemporaryDirectory() as t:
+            data = Path(t)
+            tg = _IdsTG(marked=("102",))
+            self._fetch(tg, data, "keep", (255, 0, 0))
+            with Catalog(data / "catalog.db") as cat:
+                marks = [kw for i in cat.pending() for kw in i.keywords
+                         if kw.startswith("tint:")]
+        # Provenance, same reason premium-id: is kept: a recoloured asset does
+        # not look like its source and nothing else records why.
+        self.assertEqual(marks, ["tint:#FF0000"])
 
 
 if __name__ == "__main__":
