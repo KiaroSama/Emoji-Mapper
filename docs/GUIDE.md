@@ -922,7 +922,16 @@ brand logo heads each pack and is labelled with the grid range it spans, so a
 selection that publishes as several packs shows where each one starts and ends.
 The splits count **included** items only — an unticked card never reaches
 Telegram, so it cannot push the next emoji into the following pack — which is
-why ticking recomputes them and not just the counter. The marker is deliberately
+why ticking recomputes them and not just the counter.
+
+**Where the boundary comes from depends on what the grid holds.** For
+candidates it is capacity arithmetic: a new pack every `--per-set` minus the
+logo's slot. For emoji that are ALREADY live it is real membership — each such
+card knows its pack index, and the marker goes wherever that number changes.
+Capacity cannot answer this case at all: two published packs of 95 and 96 are
+neither of them a full set, so counting to capacity finds no seam and the grid
+would show `--with-pack 2 --with-pack 5` as one unbroken run. In a mixed grid
+the candidates group under **Not in a pack yet**, because they are not in one. The marker is deliberately
 a `.packsep` and never a `.card`: the drop handler resolves its target with
 `closest('.card')`, and a marker that matched would swallow a drop and silently
 do nothing.

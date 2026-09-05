@@ -609,10 +609,32 @@ class OnePackCanBeUnhidden(unittest.TestCase):
 
     def test_an_index_resolves_through_the_publishers_own_state(self):
         """Not by rebuilding '<base><n>_by_<bot>' -- the file records it."""
-        self.assertEqual(p.packs_named(self.data, {2}), {"pk2_by_bot"})
+        self.assertEqual(p.packs_named(self.data, {2}), {"pk2_by_bot": 2})
         self.assertEqual(p.packs_named(self.data, {1, 2}),
-                         {"pk1_by_bot", "pk2_by_bot"})
-        self.assertEqual(p.packs_named(self.data, {9}), set(), "no such pack")
+                         {"pk1_by_bot": 1, "pk2_by_bot": 2})
+        self.assertEqual(p.packs_named(self.data, {9}), {}, "no such pack")
+
+    def test_the_index_travels_with_the_name_onto_the_card(self):
+        """The grid cannot find the seam between two packs without it.
+
+        Their real sizes are whatever they happen to be, so counting to the
+        per-set capacity never lands on the boundary.
+        """
+        with Catalog(self.db) as cat:
+            view, _bk, _h = p.build_view(cat, "", False,
+                                         p.packs_named(self.data, {1, 2}))
+        packs = {v["key"]: v.get("pack") for v in view if not v.get("isLogo")}
+        self.assertEqual(packs[f"s:item{0:030d}"], 1)
+        self.assertEqual(packs[f"s:item{2:030d}"], 2)
+        # A candidate is in no pack yet, and saying "1" would be a lie the grid
+        # would then draw a boundary from.
+        self.assertIsNone(packs[f"s:item{4:030d}"])
+
+    def test_an_unnamed_pack_tags_nothing(self):
+        """Without --with-pack there is no membership to draw, by design."""
+        with Catalog(self.db) as cat:
+            view, _bk, _h = p.build_view(cat, "", False, None)
+        self.assertEqual([v for v in view if v.get("pack") is not None], [])
 
     def test_only_the_named_pack_comes_back(self):
         keys, hidden = self._keys(p.packs_named(self.data, {2}))
