@@ -782,8 +782,17 @@ whole roster repeated in a `<script type="application/json">` block so a parser
 never has to scrape the markup.
 
 **The page is the curate panel, minus everything that mutates.** Same grid, card,
-per-format accent, position pill and checkerboard thumb — but no `draggable`, no
-tick, no selection, no save, no form field at all. It is a record; a control that
+per-format accent, position pill and checkerboard thumb, and the same view-only
+header: ↑ Top, ↓ Bottom, the four-way backdrop cycle and the animation switch.
+What is absent is everything that writes — no `draggable`, no tick, no selection,
+no save, no form field at all.
+
+**It gates its media like the panel.** Every animated card inlines a still as
+well as the animation, starts frozen, and only what is on screen is swapped to
+the moving version; scrolling freezes everything until 180 ms after it settles,
+and `Animation: Off` freezes it permanently. Thumbnails are 88px at 9fps — fps
+is the biggest lever on the inlined weight, and a roster is for telling emoji
+apart rather than admiring the motion. It is a record; a control that
 looks live but saves nothing is worse than none. Each card carries BOTH ids,
 labelled and separately click-to-copy: **this pack**, and **original pack** where
 the emoji came from someone else's — the one an external map may still point at. `packs/index.json` adds `by_current_id` and
