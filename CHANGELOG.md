@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - the roster page is the curate panel, minus everything that mutates
+
+`packs/<set>.html` now uses the panel's own visual language: the same grid, card,
+per-format accent (static cyan, animated violet, video green, logo amber),
+position pill, format badge and checkerboard thumbnail with its format outline.
+The two read as one product because they show the same objects.
+
+What it deliberately does NOT carry is every control that changes something -
+no `draggable`, no tick, no selection state, no save, no form field at all. It
+is a record, and a control that looks live but saves nothing is worse than no
+control. A test asserts that on the rendered markup rather than on the source,
+because the stylesheet comment names the very attributes the page leaves out.
+
+Each card now shows BOTH ids, labelled and individually click-to-copy: **this
+pack** and, where the emoji came from someone else's, **original pack**. The
+second one is what an external map may still be pointing at, so it is as
+load-bearing as ours and gets the same affordance.
+
+### Added - the glyph, in both grids
+
+Every card in the roster page AND in the curate panel now shows the glyph its
+sticker carries, under the artwork. Telegram never displays it - a custom emoji
+renders as its picture - so these two grids are the only place the label can be
+checked against the art it claims to describe, which is exactly how 21 wrong
+glyphs were found. A sticker with no glyph shows an em dash rather than a gap.
+
+Verified while adding it: across all 34 packs and 6587 emoji there is no row
+with a missing or non-numeric id, no gap in any pack's slot sequence, and no id
+appearing in two packs.
+
 ### Added - `packs/`, the roster of what is actually in every published pack
 
 `pack_manifest.py --refresh` writes, per live set, `packs/<set>.json` (machine),
