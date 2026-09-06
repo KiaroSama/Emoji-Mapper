@@ -779,12 +779,21 @@ Writes three files per set, named after it: `.json` to parse, `.md` to read, and
 `.html` to LOOK at — one self-contained page, every thumbnail inlined as a
 `data:` URI so animation plays with no player, no CDN and no network, and the
 whole roster repeated in a `<script type="application/json">` block so a parser
-never has to scrape the markup. `packs/index.json` adds `by_current_id` and
+never has to scrape the markup.
+
+**The page is the curate panel, minus everything that mutates.** Same grid, card,
+per-format accent, position pill and checkerboard thumb — but no `draggable`, no
+tick, no selection, no save, no form field at all. It is a record; a control that
+looks live but saves nothing is worse than none. Each card carries BOTH ids,
+labelled and separately click-to-copy: **this pack**, and **original pack** where
+the emoji came from someone else's — the one an external map may still point at. `packs/index.json` adds `by_current_id` and
 `by_source_id` over all 34 packs.
 
 Every row gives the emoji's `custom_emoji_id`, its `#` numbered **from 0** (the
-brand logo is emoji 0) beside the 1-based `slot` Telegram shows, its format and
-glyph, a name, and — when it came from someone else's pack — **the id it had
+brand logo is emoji 0) beside the 1-based `slot` Telegram shows, its format, the
+**glyph the sticker carries** (shown under the artwork in this page and in the
+curate panel — Telegram never displays it, so these two grids are the only place
+the label can be checked against the art), a name, and — when it came from someone else's pack — **the id it had
 there**. The coin family carries no brand logo (that bot is exempt), so its
 emoji 0 is a real coin and the page says so.
 

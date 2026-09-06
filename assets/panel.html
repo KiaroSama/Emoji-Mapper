@@ -167,7 +167,8 @@ body.bg-gray  .thumb{background:#808a96}
 .tick:hover{filter:brightness(1.25)}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
-.lbl{margin-top:9px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
+.glyph{font-size:20px;line-height:1.1;margin:6px 0 0;user-select:text}
+.lbl{margin-top:6px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
 .sub{font-size:10px;color:var(--muted);margin-top:2px}
 .pos{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;
   color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
@@ -304,6 +305,13 @@ function makeCard(it){
   if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
+  // The glyph the sticker carries. Telegram never shows it -- a custom emoji
+  // renders as its picture -- so this grid is the only place it can be checked
+  // against the art it is supposed to describe.
+  const gl = el('div','glyph', it.emoji || '—');
+  gl.title = it.emoji ? 'Glyph carried by this emoji: ' + it.emoji
+                      : 'This emoji carries no glyph';
+  card.appendChild(gl);
   const lbl = el('div','lbl', it.label || '');
   // copyId is decided server-side (panel.copy_id_for) so it is unit-tested.
   if(it.copyId){ lbl.classList.add('copyable'); lbl.dataset.copy = it.copyId;
