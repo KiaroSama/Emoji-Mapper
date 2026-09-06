@@ -767,6 +767,46 @@ set, so a reorder that left the record behind made the family unpublishable:
 `position N now holds a sticker this publisher cannot identify`. A report-only
 run writes nothing.
 
+### 12.5c `pack_manifest.py` — the roster of what is in every published pack
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--refresh` | — | Read the live sets and rewrite `packs/`. |
+| `--check` | — | Is `packs/` still current? Exit 3 if not. Touches no network. |
+| `--family` | `all` | `general` (the 5 packs) or `coins` (the 29 crypto packs). |
+
+Writes three files per set, named after it: `.json` to parse, `.md` to read, and
+`.html` to LOOK at — one self-contained page, every thumbnail inlined as a
+`data:` URI so animation plays with no player, no CDN and no network, and the
+whole roster repeated in a `<script type="application/json">` block so a parser
+never has to scrape the markup. `packs/index.json` adds `by_current_id` and
+`by_source_id` over all 34 packs.
+
+Every row gives the emoji's `custom_emoji_id`, its `#` numbered **from 0** (the
+brand logo is emoji 0) beside the 1-based `slot` Telegram shows, its format and
+glyph, a name, and — when it came from someone else's pack — **the id it had
+there**. The coin family carries no brand logo (that bot is exempt), so its
+emoji 0 is a real coin and the page says so.
+
+**The order and the ids are read from Telegram, never from the publisher state.**
+A live reorder or an in-place replace (which mints a NEW id) would leave a
+state-derived roster confidently wrong, and a roster that is quietly wrong is
+worse than none.
+
+Thumbnails are cached in `packs/.thumbs/<custom_emoji_id>.<ext>`, keyed on the
+id rather than the path because a replaced sticker gets a new id — exactly when
+its picture must be re-made. `packs/` is git-ignored: it is derived data, and one
+refresh rewrites ~79 MB.
+
+Coin artwork lives outside the repo; point `COIN_EMOJI_DIR` at it, or the coin
+pages come out without pictures (the data is unaffected).
+
+**`Pack-Roster-Check` keeps it honest.** A Stop hook runs `--check` and blocks
+the turn when the roster no longer matches its inputs — a new download, a
+replaced or recoloured sticker, a reorder, a coin remap. It blocks once per
+distinct input state, so declining cannot loop, and re-arms on the next change.
+Clear it with `--refresh`, and say in the reply that the roster was updated.
+
 ### 12.6 `panel.py` — curate web panel
 
 | Flag | Default | Meaning |
