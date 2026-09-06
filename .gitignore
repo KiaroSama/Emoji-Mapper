@@ -135,3 +135,10 @@ launch_test.txt
 node_modules/
 worker/.wrangler/
 .dev.vars
+
+# packs/ is the local catalogue of every published pack -- the id and position of
+# every emoji, plus a self-contained HTML page per pack with the artwork inlined.
+# LOCAL-ONLY by owner decision: it is regenerated from Telegram by
+# `pack_manifest.py --refresh`, so it is derived data, and a refresh rewrites
+# ~79 MB of pages and thumbnails that would otherwise land in the history.
+/packs/
