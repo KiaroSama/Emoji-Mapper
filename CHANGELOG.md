@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - `packs/`, the roster of what is actually in every published pack
+
+`pack_manifest.py --refresh` writes, per live set, `packs/<set>.json` (machine),
+`packs/<set>.md` (human) and `packs/<set>.html` (a self-contained page showing
+every emoji, animation included), plus `packs/index.json` and `packs/README.md`
+over all 34 packs - the 5 general ones and the 29 crypto ones.
+
+Each row carries the emoji's `custom_emoji_id`, its position numbered from 0
+(so the brand logo is emoji 0) alongside the 1-based slot Telegram shows, its
+format and glyph, a name, and - for anything taken from someone else's pack -
+the id it had THERE. `index.json` also carries two flat lookups, `by_current_id`
+and `by_source_id`, so "which of ours replaced that one" is one dereference.
+
+**The order and the ids come from Telegram, never from the state file.** A pack
+can be reordered live, and replacing a sticker mints a NEW id; a roster rebuilt
+from the recorded plan would drift silently, which is the exact failure this
+file exists to prevent.
+
+Two details that were wrong in the older `collection/manifests` and are right
+here: the brand logo now has its id (it has no catalog row, so anything walking
+the catalog cannot name it - the live set can), and the "emoji 0 is the logo"
+note is suppressed for the coin family, whose bot is exempt from the logo.
+
+`packs/` is git-ignored: it is derived from Telegram on demand, and one refresh
+rewrites ~79 MB of pages and cached thumbnails.
+
+### Added - `Pack-Roster-Check`, a Stop gate that keeps the roster honest
+
+A roster is only worth having if it is never stale, so this blocks the turn when
+`packs/` stops describing its inputs - a new download, a replaced or recoloured
+sticker, a reorder, a coin remap. The staleness test lives in ONE place,
+`pack_manifest.py --check` (four stat calls and a small JSON read, no network),
+so the hook and the tool cannot disagree about what stale means.
+
+It honours `stop_hook_active`, blocks once per distinct input state so declining
+to refresh cannot loop, re-arms the moment anything changes again, and fails
+OPEN when the interpreter is missing or the check times out - a gate that blocks
+on its own broken dependency is unclearable.
+
 ### Fixed - three things wrong with the curate grid
 
 **Drag and drop moved the card somewhere you had not aimed.** The drop handler
