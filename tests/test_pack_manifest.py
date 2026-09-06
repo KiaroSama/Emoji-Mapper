@@ -171,6 +171,31 @@ class ThePageCarriesTheDataToo(unittest.TestCase):
                          "Save selection", "contenteditable"):
             self.assertNotIn(mutating, body, f"the roster page must not offer {mutating}")
 
+    def test_the_view_only_controls_survive_the_read_only_stripping(self):
+        """Stripping "everything that mutates" once took these with it.
+
+        Top/Bottom, the backdrop cycle and the animation switch change no data;
+        they are how a grid of a thousand emoji is read at all, and the backdrop
+        is what makes a black or a white emoji visible.
+        """
+        doc = pm.build_pack(_FakeTG([_sticker("111")]),
+                            {"name": "s", "index": 1, "logo": True}, "general", {}, set())
+        with tempfile.TemporaryDirectory() as tmp:
+            page = pack_gallery.render(doc, lambda _e: None, Path(tmp) / "t")
+        for control in ('id="top"', 'id="bot"', 'id="bg"', 'id="anim"'):
+            self.assertIn(control, page, f"the roster page needs {control}")
+        self.assertIn("bg-checker", page, "and the backdrop it starts on")
+
+    def test_an_animated_card_starts_frozen(self):
+        """The page inlines both frames' worth of data, so the ONLY thing
+        stopping 150 simultaneous decodes is that the card starts on its still
+        and the observer opts it in."""
+        page_src = Path("pack_gallery.py").read_text(encoding="utf-8")
+        self.assertIn('data-still="{still}"', page_src)
+        self.assertIn("src=\"{still}\"", page_src, "an animated card must START on the still")
+        self.assertIn("freezeAll()", page_src)
+        self.assertIn("visibilitychange", page_src, "a hidden tab must stop decoding too")
+
     def test_the_zero_note_matches_the_family(self):
         gen = pm._zero_note({"family": "general"})
         coin = pm._zero_note({"family": "coins"})

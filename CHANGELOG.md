@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - the roster page keeps the panel's view-only controls, and gates its media
+
+Stripping "everything that mutates" from the roster page took the header
+controls with it. Top, Bottom, the backdrop cycle and the animation switch
+change no data - they are how you SEE a grid of a thousand emoji, and the
+backdrop in particular is what makes a black or a white emoji visible at all.
+They are back, in the panel's own markup. Everything that writes is still
+absent: no drag, no tick, no selection, no save, no form field.
+
+The page also gates its media the way the panel does, which is the real answer
+to "heavy": every animated card now inlines BOTH a still and the animation,
+starts frozen, and only what is on screen is swapped to the moving version.
+Scrolling freezes everything until 180 ms after it settles, a hidden tab
+freezes everything, and `Animation: Off` freezes everything permanently. Before
+this the page decoded 156 animations at once on load.
+
+Thumbnails also dropped from 96px/12fps to 88px/9fps: a roster is for telling
+emoji apart, not for admiring the motion, and fps is the single biggest lever on
+the inlined weight. The largest page went from 10.3 MB to 7.4 MB.
+
+**A misdiagnosis worth recording.** The gating measured as never starting an
+animation, and the first explanation - that `content-visibility: auto` stops a
+child from producing IntersectionObserver records - was wrong. The test browser
+reported `visibilityState: "hidden"` with `innerHeight: 0`, where nothing
+intersects anything and no animation *should* start. The observer now watches
+the card rather than the image, which is defensible on its own terms, but the
+freeze half is the only half that environment can prove.
+
 ### Changed - the roster page is the curate panel, minus everything that mutates
 
 `packs/<set>.html` now uses the panel's own visual language: the same grid, card,
