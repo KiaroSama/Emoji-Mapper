@@ -140,6 +140,37 @@ class ThePageCarriesTheDataToo(unittest.TestCase):
             self.assertIsNone(pack_gallery.thumb_uri("1", Path(tmp) / "nope.png",
                                                      "static", Path(tmp)))
 
+    def test_both_ids_are_copyable_and_the_glyph_is_shown(self):
+        """The owner asked for all three: the current id, the id it had in its
+        original pack, and the glyph -- which Telegram never displays, so this
+        grid is the only place it can be checked against the art."""
+        doc = pm.build_pack(
+            _FakeTG([_sticker("111", "✅"), _sticker("222", "🔒")]),
+            {"name": "s", "index": 1, "logo": True}, "general",
+            {"222": {"name": "lock", "source_emoji_ids": ["999"]}}, set())
+        with tempfile.TemporaryDirectory() as tmp:
+            page = pack_gallery.render(doc, lambda _e: None, Path(tmp) / "t")
+        self.assertIn('data-id="222"', page, "our id must be copyable")
+        self.assertIn('data-id="999"', page, "the original-pack id must be too")
+        self.assertIn('class="glyph"', page)
+        self.assertIn("🔒", page, "the glyph itself has to reach the page")
+
+    def test_the_page_offers_nothing_that_changes_anything(self):
+        """It mirrors the curate panel on purpose, so the read-only half has to
+        be provable: a control that looks live but saves nothing is worse than
+        no control."""
+        doc = pm.build_pack(_FakeTG([_sticker("111")]),
+                            {"name": "s", "index": 1, "logo": True}, "general", {}, set())
+        with tempfile.TemporaryDirectory() as tmp:
+            page = pack_gallery.render(doc, lambda _e: None, Path(tmp) / "t")
+        # The MARKUP, not the stylesheet: the CSS comment names the very
+        # attributes this page leaves out, and matching prose would fail on a
+        # page that is in fact correct.
+        body = page.split("</style>", 1)[1]
+        for mutating in ("draggable", "/api/save", "/api/order", "class=\"tick\"",
+                         "Save selection", "contenteditable"):
+            self.assertNotIn(mutating, body, f"the roster page must not offer {mutating}")
+
     def test_the_zero_note_matches_the_family(self):
         gen = pm._zero_note({"family": "general"})
         coin = pm._zero_note({"family": "coins"})
