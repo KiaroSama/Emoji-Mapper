@@ -87,6 +87,60 @@ class TheRosterDescribesTheLiveSet(unittest.TestCase):
         self.assertEqual(prov["2"], ["eth"])
 
 
+class TheRosterRemembersRetiredIds(unittest.TestCase):
+    """`publications` is keyed (base, content_key), so a replace OVERWRITES the
+    id it had. The roster is the only place the dead id can survive, and a dead
+    id is exactly what a stale bot inventory still points at."""
+
+    def _doc(self, cid, prior=None):
+        return pm.build_pack(_FakeTG([_sticker("logo"), _sticker(cid)]),
+                             {"name": "s", "index": 1, "logo": True}, "general",
+                             {cid: {"content_key": "k", "name": "lock",
+                                    "source_emoji_ids": ["999"]}}, set(), prior)
+
+    def test_a_changed_id_pushes_the_old_one_into_the_history(self):
+        first = self._doc("111")
+        prior = {e["history_key"]: {"id": e["custom_emoji_id"],
+                                    "history": e["previous_custom_emoji_ids"]}
+                 for e in first["emoji"]}
+        second = self._doc("222", prior)
+        row = second["emoji"][1]
+        # All three the owner asked for, and in that order.
+        self.assertEqual(row["source_emoji_ids"], ["999"], "the original pack")
+        self.assertEqual(row["previous_custom_emoji_ids"], ["111"], "ours, retired")
+        self.assertEqual(row["custom_emoji_id"], "222", "ours, now")
+
+    def test_an_unchanged_id_invents_no_history(self):
+        """A reorder keeps the id (setStickerPositionInSet does not mint one),
+        so a roster that logged a change on every refresh would be noise."""
+        prior = {"ck:k": {"id": "111", "history": []}}
+        self.assertEqual(self._doc("111", prior)["emoji"][1]["previous_custom_emoji_ids"], [])
+
+    def test_the_trail_keeps_growing_and_never_repeats(self):
+        prior = {"ck:k": {"id": "222", "history": ["111"]}}
+        self.assertEqual(self._doc("333", prior)["emoji"][1]["previous_custom_emoji_ids"],
+                         ["111", "222"])
+        again = {"ck:k": {"id": "333", "history": ["111", "222"]}}
+        self.assertEqual(self._doc("333", again)["emoji"][1]["previous_custom_emoji_ids"],
+                         ["111", "222"])
+
+    def test_history_follows_the_emoji_not_the_id_or_the_slot(self):
+        """Keyed by content_key on purpose: a replace changes the id and a
+        reorder changes the slot, so either as the key would lose the trail at
+        the exact moment it starts to matter."""
+        doc = self._doc("111")
+        self.assertEqual(doc["emoji"][1]["history_key"], "ck:k")
+        self.assertTrue(doc["emoji"][0]["history_key"].startswith("logo:"),
+                        "the logo has no catalog row, so it is keyed by its set")
+
+    def test_the_page_shows_the_retired_id_and_lets_it_be_copied(self):
+        doc = self._doc("222", {"ck:k": {"id": "111", "history": []}})
+        with tempfile.TemporaryDirectory() as tmp:
+            page = pack_gallery.render(doc, lambda _e: None, Path(tmp) / "t")
+        self.assertIn('data-id="111"', page, "the retired id must be copyable too")
+        self.assertIn("this pack, before", page)
+
+
 class StalenessIsNotOptimistic(unittest.TestCase):
     """The hook is a GATE, so a wrong 'fresh' is the expensive answer."""
 

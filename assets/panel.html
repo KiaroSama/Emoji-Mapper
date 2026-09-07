@@ -382,21 +382,27 @@ function renumber(){
   for(let i = 0; i < ITEMS.length; i++){
     const it = ITEMS[i];
     n++;
-    if(!it.isLogo && it.included){
-      if(byMembership){
-        // A run ends when the pack number changes. Candidates carry none, so
-        // they group into their own run -- which is the truth: they are not in
-        // a pack yet.
+    // The logo IS emoji 0 of its pack, so it OPENS that pack's run. Excluding
+    // it here put pack 5's marker one card below its own logo, which read as
+    // the logo belonging to the pack above it.
+    if(byMembership){
+      if(it.included){
+        // A run ends when the pack number changes. A candidate carries no
+        // pack, and it used to open a run of its own -- so every emoji
+        // dragged INTO a pack split that pack in two and left a full-width
+        // "Not in a pack yet" marker plus the empty rest of its row behind
+        // it. `cur` is deliberately left alone here: a candidate continues
+        // the run it was dropped into, which is also where it will publish.
         const pk = it.pack != null ? it.pack : null;
-        if(!starts.length || pk !== cur){
+        if(pk !== null && (!starts.length || pk !== cur)){
           starts.push({index: i, gridNo: n, pack: pk});
           cur = pk;
         }
-      } else {
-        if(inPack === 0) starts.push({index: i, gridNo: n, pack: null});
-        inPack++;
-        if(inPack >= capacity) inPack = 0;
       }
+    } else if(!it.isLogo && it.included){
+      if(inPack === 0) starts.push({index: i, gridNo: n, pack: null});
+      inPack++;
+      if(inPack >= capacity) inPack = 0;
     }
     const card = cards.get(it.key);
     const pos = card && card.querySelector('.pos');
@@ -413,9 +419,9 @@ function renumber(){
     // Pack 1 opens at the head logo, which already sits above its first item.
     const anchor = (p === 0 && logo) ? cards.get(logo.key) || card : card;
     const pk = starts[p].pack;
-    const title = pk != null ? 'Pack ' + pk
-                : byMembership ? 'Not in a pack yet'
-                : 'Pack ' + (p + 1);
+    // No marker for candidates any more: only a real pack starts a run, so
+    // `pk` is null only in the capacity-counted mode below.
+    const title = pk != null ? 'Pack ' + pk : 'Pack ' + (p + 1);
     grid.insertBefore(makeSep(title, starts[p].gridNo, to), anchor);
   }
 }
@@ -631,7 +637,7 @@ function applySnapshot(snap){
   const pos = new Map(snap.order.map((k,i)=>[k,i]));
   const inc = new Set(snap.included);
   for(const it of ITEMS) if(!it.isLogo) it.included = inc.has(it.key);
-  ITEMS.sort((a,b)=>(a.isLogo?-1:b.isLogo?1:pos.get(a.key)-pos.get(b.key)));
+  ITEMS.sort((a,b)=>pos.get(a.key)-pos.get(b.key));
   // Move the existing nodes rather than rebuilding: appending a node that is
   // already in the document RELOCATES it, so every loaded thumbnail, preview
   // and playing video survives. A render() here would re-request all 200.
