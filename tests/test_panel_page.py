@@ -417,6 +417,34 @@ class PackSplitsAndJumpButtons(unittest.TestCase):
         # capacity leaves a slot for the logo, exactly as build_collection does.
         self.assertIn("PER_SET - (logo ? 1 : 0)", body)
 
+    def test_a_candidate_no_longer_splits_the_pack_it_was_dropped_into(self):
+        """Dragging one emoji into a pack used to open a "Not in a pack yet"
+        run: a full-width marker plus the empty rest of its row, for every
+        single card moved. The owner arranges by dropping candidates into a
+        pack, so that made the grid unusable exactly when it was being used.
+        """
+        # The JS string literal, not the prose: the comment explaining why
+        # the marker is gone names it, and matching that would fail on a
+        # page that is in fact correct.
+        self.assertNotIn("'Not in a pack yet'", p.PAGE)
+        body = p.PAGE[p.PAGE.index("function renumber("):]
+        body = body[:body.index("Pass 2: one marker")]
+        # A null pack leaves `cur` alone, so the run it was dropped into
+        # continues -- which is also the pack it will publish into.
+        self.assertIn("pk !== null && (!starts.length || pk !== cur)", body)
+
+    def test_the_logo_opens_its_own_packs_run(self):
+        """The logo IS emoji 0 of its pack. While it was excluded from run
+        detection the marker landed one card below it, so pack 5's logo drew
+        above pack 5's header and read as part of the pack before it."""
+        body = p.PAGE[p.PAGE.index("function renumber("):]
+        body = body[:body.index("Pass 2: one marker")]
+        i_mem = body.index("if(byMembership){")
+        i_cap = body.index("} else if(!it.isLogo && it.included){")
+        self.assertLess(i_mem, i_cap, "membership mode must not filter logos out")
+        self.assertNotIn("isLogo", body[i_mem:i_cap],
+                         "a logo has to be able to start its pack's run")
+
     def test_selection_changes_recompute_the_splits(self):
         """Both inclusion paths must renumber, not just update the counter.
 

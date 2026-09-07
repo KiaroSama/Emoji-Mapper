@@ -793,10 +793,20 @@ the moving version; scrolling freezes everything until 180 ms after it settles,
 and `Animation: Off` freezes it permanently. Thumbnails are 88px at 9fps — fps
 is the biggest lever on the inlined weight, and a roster is for telling emoji
 apart rather than admiring the motion. It is a record; a control that
-looks live but saves nothing is worse than none. Each card carries BOTH ids,
-labelled and separately click-to-copy: **this pack**, and **original pack** where
-the emoji came from someone else's — the one an external map may still point at. `packs/index.json` adds `by_current_id` and
-`by_source_id` over all 34 packs.
+looks live but saves nothing is worse than none. Each card carries all THREE ids,
+labelled and separately click-to-copy: **this pack**, **original pack** where
+the emoji came from someone else's, and **this pack, before** — every id the
+emoji held in OUR packs earlier, oldest first. Only a replace mints a new
+`custom_emoji_id` (`setStickerPositionInSet` and `setStickerEmojiList` leave it
+alone), and the retired one is exactly what an external map still points at, so
+it is kept rather than overwritten. The catalog cannot supply it: `publications`
+is keyed `(base, content_key)`, so a replace overwrites the old id and it is
+gone. The roster is therefore its own archive — each `--refresh` reads the
+previous roster and carries the trail forward, keyed by `history_key`
+(`ck:<content_key>`, `logo:<set>`, or `coin:<tickers>`) so the history survives
+both a new id and a move to another pack. `packs/index.json` adds
+`by_current_id`, `by_source_id` and `by_previous_id` (a retired id → the id that
+took its place) over all 34 packs, plus an `id_changes` count.
 
 Every row gives the emoji's `custom_emoji_id`, its `#` numbered **from 0** (the
 brand logo is emoji 0) beside the 1-based `slot` Telegram shows, its format, the
@@ -964,6 +974,13 @@ those catalog rows are what dedup recognises a re-download by, what maps a
 source premium id to ours, and what `sync_order` reads to re-sort an already
 published set. `--all` brings them back.
 
+**Each shown pack draws its own brand logo.** Those packs already carry it as
+their emoji 0 — it went up when the pack was created — and the logo card opens
+that pack's run, so the marker sits above it. One card for the whole grid put
+the logo on whichever pack was shown first and left the others looking as though
+they had none. Without `--with-pack` the single "auto-added on publish" preview
+is unchanged: there the logo is not live yet.
+
 **`--with-pack N` is the narrow version of `--all`.** It un-hides one published
 set so a half-full pack can be arranged beside the new candidates going into
 it — `panel.py --with-pack 5` shows pack 5's emoji and the unpublished ones
@@ -988,8 +1005,14 @@ logo's slot. For emoji that are ALREADY live it is real membership — each such
 card knows its pack index, and the marker goes wherever that number changes.
 Capacity cannot answer this case at all: two published packs of 95 and 96 are
 neither of them a full set, so counting to capacity finds no seam and the grid
-would show `--with-pack 2 --with-pack 5` as one unbroken run. In a mixed grid
-the candidates group under **Not in a pack yet**, because they are not in one. The marker is deliberately
+would show `--with-pack 2 --with-pack 5` as one unbroken run.
+
+A candidate gets no marker of its own. It used to open a "Not in a pack yet"
+run, so every emoji dragged INTO a pack split that pack in two and left a
+full-width marker plus the empty rest of its row behind it — and arranging IS
+dropping candidates into a pack, so the grid broke exactly while it was being
+used. A candidate now continues the run it was dropped into, which is also the
+pack it will publish into. The marker is deliberately
 a `.packsep` and never a `.card`: the drop handler resolves its target with
 `closest('.card')`, and a marker that matched would swallow a drop and silently
 do nothing.

@@ -204,7 +204,8 @@ def build_view(cat: Catalog, bot_username: str = "",
     by_key: dict[str, Path] = {}
 
     logo_path = Path(BRAND_LOGO_DEFAULT)
-    if bot_username.lower() in BRAND_LOGO_BOTS and logo_path.is_file():
+    branded = bot_username.lower() in BRAND_LOGO_BOTS and logo_path.is_file()
+    if branded and not keep_sets:
         # Preview-only: shows where the brand logo will be inserted on publish.
         # It is NOT part of the catalog, is never counted in the totals, is not
         # clickable/toggleable, and is never sent to /api/save.
@@ -232,6 +233,27 @@ def build_view(cat: Catalog, bot_username: str = "",
             card["pack"] = n
         view.append(card)
         by_key[it.content_key] = Path(it.file_path)
+
+    if branded and keep_sets:
+        # Every one of these packs ALREADY carries the brand logo as its
+        # emoji 0 -- it went up when the pack was created. The single card
+        # above sits at the top of the GRID, so with more than one pack on
+        # screen it lands on whichever is shown first and leaves the others
+        # looking like they never got one; pack 5 was accused of exactly
+        # that. One card at the head of each pack's run is what is live.
+        out, seen = [], set()
+        for card in view:
+            n = card.get("pack")
+            if n is not None and n not in seen:
+                seen.add(n)
+                key = f"__logo_pack_{n}__"
+                out.append({"key": key, "fmt": "static",
+                            "label": f"Brand logo (live in pack {n})",
+                            "emoji": "", "included": True, "isLogo": True,
+                            "pack": n})
+                by_key[key] = logo_path
+            out.append(card)
+        view = out
     return view, by_key, hidden
 
 
@@ -555,7 +577,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
                     self._send(400, b'{"error":"order must be a list of keys"}')
                     return
-                keys = [k for k in raw if k != LOGO_KEY]
+                keys = [k for k in raw if not k.startswith("__")]
                 with lock:
                     # Under the lock for the same reason as /api/save, and
                     # because this is check-then-act: validating against a

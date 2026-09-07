@@ -95,7 +95,8 @@ def general_provenance(live_ids: set[str]) -> dict[str, dict]:
     db.row_factory = sqlite3.Row
     try:
         rows = db.execute(
-            "SELECT p.custom_emoji_id AS cid, i.keywords, i.emojis, i.format "
+            "SELECT p.custom_emoji_id AS cid, p.content_key AS ck, "
+            "i.keywords, i.emojis, i.format "
             "FROM publications p JOIN items i ON i.content_key = p.content_key").fetchall()
     finally:
         db.close()
@@ -104,6 +105,7 @@ def general_provenance(live_ids: set[str]) -> dict[str, dict]:
         srcs = [k.split(":", 1)[1] for k in kws if k.startswith("premium-id:")]
         labels = [k for k in kws if not k.startswith("premium-id:")]
         out[str(r["cid"])] = {
+            "content_key": r["ck"],
             "name": ", ".join(labels) or None,
             "source_emoji_ids": [s for s in srcs if s not in live_ids],
         }
@@ -127,6 +129,41 @@ def coin_provenance() -> dict[str, list[str]]:
     for ticker, cid in pairs.items():
         out[str(cid)].append(ticker)
     return {k: sorted(v) for k, v in out.items()}
+
+
+def previous_ids() -> dict[str, dict]:
+    """``history key -> {"id": last recorded id, "history": [older ids]}``.
+
+    The catalog cannot answer this. ``publications`` is keyed
+    (base, content_key), so a replaced sticker OVERWRITES the id it had and the
+    old value is gone the instant it changes -- which is exactly when someone
+    else's inventory is still pointing at it. So the roster archives itself:
+    every refresh reads the previous one and carries the trail forward.
+
+    Keyed by content_key, never by id or by position: an emoji that was replaced
+    (new id) or moved to another pack has to keep its own history, and both of
+    those change the two obvious keys.
+    """
+    out: dict[str, dict] = {}
+    if not OUT_DIR.is_dir():
+        return out
+    for f in OUT_DIR.glob("*.json"):
+        if f.name == "index.json":
+            continue
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("cannot read %s for id history: %s", f.name, exc)
+            continue
+        for e in doc.get("emoji", []):
+            key = e.get("history_key")
+            if not key:
+                continue
+            out[key] = {
+                "id": str(e.get("custom_emoji_id") or ""),
+                "history": [str(x) for x in e.get("previous_custom_emoji_ids") or []],
+            }
+    return out
 
 
 def coin_art_dir() -> Path | None:
@@ -156,13 +193,29 @@ def general_art() -> dict[str, Path]:
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
-def _row(pos: int, st: dict, *, is_logo: bool, name, sources) -> dict:
+def _row(pos: int, st: dict, *, is_logo: bool, name, sources,
+         key: str = "", prior: dict | None = None) -> dict:
     """One roster entry. ``index`` is 0-based (the owner counts the logo as 0),
-    ``slot`` is what Telegram shows."""
+    ``slot`` is what Telegram shows.
+
+    Three ids, deliberately: where it came from
+    (``source_emoji_ids``), what it is now (``custom_emoji_id``), and every id
+    it held in OUR packs before that (``previous_custom_emoji_ids``, oldest
+    first). Only a replace mints a new id -- ``setStickerPositionInSet`` and
+    ``setStickerEmojiList`` both leave it alone -- so a difference here is a
+    real replacement, and the dead id is what stale inventories still hold.
+    """
+    cid = str(st.get("custom_emoji_id") or "")
+    was_ours = list((prior or {}).get("history", []))
+    last = str((prior or {}).get("id", "") or "")
+    if last and last != cid and last not in was_ours:
+        was_ours.append(last)
     return {
         "index": pos,
         "slot": pos + 1,
-        "custom_emoji_id": str(st.get("custom_emoji_id") or ""),
+        "custom_emoji_id": cid,
+        "previous_custom_emoji_ids": was_ours,
+        "history_key": key,
         "glyph": st.get("emoji"),
         "format": media.telegram_sticker_format(st),
         "role": "brand-logo" if is_logo else "emoji",
@@ -171,7 +224,8 @@ def _row(pos: int, st: dict, *, is_logo: bool, name, sources) -> dict:
     }
 
 
-def build_pack(tg: Telegram, rec: dict, family: str, prov, live_ids: set[str]) -> dict:
+def build_pack(tg: Telegram, rec: dict, family: str, prov, live_ids: set[str],
+               prior: dict | None = None) -> dict:
     """Read one live set and shape it into a roster document."""
     name = rec["name"]
     stickers = tg.get_sticker_set(name)["stickers"]
@@ -180,15 +234,24 @@ def build_pack(tg: Telegram, rec: dict, family: str, prov, live_ids: set[str]) -
         cid = str(st.get("custom_emoji_id") or "")
         if family == "coins":
             tickers = prov.get(cid, [])
+            # The ticker survives a remap; the id is what the remap changes.
+            key = f"coin:{','.join(tickers)}" if tickers else f"id:{cid}"
             rows.append(_row(i, st, is_logo=False,
-                             name=", ".join(tickers) or None, sources=[]))
+                             name=", ".join(tickers) or None, sources=[],
+                             key=key, prior=(prior or {}).get(key)))
         else:
             info = prov.get(cid, {})
             # Slot 1 is the brand logo: no catalog row, so nothing to join.
             is_logo = i == 0 and bool(rec.get("logo", True)) and not info
+            ck = info.get("content_key")
+            # The logo is not in the catalog either, so it is keyed by the set
+            # it belongs to -- it is one per pack and always emoji 0.
+            key = (f"logo:{name}" if is_logo else
+                   f"ck:{ck}" if ck else f"id:{cid}")
             rows.append(_row(i, st, is_logo=is_logo,
                              name="brand logo" if is_logo else info.get("name"),
-                             sources=info.get("source_emoji_ids")))
+                             sources=info.get("source_emoji_ids"),
+                             key=key, prior=(prior or {}).get(key)))
     return {
         "set_name": name,
         "title": rec.get("title"),
@@ -224,15 +287,19 @@ def render_markdown(doc: dict) -> str:
         f"- **Captured** {doc['captured_utc']} (live from Telegram)",
         "",
         _zero_note(doc) + " *Was* is the id this emoji had in the pack it was "
-        "taken from, empty when we made it ourselves.",
+        "taken from, empty when we made it ourselves. *Ours before* lists the "
+        "ids it held in THIS estate earlier, oldest first: a replace mints a "
+        "new id, and the dead one is what stale inventories still point at.",
         "",
-        "| # | slot | custom_emoji_id | glyph | format | name | was |",
-        "|--:|-----:|-----------------|-------|--------|------|-----|",
+        "| # | slot | custom_emoji_id | ours before | glyph | format | name | was |",
+        "|--:|-----:|-----------------|-------------|-------|--------|------|-----|",
     ]
     for e in doc["emoji"]:
         was = ", ".join(e["source_emoji_ids"])
+        mine = " -> ".join(e.get("previous_custom_emoji_ids") or [])
         nm = (e["name"] or "").replace("|", "\\|")
         head.append(f"| {e['index']} | {e['slot']} | `{e['custom_emoji_id']}` | "
+                    f"{('`' + mine + '`') if mine else ''} | "
                     f"{e['glyph'] or ''} | {e['format']} | {nm} | "
                     f"{('`' + was + '`') if was else ''} |")
     return "\n".join(head) + "\n"
@@ -249,9 +316,10 @@ def render_index_markdown(index: dict) -> str:
         "parse, and `.html` to LOOK at -- one self-contained page with every "
         "thumbnail inline (animation included) and the same roster repeated in a "
         "`<script type=\"application/json\">` block. "
-        "`index.json` also carries two flat lookups: `by_current_id` (id -> where it "
-        "lives now) and `by_source_id` (the id an emoji had in its original pack -> "
-        "ours).",
+        "`index.json` also carries three flat lookups: `by_current_id` (id -> where it "
+        "lives now), `by_source_id` (the id an emoji had in its original pack -> "
+        "ours) and `by_previous_id` (an id of OURS that a replace retired -> the id "
+        "that took its place), so a stale reference resolves either way.",
         "",
         "| Pack | Set | Emoji | Link |",
         "|------|-----|------:|------|",
@@ -336,6 +404,8 @@ def refresh(family: str) -> int:
 
     gen_prov = general_provenance(live_ids)
     coin_prov = coin_provenance()
+    # Read BEFORE the first write: this is the roster we are about to replace.
+    prior = previous_ids()
     gen_art = general_art()
     coin_dir = coin_art_dir()
 
@@ -359,10 +429,10 @@ def refresh(family: str) -> int:
             return coin_dir / f"{e['name'].split(',')[0].strip()}.png"
         return coin_path
 
-    packs, by_current, by_source = [], {}, {}
+    packs, by_current, by_source, by_previous = [], {}, {}, {}
     for fam, rec, ss in fetched:
         prov = coin_prov if fam == "coins" else gen_prov
-        doc = build_pack(_Prefetched(ss), rec, fam, prov, live_ids)
+        doc = build_pack(_Prefetched(ss), rec, fam, prov, live_ids, prior)
         write_json_atomic(OUT_DIR / f"{doc['set_name']}.json", doc)
         (OUT_DIR / f"{doc['set_name']}.md").write_text(render_markdown(doc), encoding="utf-8")
         (OUT_DIR / f"{doc['set_name']}.html").write_text(
@@ -374,6 +444,8 @@ def refresh(family: str) -> int:
                                                 "index": e["index"]}
             for s in e["source_emoji_ids"]:
                 by_source[s] = e["custom_emoji_id"]
+            for s in e["previous_custom_emoji_ids"]:
+                by_previous[s] = e["custom_emoji_id"]
         log.info("%s: %d emoji", doc["set_name"], doc["count"])
 
     index = {
@@ -383,6 +455,8 @@ def refresh(family: str) -> int:
         "packs": packs,
         "by_current_id": by_current,
         "by_source_id": by_source,
+        "by_previous_id": by_previous,
+        "id_changes": len(by_previous),
         # Written LAST and read by --check: the roster is only as fresh as the
         # inputs it was built from.
         "inputs": fingerprint(),
@@ -391,6 +465,7 @@ def refresh(family: str) -> int:
     (OUT_DIR / "README.md").write_text(render_index_markdown(index), encoding="utf-8")
     print(f"packs/: {index['pack_count']} packs, {index['emoji_count']} emoji, "
           f"{len(by_source)} source-id mappings, "
+          f"{len(by_previous)} retired ids, "
           f"{len(list(THUMBS.glob('*'))) if THUMBS.is_dir() else 0} cached thumbnails")
     return EXIT_OK
 
