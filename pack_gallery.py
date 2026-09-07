@@ -161,6 +161,7 @@ h1{margin:0 0 4px;font-size:18px}
 .id:hover{border-color:var(--neon2);background:#0b1a26}
 .id.now{color:#c9d6e8}
 .id.was{color:#e0a86a}
+.id.mine{color:#8ab4f8}
 .id .k{display:block;font-size:9px;letter-spacing:.06em;text-transform:uppercase;
   color:var(--muted)}
 .card.copied .id.hit{border-color:#22c55e;color:#86efac}
@@ -322,6 +323,7 @@ def render(doc: dict, media_of, cache: Path) -> str:
         else:
             art, thumb_cls = "no preview", "thumb empty"
         was = ", ".join(e["source_emoji_ids"])
+        mine = ", ".join(e.get("previous_custom_emoji_ids") or [])
         logo = e["role"] == "brand-logo"
         ids = (f'<span class="id now" data-id="{html.escape(cid)}" '
                f'title="click to copy"><span class="k">this pack</span>'
@@ -332,13 +334,20 @@ def render(doc: dict, media_of, cache: Path) -> str:
             ids += (f'<span class="id was" data-id="{html.escape(was)}" '
                     f'title="click to copy"><span class="k">original pack</span>'
                     f'{html.escape(was)}</span>')
+        if mine:
+            # An id of OURS that a replace retired. Copyable because that is
+            # the exact string still sitting in some bot inventory.
+            ids += (f'<span class="id mine" data-id="{html.escape(mine)}" '
+                    f'title="click to copy"><span class="k">this pack, before</span>'
+                    f'{html.escape(mine)}</span>')
         cards.append(
             f'<div class="card {"logo" if logo else "fmt-" + html.escape(e["format"])}"'
             f' data-index="{e["index"]}" data-slot="{e["slot"]}"'
             f' data-custom-emoji-id="{html.escape(cid)}"'
             f' data-format="{html.escape(e["format"])}"'
             f' data-glyph="{html.escape(e["glyph"] or "")}"'
-            f' data-source-emoji-ids="{html.escape(was)}">'
+            f' data-source-emoji-ids="{html.escape(was)}"'
+            f' data-previous-custom-emoji-ids="{html.escape(mine)}">'
             f'<div class="hdr"><span class="pos">{e["index"]}</span>'
             f'<span class="badge">{"logo" if logo else html.escape(e["format"])}</span></div>'
             f'<div class="{thumb_cls}">{art}</div>'

@@ -630,6 +630,34 @@ class OnePackCanBeUnhidden(unittest.TestCase):
         # would then draw a boundary from.
         self.assertIsNone(packs[f"s:item{4:030d}"])
 
+    def test_every_shown_pack_gets_its_own_live_logo_card(self):
+        """One card for the whole grid put the logo on whichever pack happened
+        to be shown first and left the other looking like it had none -- pack 5
+        was accused of exactly that. Each of these packs really does carry the
+        logo as its emoji 0; it went up when the pack was created."""
+        with Catalog(self.db) as cat:
+            view, by_key, _h = p.build_view(cat, "GodVerifyEmojiMapperbot", False,
+                                            p.packs_named(self.data, {1, 2}))
+        logos = [v for v in view if v.get("isLogo")]
+        self.assertEqual([v["pack"] for v in logos], [1, 2])
+        self.assertNotIn(p.LOGO_KEY, {v["key"] for v in logos},
+                         "the 'auto-added on publish' card is for a NEW pack")
+        for v in logos:
+            self.assertIn(v["key"], by_key, "the card needs art to show")
+            # It has to open its pack's run, or the grid draws the boundary
+            # BELOW it and the logo reads as the previous pack's.
+            self.assertLess(view.index(v),
+                            min(i for i, c in enumerate(view)
+                                if c.get("pack") == v["pack"] and not c.get("isLogo")))
+
+    def test_without_with_pack_the_single_publish_preview_is_unchanged(self):
+        """The normal flow builds ONE new pack, and its logo is not live yet."""
+        with Catalog(self.db) as cat:
+            view, _bk, _h = p.build_view(cat, "GodVerifyEmojiMapperbot", False, None)
+        logos = [v for v in view if v.get("isLogo")]
+        self.assertEqual([v["key"] for v in logos], [p.LOGO_KEY])
+        self.assertEqual(view[0]["key"], p.LOGO_KEY, "always first")
+
     def test_an_unnamed_pack_tags_nothing(self):
         """Without --with-pack there is no membership to draw, by design."""
         with Catalog(self.db) as cat:
