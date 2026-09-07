@@ -195,7 +195,7 @@ def load_state(data_dir: Path, base: str) -> dict:
         raise StateError(f"{path} belongs to base {state['base']!r}, not {base!r}. "
                          f"Use a different --data-dir, or delete that file "
                          f"deliberately.")
-    for field in ("sets", "sent", "skipped"):
+    for field in ("sets", "sent", "sent_full", "skipped"):
         if not isinstance(state.setdefault(field, []), list):
             raise StateError(f"{path}: {field!r} must be a list.")
     _validate_state(state, path)
