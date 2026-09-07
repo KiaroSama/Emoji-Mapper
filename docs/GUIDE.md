@@ -1100,8 +1100,8 @@ retried internally, for the same reason as the Python client (§5).
 Local side: set `WORKER_PUBLISH_URL` **and** `WORKER_PUBLISH_SECRET` and
 `build_collection.notify()` routes links through the Worker; leave either unset
 and the original direct `sendMessage` path runs unchanged. The duplicate guard
-does not move — `state["sent"]` still decides, and a *failed* announcement is
-deliberately not recorded as sent, or the guard would skip it forever.
+does not move — the per-milestone lists still decide, and a *failed* announcement
+is deliberately not recorded as sent, or the guard would skip it forever.
 Pack names are validated against `[A-Za-z0-9_]{1,64}` before they reach a public
 `t.me/addemoji/` link.
 
@@ -1112,6 +1112,15 @@ still posted it. Nothing is lost by withholding it: `state["sent"]` never
 records it, so the next clean run announces it, and the log says why it was
 held back. A set that filled to capacity *during* the run is announced as it
 completes — that one is finished by definition.
+
+**Going up and filling up are two milestones, and each gets its own link.**
+`state["sent"]` records the first, `state["sent_full"]` the second; `notify(...,
+full=True)` is what the capacity branch calls. One list conflated them, and a
+pack announced while it was still being filled then said nothing at 200 — which
+is the only moment the channel is waiting for. Pack 2 was announced at 96 emoji
+and stayed silent when it reached 200. Neither milestone fires twice, and a pack
+that was already announced full before this existed belongs in `sent_full` so
+the next run does not repost it.
 
 ```powershell
 cd worker; npm install

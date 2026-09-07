@@ -302,6 +302,53 @@ class EveryPublisherSharesOneAnnouncer(unittest.TestCase):
         self.assertIn("t.me/addemoji/a_by_bot", tg.sent[1])
 
 
+class AFilledPackAnnouncesAgain(unittest.TestCase):
+    """A pack is worth announcing twice: when it goes up, and when it FILLS.
+
+    ``state["sent"]`` conflated the two, so pack 2 -- announced while it still
+    held 96 emoji -- said nothing to the channel when it reached 200, which is
+    the only moment the owner actually cares about.
+    """
+
+    def _notify(self, state, *, full):
+        with tempfile.TemporaryDirectory() as tmp,                 mock.patch.object(bc, "announce_packs", return_value="test") as spy:
+            bc.notify(None, 1, state, Path(tmp), "b", "pack1", "Pack 1", full=full)
+        return spy.call_count
+
+    def test_filling_announces_even_though_the_link_already_went_out(self):
+        state = {"sent": ["pack1"], "skipped": [], "sets": []}
+        self.assertEqual(self._notify(state, full=True), 1, "the FULL milestone is its own")
+        self.assertEqual(state["sent_full"], ["pack1"])
+
+    def test_neither_milestone_fires_twice(self):
+        state = {"sent": [], "skipped": [], "sets": []}
+        self.assertEqual(self._notify(state, full=True), 1)
+        self.assertEqual(self._notify(state, full=True), 0, "already announced as full")
+        self.assertEqual(self._notify(state, full=False), 1, "first-publish link is separate")
+        self.assertEqual(self._notify(state, full=False), 0)
+
+    def test_a_failed_send_is_not_recorded_as_sent(self):
+        """Otherwise one network blip silences that pack for good."""
+        state = {"sent": [], "skipped": [], "sets": []}
+        with tempfile.TemporaryDirectory() as tmp,                 mock.patch.object(bc, "announce_packs", side_effect=RuntimeError("boom")):
+            bc.notify(None, 1, state, Path(tmp), "b", "pack1", "Pack 1", full=True)
+        self.assertEqual(state.get("sent_full", []), [])
+
+    def test_the_capacity_call_site_asks_for_the_full_milestone(self):
+        """The in-run "this set just hit per_set" branch is the whole point."""
+        src = Path("build_collection.py").read_text(encoding="utf-8")
+        head = src[src.index("if in_set >= per_set:"):]
+        self.assertIn("full=True", head[:head.index("in_set = 0")])
+
+    def test_the_state_loader_keeps_the_new_list_a_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "publish_b.json").write_text(
+                '{"base": "b", "sets": [], "sent": [], "sent_full": "nope"}', encoding="utf-8")
+            with self.assertRaises(cs.StateError):
+                cs.load_state(d, "b")
+
+
 class AnnouncementRoutesThroughTheWorker(unittest.TestCase):
     """With a Worker configured, the BOT posts the link -- not this process.
 
