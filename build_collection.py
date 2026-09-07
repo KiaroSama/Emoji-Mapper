@@ -117,8 +117,17 @@ def preflight(tg: Telegram, cat: Catalog, user_id: int, plan: dict,
 
 
 def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
-           name: str, title: str) -> None:
-    if name in state["sent"]:
+           name: str, title: str, *, full: bool = False) -> None:
+    """Post a pack's add-link, at most once per milestone.
+
+    TWO milestones, not one: the pack first going up, and the pack FILLING.
+    ``sent`` alone conflated them, so a set announced while it was still
+    being built stayed silent when it reached ``per_set`` -- and "the pack is
+    finished" is the message the channel is actually waiting for. Pack 2 was
+    announced at 96 emoji and said nothing at 200.
+    """
+    seen = state.setdefault("sent_full" if full else "sent", [])
+    if name in seen:
         return
     # With a Worker deployed, the BOT posts the announcement and this process
     # never talks to the channel. `state["sent"]` still guards it, so which path
@@ -126,7 +135,7 @@ def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
     try:
         dest = announce_packs(tg, user_id, [{"name": name, "title": title}],
                               bot="general")
-        state["sent"].append(name)
+        seen.append(name)
         save_json(_state_path(data_dir, base), state)
         log.info("sent link for %s to %s", name, dest)
     except Exception as exc:  # noqa: BLE001
@@ -460,8 +469,9 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         if in_set >= per_set:
             # The RECORDED title, not a rebuilt one: rebuilding it here is how
             # the announcement and the actual set name drift apart.
+            # This is the FILLED milestone, whatever was announced before.
             notify(tg, user_id, state, data_dir, base, set_name,
-                   target["title"])
+                   target["title"], full=True)
             in_set = 0
         time.sleep(0.1)
 
