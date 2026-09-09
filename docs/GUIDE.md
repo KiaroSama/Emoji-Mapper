@@ -835,6 +835,39 @@ replaced or recoloured sticker, a reorder, a coin remap. It blocks once per
 distinct input state, so declining cannot loop, and re-arms on the next change.
 Clear it with `--refresh`, and say in the reply that the roster was updated.
 
+### 12.5d `pack_archive.py` — the finished pack's media leaves the project
+
+Once a pack is FULL its media moves out to the owner's archive, one folder per
+pack, and the project keeps no copy. A pack still being filled is left alone on
+purpose: the filename carries the emoji's **slot**, and an unfinished pack can
+still be reordered, which would make every name in its folder wrong.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--check` | — | Does the archive still describe the packs? Exit 3 if not. Local only, no network. |
+| `--sync` | — | Archive every FULL pack and regenerate its metadata from the live set. |
+
+`EMOJI_ARCHIVE_DIR` overrides the archive root (default
+`F:\Stickers and Emojis\Emojis`). Each folder holds:
+
+```
+001_logo_yourbrand.png              the brand logo, copied from assets/ (never moved)
+<slot>_<format>_<key[:12]>.<ext>     one per emoji; slot is 1-based, the logo is 1
+_history.json  _history.md           every position, id, content key and glyph
+_manifest.md                         name -> current id, the quick lookup
+```
+
+`--sync` also rewrites `items.file_path` in the catalog, because that absolute
+path is what the roster gallery reads to draw the artwork; dedup is unaffected,
+since a `content_key` hashes normalised pixels held in the database rather than
+the file. It **renames** anything whose slot moved and regenerates the three
+metadata files every run — a recolour mints a new id and a reorder moves slots,
+so an archive written once and never revisited stops describing its pack. It
+never deletes: a file the live pack no longer knows is reported, not removed.
+
+The `Pack-Archive-Check` Stop hook runs `--check` and blocks the turn when the
+archive has fallen behind. Say in the reply whenever you cleared it.
+
 ### 12.6 `panel.py` — curate web panel
 
 | Flag | Default | Meaning |
