@@ -1066,6 +1066,23 @@ viewport animate at rest. A pack of a hundred is mostly animated previews of
 Switching to another tab freezes them all. `Animation: Off` is still the
 lightest the grid can be — nothing decodes at all.
 
+#### Selection mode — move a run in one gesture
+
+Arranging a 200-card pack one emoji at a time is the slow part, so the header
+carries a second switch beside **Animation**:
+
+| Gesture | What it does |
+|---------|--------------|
+| Toggle **Selection** | Reveals a pick box on every card. Turning it off drops the picks. |
+| Click a pick box | Picks or unpicks that one card. |
+| Drag across pick boxes | Picks the whole run; dragging back **shrinks** it inside the same stroke. |
+| Drag a picked card | Carries every picked card together, keeping their order. |
+
+The pick box is deliberately NOT the tick. The tick says "this ships"; the pick
+says "this moves with the others" — and while selection mode is on, clicking a
+card no longer toggles the tick, so arranging can never quietly drop an emoji
+from the pack. A cancelled group drag puts every carried card back where it was.
+
 ### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One
