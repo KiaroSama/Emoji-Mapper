@@ -61,9 +61,10 @@ h1 .dot{color:var(--neon)}
   background:#3a4657;transition:background .18s}
 .switch .knob::after{content:"";position:absolute;top:2px;left:2px;width:10px;
   height:10px;border-radius:50%;background:#0b1422;transition:transform .18s}
-#anim[aria-pressed="true"]  .knob{background:#22c55e}
-#anim[aria-pressed="true"]  .knob::after{transform:translateX(12px)}
-#anim[aria-pressed="false"] .knob{background:#f43f5e}
+.switch[aria-pressed="true"]  .knob{background:#22c55e}
+.switch[aria-pressed="true"]  .knob::after{transform:translateX(12px)}
+.switch[aria-pressed="false"] .knob{background:#f43f5e}
+#selmode{--btn:#f0abfc;--btnLine:#6b2d72;display:flex;align-items:center;gap:8px}
 button:disabled{opacity:.4;cursor:default;border-color:var(--line);box-shadow:none}
 button:disabled:hover{border-color:var(--line);box-shadow:none}
 /* Explicit line-height: the undo/redo arrow glyphs have a taller line box
@@ -165,6 +166,17 @@ body.bg-gray  .thumb{background:#808a96}
   display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a;cursor:pointer}
 .tick:hover{filter:brightness(1.25)}
+/* The pick mark is a SECOND control, deliberately not the tick: the tick says
+   "publish this", the pick says "move this with the others". Conflating them
+   would make arranging silently change what ships. */
+.pick{position:absolute;top:0;left:0;width:22px;height:22px;border-radius:7px;
+  display:none;align-items:center;justify-content:center;font-size:13px;font-weight:800;
+  border:1px solid var(--line);background:#0b1422;color:#5b6b80;cursor:pointer;
+  touch-action:none}
+body.selmode .pick{display:flex}
+body.selmode .card{cursor:default}
+.card.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
+.card.picked{outline:2px solid #f0abfc;outline-offset:-2px}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .glyph{font-size:20px;line-height:1.1;margin:6px 0 0;user-select:text}
@@ -210,6 +222,7 @@ body.bg-gray  .thumb{background:#808a96}
     <button id="inv">Invert</button>
     <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
     <button id="anim" class="switch" aria-pressed="true" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding."><span class="knob"></span><span id="animLabel">Animation: On</span></button>
+    <button id="selmode" class="switch" aria-pressed="false" title="Pick several emoji and move them together. Drag from a pick box to select a run; drag a picked card to carry the whole set."><span class="knob"></span><span id="selLabel">Selection: Off</span></button>
   </div>
   <div class="hright"><button id="save" class="primary">Save selection</button></div>
 </header>
@@ -303,6 +316,7 @@ function makeCard(it){
   hdr.appendChild(el('span','pos',''));
   hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
   if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
+  if(!it.isLogo) hdr.appendChild(el('span','pick', '✓'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
   // The glyph the sticker carries. Telegram never shows it -- a custom emoji
@@ -592,12 +606,91 @@ if (RM) {
   });
 }
 
+// --- Selection mode ------------------------------------------------------
+// Arranging a 200-card pack one emoji at a time is the slow part, so a run can
+// be picked and carried in one gesture. It is a MODE rather than a modifier
+// because the two things a card can be in -- shipped, and moving -- are
+// different questions, and a chord that answers both is a chord that answers
+// the wrong one by accident.
+let selMode = false;
+const picked = new Set();
+
+function markPicked(key, on){
+  on ? picked.add(key) : picked.delete(key);
+  const node = cards.get(key);
+  if(node) node.classList.toggle('picked', on);
+}
+function clearPicked(){ for(const k of [...picked]) markPicked(k, false); paintSelLabel(); }
+function paintSelLabel(){
+  document.getElementById('selLabel').textContent =
+    !selMode ? 'Selection: Off' : picked.size ? 'Selection: ' + picked.size + ' picked'
+                                              : 'Selection: On';
+}
+document.getElementById('selmode').addEventListener('click', ()=>{
+  selMode = !selMode;
+  document.body.classList.toggle('selmode', selMode);
+  document.getElementById('selmode').setAttribute('aria-pressed', selMode ? 'true' : 'false');
+  // Leaving the mode drops the picks: a hidden selection that still moves cards
+  // on the next drag is the worst version of this feature.
+  if(!selMode) clearPicked(); else paintSelLabel();
+});
+
+// Drag ACROSS the pick boxes to take a run. Pointer events, not HTML5 drag:
+// the card's own draggable is what carries the set, and one element cannot do
+// both gestures. Starting on the box is what tells them apart.
+let paintFrom = null, paintTo = null;
+let strokeBase = null;        // what was picked BEFORE this stroke
+let strokeSpan = [];          // indices this stroke is currently claiming
+grid.addEventListener('pointerdown', e=>{
+  if(!selMode) return;
+  const box = e.target.closest('.pick'); if(!box) return;
+  const card = box.closest('.card');
+  const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
+  if(i < 0 || ITEMS[i].isLogo) return;
+  e.preventDefault();
+  paintFrom = i;
+  paintTo = !picked.has(ITEMS[i].key);   // the whole stroke does what the first box did
+  // The stroke is re-applied from this baseline on every move, so dragging BACK
+  // shrinks the run instead of leaving whatever the pointer already passed.
+  strokeBase = new Set(picked);
+  strokeSpan = [];
+  applyStroke(i);
+  try{ box.setPointerCapture(e.pointerId); }catch(_){}
+});
+grid.addEventListener('pointermove', e=>{
+  if(paintFrom === null) return;
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const card = under && under.closest && under.closest('.card');
+  if(!card) return;
+  const j = ITEMS.findIndex(x=>x.key===card.dataset.key);
+  if(j < 0) return;
+  applyStroke(j);
+});
+
+function applyStroke(j){
+  const [a,b] = [Math.min(paintFrom,j), Math.max(paintFrom,j)];
+  const span = [];
+  for(let k=a;k<=b;k++){ if(!ITEMS[k].isLogo) span.push(k); }
+  const now = new Set(span);
+  for(const k of strokeSpan){                    // released by dragging back
+    if(!now.has(k)) markPicked(ITEMS[k].key, strokeBase.has(ITEMS[k].key));
+  }
+  for(const k of span) markPicked(ITEMS[k].key, paintTo);
+  strokeSpan = span;
+  paintSelLabel();
+}
+for(const ev of ['pointerup','pointercancel'])
+  window.addEventListener(ev, ()=>{ paintFrom = null; });
+
 grid.addEventListener('click',e=>{
   // Copying must not also toggle the card: the label sits inside it, so this
   // has to run first and stop there.
   const cp = e.target.closest('.copyable');
   if(cp){ e.stopPropagation(); copyText(cp.dataset.copy); return; }
   const card = e.target.closest('.card'); if(!card) return;
+  // In selection mode the grid is for arranging only. A stray click must not
+  // quietly drop an emoji from the pack while the owner is moving cards.
+  if(selMode) return;
   const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
   if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
   remember();
@@ -782,6 +875,8 @@ addEventListener('beforeunload', e=>{
 // Now the DOM is the model during a drag and the drop only commits it. They
 // cannot disagree, because there is only one of them.
 let dragHome;                 // sibling the card came from, to undo a cancel
+let dragNodes = [];           // every card this gesture carries, in grid order
+let dragHomes = [];           // [node, sibling] each, so a cancel puts them all back
 
 grid.addEventListener('dragstart',e=>{
   const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
@@ -789,7 +884,14 @@ grid.addEventListener('dragstart',e=>{
   if(!it || it.isLogo){ e.preventDefault(); return; }   // logo is fixed first
   dragKey=card.dataset.key;
   dragHome=card.nextSibling;
-  card.classList.add('drag');
+  // Dragging a PICKED card carries the whole set; dragging an unpicked one is
+  // the single-card gesture that has always been here, untouched.
+  dragNodes = (selMode && picked.has(dragKey))
+    ? [...grid.querySelectorAll('.card.picked')]
+    : [card];
+  if(!dragNodes.includes(card)) dragNodes = [card];
+  dragHomes = dragNodes.map(n => [n, n.nextSibling]);
+  for(const n of dragNodes) n.classList.add('drag');
   e.dataTransfer.effectAllowed='move';
   try{e.dataTransfer.setData('text/plain',dragKey);}catch(_){}
 });
@@ -801,13 +903,15 @@ grid.addEventListener('dragover',e=>{
   if(!card || card.dataset.key===dragKey) return;
   const it = ITEMS.find(x=>x.key===card.dataset.key);
   if(!it || it.isLogo) return;             // never ahead of the brand logo
-  const node = cards.get(dragKey);
-  if(!node) return;
+  if(dragNodes.includes(card)) return;    // hovering one of the cards being carried
   // Which SIDE of the tile the pointer is on decides before-or-after, so the
   // last slot of a row is reachable and the gesture reads the way it looks.
   const r = card.getBoundingClientRect();
-  const ref = (e.clientX > r.left + r.width/2) ? card.nextSibling : card;
-  if(ref !== node && ref !== node.nextSibling) grid.insertBefore(node, ref);
+  let ref = (e.clientX > r.left + r.width/2) ? card.nextSibling : card;
+  while(ref && dragNodes.includes(ref)) ref = ref.nextSibling;
+  // Inserted one after another before the same reference, so the set keeps its
+  // own internal order however far it travels.
+  for(const n of dragNodes){ if(n !== ref) grid.insertBefore(n, ref); }
 });
 
 grid.addEventListener('drop',e=>{
@@ -835,11 +939,14 @@ function endDrag(committed){
   // A cancelled drag has to put the node back: ITEMS never changed, so leaving
   // the preview where it is would make the grid disagree with what saves.
   if(!committed && dragKey !== null){
-    const node = cards.get(dragKey);
-    if(node) grid.insertBefore(node,
-      (dragHome && dragHome.parentNode === grid) ? dragHome : null);
+    // Reverse order: each node goes back before the sibling it had, and doing
+    // it forwards would land the later ones after cards already restored.
+    for(let i = dragHomes.length - 1; i >= 0; i--){
+      const [n, sib] = dragHomes[i];
+      grid.insertBefore(n, (sib && sib.parentNode === grid) ? sib : null);
+    }
   }
-  dragKey=null; dragHome=undefined;
+  dragKey=null; dragHome=undefined; dragNodes=[]; dragHomes=[];
   stopEdgeScroll();
   grid.querySelectorAll('.card.drag').forEach(c=>c.classList.remove('drag'));
 }

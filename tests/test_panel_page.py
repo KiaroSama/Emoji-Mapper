@@ -60,10 +60,14 @@ class DragAndDropOrdering(unittest.TestCase):
         page = p.PAGE
         start = page[page.index("grid.addEventListener('dragstart'"):]
         self.assertIn("dragHome=card.nextSibling", start[:start.index("});")])
+        # Every card the gesture carried records its own home, so the same
+        # restore covers a one-card drag and a whole picked run.
+        self.assertIn("dragHomes = dragNodes.map(n => [n, n.nextSibling])",
+                      start[:start.index("});")])
         end = page[page.index("function endDrag(committed){"):]
         end = end[:end.index("// --- Auto-scroll")]
         self.assertIn("if(!committed", end)
-        self.assertIn("grid.insertBefore(node", end)
+        self.assertIn("grid.insertBefore(n,", end)
 
     def test_the_preview_side_decides_before_or_after(self):
         """Without it the last slot of a row is unreachable: every hover would
@@ -281,12 +285,18 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         self.assertIn("rootMargin: '0px'", page)
         self.assertNotIn("rootMargin: '120px'", page)
 
-    def test_the_animation_control_is_a_switch(self):
-        """On/off state shown by the control itself, not only by its label."""
+    def test_a_switch_shows_its_own_state(self):
+        """On/off shown by the control itself, not only by its label.
+
+        The rule is bound to `.switch`, not to one id: selection mode is a
+        second switch and an id-bound rule would have left its knob dead.
+        """
         page = p.PAGE
         self.assertIn('aria-pressed', page)
-        self.assertIn('#anim[aria-pressed="true"]  .knob{background:#22c55e}', page)
-        self.assertIn('#anim[aria-pressed="false"] .knob{background:#f43f5e}', page)
+        self.assertIn('.switch[aria-pressed="true"]  .knob{background:#22c55e}', page)
+        self.assertIn('.switch[aria-pressed="false"] .knob{background:#f43f5e}', page)
+        for control in ('id="anim" class="switch"', 'id="selmode" class="switch"'):
+            self.assertIn(control, page)
         self.assertIn("--btn:#34ebc6", page)
 
     def test_the_card_header_stacks_number_over_format(self):
@@ -385,6 +395,66 @@ class ThePanelPageActuallyShips(unittest.TestCase):
         for token in ("__ITEMS__", "__TOKEN__", "__PREVIEW_FPS__",
                       "__PER_SET__", "__HIDDEN__"):
             self.assertIn(token, p.PAGE, f"{token} lost in the asset")
+
+
+class SelectionModeCarriesARun(unittest.TestCase):
+    """Picking several emoji and moving them in one gesture.
+
+    Arranging a 200-card pack one card at a time is the slow part. The risk it
+    introduces is the reason these are pinned: a selection that silently changes
+    what SHIPS, or a cancelled group drag that leaves half the run somewhere new.
+    """
+
+    def test_the_pick_box_is_not_the_tick(self):
+        """They answer different questions -- "does this ship" and "does this
+        move with the others". One control for both would let arranging drop an
+        emoji from the pack by accident."""
+        page = p.PAGE
+        self.assertIn("el('span','pick'", page)
+        self.assertIn("el('span','tick'", page)
+        self.assertIn(".pick{", page)
+        # Invisible until the mode is on, so the card is unchanged until asked.
+        css = page[page.index(".pick{"):]
+        self.assertIn("display:none", css[:css.index("}")])
+        self.assertIn("body.selmode .pick{display:flex}", page)
+
+    def test_leaving_the_mode_drops_the_picks(self):
+        """A hidden selection that still moves cards on the next drag is worse
+        than no selection at all."""
+        self.assertIn("if(!selMode) clearPicked();", p.PAGE)
+
+    def test_arranging_never_changes_what_ships(self):
+        """The card click toggles `included`. In selection mode a stray click
+        while moving cards must not quietly drop an emoji from the pack."""
+        body = p.PAGE[p.PAGE.index("grid.addEventListener('click'"):]
+        body = body[:body.index("// --- Undo / redo")]
+        self.assertIn("if(selMode) return;", body)
+        self.assertLess(body.index("if(selMode) return;"), body.index("remember();"),
+                        "the guard has to come before anything mutates")
+
+    def test_dragging_a_picked_card_carries_the_whole_set(self):
+        body = p.PAGE[p.PAGE.index("grid.addEventListener('dragstart'"):]
+        body = body[:body.index("grid.addEventListener('dragover'")]
+        self.assertIn("picked.has(dragKey)", body)
+        self.assertIn("querySelectorAll('.card.picked')", body)
+        # An unpicked card is still the single-card gesture that always worked.
+        self.assertIn("[card]", body)
+
+    def test_a_cancelled_group_drag_puts_every_card_back(self):
+        """ITEMS never changed, so a half-restored preview would leave the grid
+        disagreeing with what saves -- for every card the gesture carried."""
+        body = p.PAGE[p.PAGE.index("function endDrag("):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("dragHomes.length - 1", body)
+        self.assertIn("i >= 0; i--", body)
+
+    def test_dragging_back_shrinks_the_run(self):
+        """Overshooting has to be correctable inside the same stroke; without a
+        baseline the run only ever grows and the mode has to be left to fix it."""
+        body = p.PAGE[p.PAGE.index("function applyStroke("):]
+        body = body[:body.index(chr(10) + "}")]
+        self.assertIn("strokeBase.has(", body)
+        self.assertIn("if(!now.has(k))", body)
 
 
 class PackSplitsAndJumpButtons(unittest.TestCase):
