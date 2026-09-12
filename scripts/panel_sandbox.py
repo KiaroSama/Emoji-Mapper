@@ -20,6 +20,7 @@ Usage (this is what `.claude/launch.json` runs):
 
     .venv\\Scripts\\python.exe scripts/panel_sandbox.py
     .venv\\Scripts\\python.exe scripts/panel_sandbox.py --source collection --port 8766
+    .venv\\Scripts\\python.exe scripts/panel_sandbox.py --all      # published packs too
 """
 
 from __future__ import annotations
@@ -50,6 +51,10 @@ def clone_catalog(source: Path, dest: Path) -> int:
         raise SystemExit(f"no catalog at {db} -- nothing to sandbox")
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(db, dest / "catalog.db")
+    # The publisher's state too: `--with-pack N` resolves pack numbers through
+    # it, and without a copy the sandbox could only ever show candidates.
+    for state in source.glob("publish_*.json"):
+        shutil.copy2(state, dest / state.name)
 
     # Media is read-only to the panel, so hard-link it where the filesystem
     # allows: 200 emoji is ~20 MB and copying it on every launch is waste.
@@ -112,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source", default="collection",
                     help="Catalog to CLONE (never served directly).")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    args = ap.parse_args(argv)
+    # Anything else goes to the panel itself (`--all`, `--with-pack N`, ...):
+    # once every emoji is published, a sandbox without them shows an empty grid.
+    args, panel_args = ap.parse_known_args(argv)
 
     if args.port == PANEL_PORT:
         raise SystemExit(f"refusing port {PANEL_PORT}: that is the real panel's port")
@@ -128,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
           flush=True)
 
     cmd = [sys.executable, str(ROOT / "panel.py"), "--data-dir", str(tmp),
-           "--port", str(args.port), "--no-open"]
+           "--port", str(args.port), "--no-open", *panel_args]
     return subprocess.call(cmd, cwd=ROOT)
 
 
