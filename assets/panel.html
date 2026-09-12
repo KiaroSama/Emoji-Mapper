@@ -21,15 +21,20 @@ header{display:grid;grid-template-columns:1fr auto 1fr;
   position:sticky;top:0;z-index:5;
   /* Opaque instead of translucent+blurred. backdrop-filter re-reads and blurs
      everything behind the header on EVERY scroll frame, across its full width;
-     with 201 cards scrolling under it that was the largest per-frame cost left
-     once the card shadows were gone. Opaque needs no blur to stay readable. */
+     with a grid of cards scrolling under it that was the largest per-frame
+     cost left once the card shadows were gone. Opaque needs no blur. */
   background:linear-gradient(180deg,#0a0f1a,#0b1120);border-bottom:1px solid var(--line);
   padding:14px 20px;gap:12px;align-items:center}
 .brand{border-radius:8px;flex:none;filter:drop-shadow(0 0 8px #22d3ee55)}
-h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px;
+h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px;white-space:nowrap;
   text-shadow:0 0 12px #22d3ee66}
 h1 .dot{color:var(--neon)}
-.count{color:var(--muted);font-size:13px;margin-left:4px}
+/* The count line spans the whole header on its own row. It used to share the
+   left column with the title, and once the middle group grew to thirteen
+   controls that column was squeezed to a sliver and the line wrapped into a
+   twelve-row tower. A full-width row cannot be squeezed by anything. */
+.status{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;
+  color:var(--muted);font-size:13px;margin-top:-4px}
 .count b{color:var(--neon2)}
 /* Everything except Save selection sits together in the middle; Save stays
    alone on the right, where a button that writes belongs. */
@@ -54,6 +59,10 @@ h1 .dot{color:var(--neon)}
 #none      {--btn:#fb7185;--btnLine:#5c2330}
 #inv       {--btn:#fbbf24;--btnLine:#5a4415}
 #bg        {--btn:#38bdf8;--btnLine:#1c4257}
+/* The three zoom controls share one accent: they are one control in three
+   parts, and the middle one doubles as the readout. */
+#zoomOut,#zoomIn,#zoomReset{--btn:#a5b4fc;--btnLine:#3b3f7a;min-width:44px;padding:9px 10px}
+#zoomReset{font-variant-numeric:tabular-nums;min-width:64px}
 /* A switch, not a label that happens to say On. The pill on the left is the
    state: green when animations run, red when they are frozen. */
 #anim{--btn:#34ebc6;--btnLine:#14584c;display:flex;align-items:center;gap:8px}
@@ -77,14 +86,29 @@ button.primary{background:linear-gradient(180deg,#0ea5b7,#0b7c8b);border-color:#
   color:#021016;font-weight:700;text-shadow:none}
 button.primary:hover{box-shadow:0 0 18px #22d3ee88}
 button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
-  gap:14px;padding:18px 20px 80px}
-.card{position:relative;border:1px solid var(--line);border-radius:14px;background:var(--panel);
-  padding:12px 10px 10px;text-align:center;cursor:pointer;user-select:none;
+
+/* ---- The grid is VIRTUAL. -------------------------------------------------
+   Only the rows near the viewport exist as DOM; two spacers hold the height of
+   everything above and below. The numbers the layout depends on -- column
+   count, row height, gap -- are computed in panel-grid.js and handed down as
+   these variables, so JavaScript can predict every row's offset exactly and
+   the page never has to measure a card. Every card is the same fixed height
+   for the same reason: a row whose height depends on its longest label cannot
+   be positioned without rendering it first. */
+#grid{display:grid;grid-template-columns:repeat(var(--cols,8),minmax(0,1fr));
+  gap:var(--gap,14px);padding:18px 20px 80px}
+.spacer{grid-column:1/-1;height:0}
+/* Cards carried by a drag must stay in the document even when their row has
+   scrolled out of the window: the browser delivers dragend to the SOURCE node,
+   and a source that was removed mid-drag leaves the gesture stuck forever. */
+#park{position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;visibility:hidden}
+/* Everything inside a card is sized in em off this one font-size, so the zoom
+   factor scales the whole tile -- thumbnail, badges, label -- as one unit. */
+.card{position:relative;border:2px solid var(--line);border-radius:1.17em;background:var(--panel);
+  font-size:calc(12px*var(--z,1));height:var(--cardH,270px);min-width:0;overflow:hidden;
+  padding:1em .83em .83em;text-align:center;cursor:grab;user-select:none;
   transition:border-color .18s,box-shadow .18s,opacity .18s,transform .05s;
-  /* Skip layout/paint for off-screen cards. This is what keeps thousands of
-     emoji scrolling smoothly; the size hint stops the scrollbar jumping. */
-  content-visibility:auto;contain-intrinsic-size:auto 238px}
+  contain:content}
 .card:hover{border-color:var(--neon2)}
 .card:active{transform:scale(.985)}
 /* One accent per format. Set as variables so the border, the glow, the badge
@@ -103,16 +127,15 @@ button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
                    --fmtInk:#a7f3d0;--fmtBg:#04170f;--fmtLine:#1b4a38}
 /* One border colour for every card. Per-format borders turned the whole grid
    into stripes on a dark background; the badge is where the format belongs.
-   No blurred glow either: a 16px shadow on 200 cards is the most expensive
+   No blurred glow either: a 16px shadow on every card is the most expensive
    thing the browser paints here, and it bought nothing but noise. */
-.card{border-width:2px}
 .card.on{border-color:#22c55e;box-shadow:inset 0 0 0 1px #22c55e55}
 .card.off{opacity:.42;filter:grayscale(.9)}
 /* Inner frame = the FORMAT. Outer frame (the card) = whether it is selected.
    Two questions, two frames -- one frame carrying both was the complaint. */
-.thumb{width:108px;height:108px;margin:3px auto 4px;border-radius:10px;display:flex;
+.thumb{width:9em;height:9em;margin:.25em auto .33em;border-radius:.83em;display:flex;
   align-items:center;justify-content:center;overflow:hidden;
-  outline:2px solid var(--fmt,#2b6f7d);outline-offset:2px;
+  outline:.17em solid var(--fmt,#2b6f7d);outline-offset:.17em;
   box-shadow:inset 0 0 0 1px #00000026}
 /* Backdrops so black / hollow / faint emoji are all visible. Default = checker.
    Dark-friendly mid-slate checker: light enough to reveal black/hollow emoji,
@@ -127,34 +150,32 @@ body.bg-checker .thumb{background-color:#828c9a;background-image:
 body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
-.thumb img,.thumb video{max-width:104px;max-height:104px;display:block}
+.thumb img,.thumb video{width:8.67em;height:8.67em;object-fit:contain;display:block}
 /* Two centred rows above the emoji: the position first, then what it is.
    The tick keeps the corner so it never pushes either off centre. */
-.hdr{display:flex;flex-direction:column;align-items:center;gap:3px;
-  margin:0 0 8px;position:relative}
+.hdr{display:flex;flex-direction:column;align-items:center;gap:.25em;
+  margin:0 0 .67em;position:relative}
 .badge{max-width:100%;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;font-size:10px;letter-spacing:.5px;
+  white-space:nowrap;font-size:.83em;letter-spacing:.05em;
   text-transform:uppercase;color:var(--fmtInk,#9fd);
   background:var(--fmtBg,#06121b);border:1px solid var(--fmtLine,#1c3a44);
-  border-radius:6px;padding:2px 5px}
-.card{cursor:grab}
-/* The dragged card is MOVED to its prospective slot while you drag, so this
-   translucent tile IS the preview of where it lands. There is no separate
-   highlight to keep in sync with it -- and nothing for the preview and the
-   drop to disagree about, which is what the old index arithmetic did. */
+  border-radius:.6em;padding:.2em .5em}
+/* The card being carried stays translucent at wherever the drag has moved it
+   to so far, so what you see IS where it lands. */
 .card.drag{opacity:.35;cursor:grabbing;outline:2px dashed var(--neon2);outline-offset:-4px}
-/* The logo has no format, but it still gets an inner frame -- amber, to
-   match its badge, so the two frames mean the same thing on every card. */
 /* A pack boundary. Deliberately NOT .card: the drop handler resolves its
    target with closest('.card'), so a separator that matched would swallow a
    drop and silently do nothing. Spans the whole grid row so the split reads as
-   a rule across the page rather than one more tile in the flow. */
-.packsep{grid-column:1/-1;display:flex;align-items:center;gap:12px;
-         margin:18px 0 6px;color:#fbbf24;font-weight:600;font-size:13px}
-.packsep::after{content:'';flex:1;height:1px;background:#5a4415}
-.packsep img{width:34px;height:34px;border-radius:8px;background:#1a1508;
+   a rule across the page rather than one more tile in the flow. Its height is
+   fixed too, for the same reason a card's is. */
+.packsep{grid-column:1/-1;height:var(--sepH,40px);display:flex;align-items:center;gap:1em;
+         font-size:calc(13px*var(--z,1));color:#fbbf24;font-weight:600}
+.packsep::after{content:"";flex:1;height:1px;background:#5a4415}
+.packsep img{width:2.6em;height:2.6em;border-radius:.6em;background:#1a1508;
              padding:2px;border:1px solid #5a4415}
 .packsep .n{opacity:.75;font-weight:400}
+/* The logo has no format, but it still gets an inner frame -- amber, to
+   match its badge, so the two frames mean the same thing on every card. */
 .card.logo{cursor:default;border-color:#6b5316;--fmt:#fbbf24}
 .card.logo:hover{border-color:#fbbf24}
 .card.logo .badge{color:#fbbf24;border-color:#5a4415;background:#1a1508}
@@ -162,15 +183,15 @@ body.bg-gray  .thumb{background:#808a96}
 /* The whole card toggles, but the tick is what reads as the switch -- and the
    card is cursor:grab because it is also the drag handle, which the tick would
    otherwise inherit and offer a hand for a click. */
-.tick{position:absolute;top:0;right:0;width:22px;height:22px;border-radius:7px;
-  display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
+.tick{position:absolute;top:0;right:0;width:1.7em;height:1.7em;border-radius:.54em;
+  display:flex;align-items:center;justify-content:center;font-size:1.08em;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#06202a;cursor:pointer}
 .tick:hover{filter:brightness(1.25)}
 /* The pick mark is a SECOND control, deliberately not the tick: the tick says
    "publish this", the pick says "move this with the others". Conflating them
    would make arranging silently change what ships. */
-.pick{position:absolute;top:0;left:0;width:22px;height:22px;border-radius:7px;
-  display:none;align-items:center;justify-content:center;font-size:13px;font-weight:800;
+.pick{position:absolute;top:0;left:0;width:1.7em;height:1.7em;border-radius:.54em;
+  display:none;align-items:center;justify-content:center;font-size:1.08em;font-weight:800;
   border:1px solid var(--line);background:#0b1422;color:#5b6b80;cursor:pointer;
   touch-action:none}
 body.selmode .pick{display:flex}
@@ -179,15 +200,24 @@ body.selmode .card{cursor:default}
 .card.picked{outline:2px solid #f0abfc;outline-offset:-2px}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
-.glyph{font-size:20px;line-height:1.1;margin:6px 0 0;user-select:text}
-.lbl{margin-top:6px;font-size:12px;color:var(--txt);word-break:break-word;line-height:1.3}
-.sub{font-size:10px;color:var(--muted);margin-top:2px}
-.pos{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;
+.glyph{font-size:1.67em;line-height:1.1;margin:.3em 0 0;user-select:text}
+/* Two lines at most, then an ellipsis: a card's height is fixed, so a label
+   cannot be allowed to decide it. The full text is still in the title. */
+.lbl{margin-top:.5em;font-size:1em;color:var(--txt);word-break:break-word;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.sub{font-size:.83em;color:var(--muted);margin-top:.2em;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.pos{font-size:.92em;font-weight:700;font-variant-numeric:tabular-nums;
   color:var(--neon2);background:#08131f;border:1px solid #1c3a44;
-  border-radius:6px;padding:2px 6px;min-width:24px;text-align:center;pointer-events:none}
+  border-radius:.55em;padding:.18em .55em;min-width:2.2em;text-align:center;pointer-events:none}
 .card.off .pos{color:var(--muted)}
 .lbl.copyable{cursor:pointer;text-decoration:underline dotted var(--muted);text-underline-offset:2px}
 .lbl.copyable:hover{color:var(--neon)}
+/* Zoomed far out, the text under a thumbnail is unreadable anyway; dropping it
+   lets the rows pack tighter, which is what zooming out is for. */
+body.compact .glyph,body.compact .lbl,body.compact .sub{display:none}
+/* `top` is set from the header's real height by measure(): the header is two
+   rows now and can wrap, so a fixed offset would slide the banner under it. */
 #alert{position:sticky;top:60px;z-index:6;display:none;margin:0;padding:12px 20px;
   background:#3b0d16;border-bottom:1px solid #7f1d33;color:#ffd7de;font-size:14px;
   display:none;align-items:center;gap:12px}
@@ -205,10 +235,6 @@ body.selmode .card{cursor:default}
   <div class="hleft">
     <img class="brand" src="/static/logo-128.png" alt="" width="30" height="30">
     <h1>Emoji Mapper <span class="dot">●</span> Curate</h1>
-    <span class="count"><b id="selCount">0</b> / <span id="totCount">0</span> selected
-      <span class="hint">· click = toggle · drag = reorder · click the id = copy</span>
-      <span id="hiddenNote" class="hint"></span>
-      <span id="capWarn" class="warn" style="display:none"></span></span>
   </div>
   <div class="actions">
     <button id="undo" title="Undo the last reorder or selection change (Ctrl+Z)" disabled>&#8630; Undo</button>
@@ -216,6 +242,10 @@ body.selmode .card{cursor:default}
     <span class="sep"></span>
     <button id="top" title="Jump to the first card">&#8593; Top</button>
     <button id="bot" title="Jump to the last card">&#8595; Bottom</button>
+    <span class="sep"></span>
+    <button id="zoomOut" title="Zoom out: smaller cards, more emoji per screen (Ctrl+wheel down, Ctrl+minus)">&#8722;</button>
+    <button id="zoomReset" title="Current zoom. Click to reset to 100% (Ctrl+0)">100%</button>
+    <button id="zoomIn" title="Zoom in: bigger cards (Ctrl+wheel up, Ctrl+plus)">+</button>
     <span class="sep"></span>
     <button id="all">Select all</button>
     <button id="none">Deselect all</button>
@@ -225,858 +255,28 @@ body.selmode .card{cursor:default}
     <button id="selmode" class="switch" aria-pressed="false" title="Pick several emoji and move them together. Drag from a pick box to select a run; drag a picked card to carry the whole set."><span class="knob"></span><span id="selLabel">Selection: Off</span></button>
   </div>
   <div class="hright"><button id="save" class="primary">Save selection</button></div>
+  <div class="status count"><b id="selCount">0</b>&nbsp;/ <span id="totCount">0</span> selected
+    <span class="hint">· click = toggle · drag = reorder · click the id = copy · Ctrl+wheel = zoom</span>
+    <span id="hiddenNote" class="hint"></span>
+    <span id="capWarn" class="warn" style="display:none"></span></div>
 </header>
 <div id="alert" role="alert" aria-live="assertive"></div>
-<div class="grid" id="grid"></div>
+<div class="grid" id="grid"><div class="spacer" id="padTop"></div><div class="spacer" id="padBot"></div></div>
+<div id="park" aria-hidden="true"></div>
 <div id="toast"></div>
 <script id="items-data" type="application/json">__ITEMS__</script>
 <script>
 // Catalog labels are attacker-influenced (they come from downloaded packs), so
 // item data is parsed from an inert JSON block and only ever written to the DOM
-// with textContent -- never interpolated into markup.
-const ITEMS = JSON.parse(document.getElementById('items-data').textContent);
+// with textContent -- never interpolated into markup. The per-run values the
+// server knows are the only thing this inline block carries; the behaviour
+// lives in the two scripts below, versioned by their content so an edited
+// script can never be served stale out of the immutable cache.
 const TOKEN = "__TOKEN__";
 const PREVIEW_FPS = __PREVIEW_FPS__;
 const HIDDEN = __HIDDEN__;   // already live in a pack, kept out of the grid
 const PER_SET = __PER_SET__;
-const grid = document.getElementById('grid');
-const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
-const cards = new Map();          // key -> card element
-let lastIdx = null;
-
-function el(tag, cls, text){
-  const n = document.createElement(tag);
-  if(cls) n.className = cls;
-  if(text !== undefined) n.textContent = text;
-  return n;
-}
-
-function makeThumb(it){
-  const box = el('div','thumb');
-  const src = '/img/' + encodeURIComponent(it.key);
-  if(it.fmt === 'video'){
-    const v = el('video');
-    v.muted = true; v.loop = true; v.playsInline = true;
-    // Plays on its own, like the animated cards. Hover-only was rejected: a
-    // grid of stills is useless for curating. Bounded the same way instead --
-    // the viewport observer starts and pauses playback, so what costs anything
-    // is what you can actually see, not the whole catalog.
-    v.preload = 'metadata';
-    v.dataset.play = '1';
-    v.src = src + '#t=0.001';
-    box.appendChild(v);
-  } else if(it.fmt === 'animated'){
-    // An animated WebP, played by the browser itself. This used to be a
-    // lottie.js SVG player per card (~704 DOM nodes each, six figures for a
-    // full grid) which is what made this panel crawl. One <img> animates on the
-    // compositor and costs one node, so every card can play at once again.
-    const img = el('img');
-    img.loading = 'lazy'; img.decoding = 'async';
-    img.width = 104; img.height = 104;
-    img.alt = it.label || '';
-    // Starts as the still. The observer swaps in the animation when the card is
-    // near the viewport -- an animated image the browser cannot show still costs
-    // its decoded frames (~2.5 MB each here, 361 MB if all 146 buffer at once).
-    const k = encodeURIComponent(it.key);
-    img.dataset.anim = '/preview/' + k + '?fps=' + PREVIEW_FPS;
-    img.dataset.still = '/preview/' + k + '?still=1';
-    img.src = img.dataset.still;
-    box.appendChild(img);
-  } else {
-    const img = el('img');
-    // Native lazy loading: the browser already defers off-screen images, and
-    // unlike a JS observer it still works if IntersectionObserver never fires.
-    img.loading = 'lazy'; img.decoding = 'async';
-    img.width = 104; img.height = 104;
-    img.alt = it.label || '';     // property assignment: no attribute injection
-    img.src = src;
-    box.appendChild(img);
-  }
-  return box;
-}
-
-function makeCard(it){
-  // fmt-* drives the colour: static, animated and video are told apart at a
-  // glance instead of by reading the badge on every card.
-  const card = el('div', it.isLogo ? 'card logo'
-    : 'card fmt-' + it.fmt + ' ' + (it.included ? 'on' : 'off'));
-  card.dataset.key = it.key;
-  if(!it.isLogo) card.draggable = true;
-  // One flex row, not three absolutely-positioned corners. Absolute placement
-  // put the format badge at the left, the position pill at the centre and the
-  // tick at the right of a ~120px strip -- so "animated" ran straight under the
-  // number and both were unreadable. A row cannot overlap by construction.
-  const hdr = el('div','hdr');
-  // The FULL word. It was shortened to 'anim' when the header was a single
-  // ~48px strip shared with the number and the tick; the header is a centred
-  // column now, so the badge has the whole card width and 'animated' fits.
-  // Number first, format under it -- both centred, per owner request.
-  // Filled by renumber(), never here: a number written at build time is right
-  // exactly once, and wrong from the first drag onwards.
-  hdr.appendChild(el('span','pos',''));
-  hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
-  if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
-  if(!it.isLogo) hdr.appendChild(el('span','pick', '✓'));
-  card.appendChild(hdr);
-  card.appendChild(makeThumb(it));
-  // The glyph the sticker carries. Telegram never shows it -- a custom emoji
-  // renders as its picture -- so this grid is the only place it can be checked
-  // against the art it is supposed to describe.
-  const gl = el('div','glyph', it.emoji || '—');
-  gl.title = it.emoji ? 'Glyph carried by this emoji: ' + it.emoji
-                      : 'This emoji carries no glyph';
-  card.appendChild(gl);
-  const lbl = el('div','lbl', it.label || '');
-  // copyId is decided server-side (panel.copy_id_for) so it is unit-tested.
-  if(it.copyId){ lbl.classList.add('copyable'); lbl.dataset.copy = it.copyId;
-                 lbl.title = 'Click to copy ' + it.copyId; }
-  card.appendChild(lbl);
-  const sub = el('div','sub', it.isLogo
-    ? 'always first, not part of the catalog'
-    : it.key.slice(0,10) + '…');
-  // It is the catalog's content key, not anything Telegram issued. People read
-  // "a:65e766…" as an emoji id and it is not one -- it is our own hash of the
-  // picture, which is what dedup and the media filename are keyed on.
-  if(!it.isLogo) sub.title = 'Catalog content key (our hash of the picture): ' + it.key;
-  card.appendChild(sub);
-  cards.set(it.key, card);
-  return card;
-}
-
-// The publish position, recomputed from ITEMS rather than tracked alongside it
-// -- ITEMS *is* the order, so anything else is a second copy that can drift.
-// Cheap enough to run on every reorder: 200 text writes, no layout thrash.
-// The brand logo is the FIRST emoji of every set it leads, so it costs a real
-// slot -- build_collection reserves it (capacity = per_set - 1). Numbering it
-// away made the panel disagree with what actually ships: the owner read "200"
-// and the pack was 201.
-// A pack boundary marker. Rebuilt from scratch on every renumber() and held
-// only in the DOM -- never in ITEMS, never in `cards`, never saved. That is
-// what keeps drag/drop, /api/order and /api/save completely unaware of it.
-function makeSep(title, from, to){
-  const box = el('div','packsep');
-  const logo = ITEMS.find(x=>x.isLogo);
-  if(logo){
-    const img = document.createElement('img');
-    img.src = '/img/' + encodeURIComponent(logo.key);
-    img.alt = '';
-    box.appendChild(img);
-  }
-  box.appendChild(el('span','', title));
-  box.appendChild(el('span','n', to ? `#${from}–#${to}` : `from #${from}`));
-  return box;
-}
-
-// Position labels, and the pack splits the owner reads "how far does this one
-// go" off. The number on a card is its GRID position and always has been --
-// the ranges the owner works in are grid ranges, so it must not silently
-// become a ship position.
-//
-// The SPLITS are a different question and are computed from the INCLUDED count
-// only: an unticked card never reaches Telegram, so it cannot push the next
-// emoji into the following pack. That is why this runs on every selection
-// change and not just on reorder -- untick enough cards and a boundary really
-// does move.
-function renumber(){
-  for(const s of grid.querySelectorAll('.packsep')) s.remove();
-
-  const logo = ITEMS.find(x=>x.isLogo);
-  const capacity = PER_SET - (logo ? 1 : 0);   // items that fit beside the logo
-
-  // An emoji already live in a pack knows WHICH pack (--with-pack sets it), and
-  // then membership decides the boundaries. Capacity arithmetic cannot: two
-  // published packs of 95 and 96 are neither of them PER_SET, so counting to
-  // capacity finds no seam at all and the grid draws none -- which is exactly
-  // how two packs came to look like one long list.
-  const byMembership = ITEMS.some(x => x.pack != null && x.included);
-
-  // Pass 1: grid number per item, and where each pack begins.
-  const starts = [];                 // {index, gridNo, pack}
-  let n = 0, inPack = 0, cur;
-  for(let i = 0; i < ITEMS.length; i++){
-    const it = ITEMS[i];
-    n++;
-    // The logo IS emoji 0 of its pack, so it OPENS that pack's run. Excluding
-    // it here put pack 5's marker one card below its own logo, which read as
-    // the logo belonging to the pack above it.
-    if(byMembership){
-      if(it.included){
-        // A run ends when the pack number changes. A candidate carries no
-        // pack, and it used to open a run of its own -- so every emoji
-        // dragged INTO a pack split that pack in two and left a full-width
-        // "Not in a pack yet" marker plus the empty rest of its row behind
-        // it. `cur` is deliberately left alone here: a candidate continues
-        // the run it was dropped into, which is also where it will publish.
-        const pk = it.pack != null ? it.pack : null;
-        if(pk !== null && (!starts.length || pk !== cur)){
-          starts.push({index: i, gridNo: n, pack: pk});
-          cur = pk;
-        }
-      }
-    } else if(!it.isLogo && it.included){
-      if(inPack === 0) starts.push({index: i, gridNo: n, pack: null});
-      inPack++;
-      if(inPack >= capacity) inPack = 0;
-    }
-    const card = cards.get(it.key);
-    const pos = card && card.querySelector('.pos');
-    if(pos && pos.textContent !== String(n)) pos.textContent = n;
-  }
-
-  // Pass 2: one marker per pack, each labelled with the grid range it spans.
-  // Only when there is more than one -- a single pack needs no divider.
-  if(starts.length < 2) return;
-  for(let p = starts.length - 1; p >= 0; p--){
-    const to = p + 1 < starts.length ? starts[p + 1].gridNo - 1 : n;
-    const card = cards.get(ITEMS[starts[p].index].key);
-    if(!card) continue;
-    // Pack 1 opens at the head logo, which already sits above its first item.
-    const anchor = (p === 0 && logo) ? cards.get(logo.key) || card : card;
-    const pk = starts[p].pack;
-    // No marker for candidates any more: only a real pack starts a run, so
-    // `pk` is null only in the capacity-counted mode below.
-    const title = pk != null ? 'Pack ' + pk : 'Pack ' + (p + 1);
-    grid.insertBefore(makeSep(title, starts[p].gridNo, to), anchor);
-  }
-}
-
-// Only the cards you can actually see animate. Everything else holds frame 0,
-// so the number of live animations is bounded by the viewport rather than by
-// the catalog. Swapping an <img> src is cheap -- both URLs are immutable-cached,
-// so this never refetches -- which is what makes this affordable where
-// mounting/destroying a player was not.
-const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
-  for (const e of es) {
-    const t = e.target;
-    const live = e.isIntersecting && ANIM_ON && !RM;
-    if (t.dataset.play) { setPlaying(t, live); continue; }
-    const want = live ? t.dataset.anim : t.dataset.still;
-    if (want && t.getAttribute('src') !== want) t.src = want;
-  }
-}, {root: null, rootMargin: '0px'}) : null;   // see freezeAll(): a band
-// beyond the viewport animated a row nobody was looking at, above AND below.
-
-// play() rejects when the element is detached or the browser refuses; that is
-// not an error worth surfacing, but it MUST be caught or it becomes an
-// unhandled rejection on every scroll.
-function setPlaying(v, on){
-  try { if (on) { const q = v.play(); if (q) q.catch(()=>{}); } else { v.pause(); } }
-  catch(_){}
-}
-
-function animatedNodes(){
-  return grid.querySelectorAll('img[data-anim], video[data-play]');
-}
-
-function observeAnimated(){
-  if (!animIO) return;
-  animatedNodes().forEach(n => animIO.observe(n));
-  // Without an observer nothing would ever start, so fall back to playing all
-  // of them rather than showing a grid of frozen videos.
-  if (!window.IntersectionObserver) {
-    grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, ANIM_ON));
-  }
-}
-
-/** Hold every card on frame 0. Costs no request: the still is the same
- *  immutable-cached URL the card was built with. */
-function freezeAll(){
-  grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, false));
-  grid.querySelectorAll('img[data-anim]').forEach(img => {
-    if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still;
-  });
-}
-
-// Switching to another tab or window used to change nothing: 147 animated
-// WebPs and every visible video kept decoding for a page nobody was looking at.
-// The browser throttles rAF for a hidden tab but not image animation, so this
-// has to be explicit. Coming back re-evaluates visibility rather than assuming
-// what was on screen before.
-document.addEventListener('visibilitychange', ()=>{
-  if (document.hidden) freezeAll(); else applyAnim();
-});
-
-// Scrolling is when this grid feels heavy, and it is the one moment the work is
-// pure waste: the compositor is already busy, every visible animated WebP keeps
-// decoding, and the frames go past too fast to see. This pack shows 76 animated
-// previews (median 36 frames each) and 15 videos, so a scroll through it was
-// decoding several thousand frames nobody could read.
-//
-// Freeze on the first scroll event, thaw once it settles. The debounce is long
-// enough that a flick does not thaw mid-flight and short enough that stopping
-// feels immediate.
-let scrollThaw = null;
-addEventListener('scroll', ()=>{
-  if(!ANIM_ON || RM) return;
-  if(scrollThaw === null) freezeAll();
-  else clearTimeout(scrollThaw);
-  scrollThaw = setTimeout(()=>{ scrollThaw = null; applyAnim(); }, 180);
-}, {passive:true});
-
-// Master switch. Off = every card holds frame 0 and nothing decodes at all,
-// which is the lightest the grid can be; the observer stops swapping so it
-// cannot undo the freeze behind your back.
-let ANIM_ON = localStorage.getItem('animOn') !== '0';
-function applyAnim(){
-  const btn = document.getElementById('anim');
-  btn.setAttribute('aria-pressed', ANIM_ON ? 'true' : 'false');
-  document.getElementById('animLabel').textContent =
-    'Animation: ' + (ANIM_ON ? 'On' : 'Off');
-  animatedNodes().forEach(n => {
-    if (!ANIM_ON) {
-      if (n.dataset.play) setPlaying(n, false);
-      else if (n.getAttribute('src') !== n.dataset.still) n.src = n.dataset.still;
-    } else if (animIO) { animIO.unobserve(n); animIO.observe(n); }  // re-evaluate
-  });
-}
-
-// --- lazy media ---
-// Static and animated thumbs are both plain <img> (loading=lazy), video uses
-// preload=metadata. The browser owns all of it: no player objects, no
-// IntersectionObserver, no per-card listeners to leak.
-//
-// This replaced a lottie.js SVG player per animated card. Measured on a
-// 146-animation catalog that was ~704 DOM nodes EACH -- 1 426 document nodes
-// with none mounted, 8 476 with ten -- and every scroll tore down and rebuilt a
-// row's worth. Pre-rendering each .tgs to an animated WebP server-side moves
-// the work off the page entirely, so all of them animate at once.
-
-function render(){
-  cards.clear();
-  const frag = document.createDocumentFragment();
-  for(const it of ITEMS) frag.appendChild(makeCard(it));
-  grid.textContent = '';
-  grid.appendChild(frag);
-  observeAnimated();
-  applyAnim();
-  renumber();
-  updateCount();
-}
-function updateCount(){
-  // The logo ships in every set, so it counts. It is not toggleable, hence
-  // always included.
-  const logo = ITEMS.filter(x=>x.isLogo).length;
-  const real = ITEMS.filter(x=>!x.isLogo);
-  const included = real.filter(x=>x.included).length + logo;
-  // Never silent: a grid that quietly drops 200 emoji is indistinguishable
-  // from one that lost them.
-  const note = document.getElementById('hiddenNote');
-  if (note) {
-    note.textContent = HIDDEN
-      ? `· ${HIDDEN} in finished packs (hidden — panel.py --all shows them)`
-      : '';
-  }
-  document.getElementById('selCount').textContent = included;
-  document.getElementById('totCount').textContent = real.length + logo;
-  // Telegram's hard cap is 200 stickers per set and the logo takes one of them,
-  // so 200 chosen emoji plus the logo is 201 and CANNOT be one pack. Say so
-  // here rather than let it be discovered as a surprise second set.
-  const warn = document.getElementById('capWarn');
-  if(included > PER_SET){
-    const sets = Math.ceil(included / PER_SET);
-    warn.textContent = `· ${included} > ${PER_SET} per set, so this publishes as `
-                     + `${sets} packs (each led by the logo)`;
-    warn.style.display = '';
-  } else {
-    warn.style.display = 'none';
-  }
-}
-// In-place update: never rebuild the grid just to flip a selection.
-function setCard(it){
-  const el2 = cards.get(it.key); if(!el2) return;
-  el2.classList.toggle('on',it.included); el2.classList.toggle('off',!it.included);
-  const tick = el2.querySelector('.tick');
-  if(tick) tick.textContent = it.included ? '✓' : '✕';
-}
-function setAll(fn){ remember();
-  for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); }
-  // renumber() too, not just the counter: unticking moves the pack splits.
-  renumber(); updateCount(); }
-
-// Reduced motion is the one case where nothing plays by itself; hover is then
-// the only way to see a video move at all, so the old handlers survive for it.
-if (RM) {
-  grid.addEventListener('mouseover',e=>{
-    const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-    const v = box.querySelector('video'); if(v) setPlaying(v, true);
-  });
-  grid.addEventListener('mouseout',e=>{
-    const box = e.target.closest('.thumb'); if(!box || box.contains(e.relatedTarget)) return;
-    const v = box.querySelector('video'); if(v){ setPlaying(v, false); try{v.currentTime=0;}catch(_){} }
-  });
-}
-
-// --- Selection mode ------------------------------------------------------
-// Arranging a 200-card pack one emoji at a time is the slow part, so a run can
-// be picked and carried in one gesture. It is a MODE rather than a modifier
-// because the two things a card can be in -- shipped, and moving -- are
-// different questions, and a chord that answers both is a chord that answers
-// the wrong one by accident.
-let selMode = false;
-const picked = new Set();
-
-function markPicked(key, on){
-  on ? picked.add(key) : picked.delete(key);
-  const node = cards.get(key);
-  if(node) node.classList.toggle('picked', on);
-}
-function clearPicked(){ for(const k of [...picked]) markPicked(k, false); paintSelLabel(); }
-function paintSelLabel(){
-  document.getElementById('selLabel').textContent =
-    !selMode ? 'Selection: Off' : picked.size ? 'Selection: ' + picked.size + ' picked'
-                                              : 'Selection: On';
-}
-document.getElementById('selmode').addEventListener('click', ()=>{
-  selMode = !selMode;
-  document.body.classList.toggle('selmode', selMode);
-  document.getElementById('selmode').setAttribute('aria-pressed', selMode ? 'true' : 'false');
-  // Leaving the mode drops the picks: a hidden selection that still moves cards
-  // on the next drag is the worst version of this feature.
-  if(!selMode) clearPicked(); else paintSelLabel();
-});
-
-// Drag ACROSS the pick boxes to take a run. Pointer events, not HTML5 drag:
-// the card's own draggable is what carries the set, and one element cannot do
-// both gestures. Starting on the box is what tells them apart.
-let paintFrom = null, paintTo = null;
-let strokeBase = null;        // what was picked BEFORE this stroke
-let strokeSpan = [];          // indices this stroke is currently claiming
-grid.addEventListener('pointerdown', e=>{
-  if(!selMode) return;
-  const box = e.target.closest('.pick'); if(!box) return;
-  const card = box.closest('.card');
-  const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
-  if(i < 0 || ITEMS[i].isLogo) return;
-  e.preventDefault();
-  paintFrom = i;
-  paintTo = !picked.has(ITEMS[i].key);   // the whole stroke does what the first box did
-  // The stroke is re-applied from this baseline on every move, so dragging BACK
-  // shrinks the run instead of leaving whatever the pointer already passed.
-  strokeBase = new Set(picked);
-  strokeSpan = [];
-  applyStroke(i);
-  try{ box.setPointerCapture(e.pointerId); }catch(_){}
-});
-grid.addEventListener('pointermove', e=>{
-  if(paintFrom === null) return;
-  const under = document.elementFromPoint(e.clientX, e.clientY);
-  const card = under && under.closest && under.closest('.card');
-  if(!card) return;
-  const j = ITEMS.findIndex(x=>x.key===card.dataset.key);
-  if(j < 0) return;
-  applyStroke(j);
-});
-
-function applyStroke(j){
-  const [a,b] = [Math.min(paintFrom,j), Math.max(paintFrom,j)];
-  const span = [];
-  for(let k=a;k<=b;k++){ if(!ITEMS[k].isLogo) span.push(k); }
-  const now = new Set(span);
-  for(const k of strokeSpan){                    // released by dragging back
-    if(!now.has(k)) markPicked(ITEMS[k].key, strokeBase.has(ITEMS[k].key));
-  }
-  for(const k of span) markPicked(ITEMS[k].key, paintTo);
-  strokeSpan = span;
-  paintSelLabel();
-}
-for(const ev of ['pointerup','pointercancel'])
-  window.addEventListener(ev, ()=>{ paintFrom = null; });
-
-grid.addEventListener('click',e=>{
-  // Copying must not also toggle the card: the label sits inside it, so this
-  // has to run first and stop there.
-  const cp = e.target.closest('.copyable');
-  if(cp){ e.stopPropagation(); copyText(cp.dataset.copy); return; }
-  const card = e.target.closest('.card'); if(!card) return;
-  // In selection mode the grid is for arranging only. A stray click must not
-  // quietly drop an emoji from the pack while the owner is moving cards.
-  if(selMode) return;
-  const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
-  if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
-  remember();
-  if(e.shiftKey && lastIdx!==null){
-    const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
-    const val = !ITEMS[i].included;
-    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; ITEMS[k].included=val; setCard(ITEMS[k]); }
-  } else {
-    ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
-  }
-  lastIdx=i; renumber(); updateCount();
-});
-
-// --- Undo / redo ---------------------------------------------------------
-// Snapshots, not a command log. A snapshot is 200 keys plus the included set,
-// which is nothing, and it cannot drift out of step with ITEMS the way an
-// inverse-operation log can -- and ITEMS is the only thing that decides what
-// gets published. Bounded so a long session cannot grow without limit.
-const HISTORY_MAX = 100;
-let past = [], future = [];
-
-function snapshot(){
-  return {order: ITEMS.map(x=>x.key),
-          included: ITEMS.filter(x=>x.included).map(x=>x.key)};
-}
-
-// Call BEFORE mutating, so the stack holds the state to return to. A new
-// action drops the redo branch, which is what every editor does.
-function remember(){
-  past.push(snapshot());
-  if(past.length > HISTORY_MAX) past.shift();
-  future.length = 0;
-  updateHistoryButtons();
-}
-
-function applySnapshot(snap){
-  const pos = new Map(snap.order.map((k,i)=>[k,i]));
-  const inc = new Set(snap.included);
-  for(const it of ITEMS) if(!it.isLogo) it.included = inc.has(it.key);
-  ITEMS.sort((a,b)=>pos.get(a.key)-pos.get(b.key));
-  // Move the existing nodes rather than rebuilding: appending a node that is
-  // already in the document RELOCATES it, so every loaded thumbnail, preview
-  // and playing video survives. A render() here would re-request all 200.
-  const frag = document.createDocumentFragment();
-  for(const it of ITEMS){ const n = cards.get(it.key); if(n) frag.appendChild(n); }
-  grid.appendChild(frag);
-  for(const it of ITEMS) if(!it.isLogo) setCard(it);
-  renumber();
-  updateCount();
-  observeAnimated();
-  saveOrder();          // order is auto-saved; selection waits for Save, as always
-  updateHistoryButtons();
-}
-
-function undo(){
-  if(!past.length) return;
-  future.push(snapshot());
-  applySnapshot(past.pop());
-  toast('Undone');
-}
-
-function redo(){
-  if(!future.length) return;
-  past.push(snapshot());
-  applySnapshot(future.pop());
-  toast('Redone');
-}
-
-function updateHistoryButtons(){
-  document.getElementById('undo').disabled = !past.length;
-  document.getElementById('redo').disabled = !future.length;
-}
-
-document.getElementById('undo').onclick = undo;
-document.getElementById('redo').onclick = redo;
-addEventListener('keydown', e=>{
-  if(!(e.ctrlKey || e.metaKey)) return;
-  const k = e.key.toLowerCase();
-  if(k === 'z' && !e.shiftKey){ e.preventDefault(); undo(); }
-  else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redo(); }
-});
-
-// --- Drag & drop reordering (sets the publish order) --------------------
-let dragKey = null;
-let orderTimer = null;
-
-// --- Losing the server must never be silent ------------------------------
-// An owner spent three hours reordering a pack while this process was already
-// dead. The page looked fine, every drag "worked", and nothing reached the
-// catalog. A toast was the only signal and it fades in 2.6 seconds.
-//
-// So: a banner that stays until the problem is actually gone, an unsaved
-// change is remembered and flushed when the server comes back, and the browser
-// asks before you close the tab on work that never landed.
-let TOK = TOKEN;              // reissued per run; a restart invalidates ours
-let pendingOrder = null;      // an order we tried to save and could not
-let lastAlert = '';
-
-function setAlert(html){
-  if(html === lastAlert) return;
-  lastAlert = html;
-  const a = document.getElementById('alert');
-  a.innerHTML = html;
-  a.classList.toggle('show', !!html);
-}
-
-function offline(why){
-  setAlert('<b>Not saving.</b> ' + why +
-           ' Your arrangement is only in this page — <b>do not close this tab.</b>' +
-           ' It saves itself as soon as the panel is reachable again.');
-}
-
-/**
- * POST with the mutation token, refreshing it once on 403.
- *
- * The token is per run, so a restarted panel rejects ours. Re-reading it from
- * "/" is same-origin, which is exactly the boundary the token protects, so
- * this weakens nothing -- and it is what turns "restart the panel and lose
- * your afternoon" into "restart the panel and it catches up".
- */
-async function apiPost(path, body){
-  const send = () => fetch(path, {method:'POST',
-    headers:{'Content-Type':'application/json','X-Panel-Token':TOK},
-    body:JSON.stringify(body)});
-  let r = await send();
-  if(r.status === 403){
-    const html = await (await fetch('/', {cache:'no-store'})).text();
-    const m = /const TOKEN = "([^"]+)"/.exec(html);
-    if(m){ TOK = m[1]; r = await send(); }
-  }
-  return r;
-}
-
-async function flushOrder(order){
-  try{
-    const r = await apiPost('/api/order', {order});
-    if(!r.ok){ pendingOrder = order; offline('The panel refused the save (HTTP ' + r.status + ').'); return false; }
-    pendingOrder = null;
-    setAlert('');
-    return true;
-  }catch(_){
-    pendingOrder = order;
-    offline('The panel at this address is not responding.');
-    return false;
-  }
-}
-
-function saveOrder(){
-  clearTimeout(orderTimer);
-  const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
-  pendingOrder = order;                 // at risk from this moment on
-  orderTimer = setTimeout(async ()=>{
-    if(await flushOrder(order)) toast('Order saved ✓');
-  }, 400);
-}
-
-// Poll for the server rather than waiting for the next drag to discover it is
-// gone -- the whole point is to find out while you can still act.
-setInterval(async ()=>{
-  try{
-    const r = await fetch('/api/ping', {cache:'no-store'});
-    if(!r.ok) throw new Error(r.status);
-    if(pendingOrder) await flushOrder(pendingOrder);
-    else setAlert('');
-  }catch(_){
-    offline('The panel process is not running.');
-  }
-}, 5000);
-
-// Last line of defence: the browser asks before the tab takes the work with it.
-addEventListener('beforeunload', e=>{
-  if(pendingOrder){ e.preventDefault(); e.returnValue = ''; }
-});
-// The dragged card is moved through the grid as you drag, so what you see IS
-// where it will land. The old scheme highlighted the card under the pointer and
-// then computed an index at drop time, which was both invisible until too late
-// and OFF BY ONE in one direction: `splice(from,1)` then `splice(to,0)` with a
-// `to` measured BEFORE the removal drops everything after `from` one slot, so
-// dragging DOWN landed the card one past the tile you aimed at while dragging
-// UP landed it exactly there. Two behaviours from one gesture.
-//
-// Now the DOM is the model during a drag and the drop only commits it. They
-// cannot disagree, because there is only one of them.
-let dragHome;                 // sibling the card came from, to undo a cancel
-let dragNodes = [];           // every card this gesture carries, in grid order
-let dragHomes = [];           // [node, sibling] each, so a cancel puts them all back
-
-grid.addEventListener('dragstart',e=>{
-  const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
-  const it = ITEMS.find(x=>x.key===card.dataset.key);
-  if(!it || it.isLogo){ e.preventDefault(); return; }   // logo is fixed first
-  dragKey=card.dataset.key;
-  dragHome=card.nextSibling;
-  // Dragging a PICKED card carries the whole set; dragging an unpicked one is
-  // the single-card gesture that has always been here, untouched.
-  dragNodes = (selMode && picked.has(dragKey))
-    ? [...grid.querySelectorAll('.card.picked')]
-    : [card];
-  if(!dragNodes.includes(card)) dragNodes = [card];
-  dragHomes = dragNodes.map(n => [n, n.nextSibling]);
-  for(const n of dragNodes) n.classList.add('drag');
-  e.dataTransfer.effectAllowed='move';
-  try{e.dataTransfer.setData('text/plain',dragKey);}catch(_){}
-});
-
-grid.addEventListener('dragover',e=>{
-  if(dragKey===null) return;
-  e.preventDefault(); e.dataTransfer.dropEffect='move';
-  const card=e.target.closest('.card');
-  if(!card || card.dataset.key===dragKey) return;
-  const it = ITEMS.find(x=>x.key===card.dataset.key);
-  if(!it || it.isLogo) return;             // never ahead of the brand logo
-  if(dragNodes.includes(card)) return;    // hovering one of the cards being carried
-  // Which SIDE of the tile the pointer is on decides before-or-after, so the
-  // last slot of a row is reachable and the gesture reads the way it looks.
-  const r = card.getBoundingClientRect();
-  let ref = (e.clientX > r.left + r.width/2) ? card.nextSibling : card;
-  while(ref && dragNodes.includes(ref)) ref = ref.nextSibling;
-  // Inserted one after another before the same reference, so the set keeps its
-  // own internal order however far it travels.
-  for(const n of dragNodes){ if(n !== ref) grid.insertBefore(n, ref); }
-});
-
-grid.addEventListener('drop',e=>{
-  if(dragKey===null) return;
-  e.preventDefault();
-  stopEdgeScroll();
-  commitDrag();
-  endDrag(true);
-});
-grid.addEventListener('dragend',()=>endDrag(false));
-
-/** Adopt the DOM order the drag preview left behind. */
-function commitDrag(){
-  const at = new Map();
-  grid.querySelectorAll('.card').forEach((c,i)=>at.set(c.dataset.key, i));
-  const next = ITEMS.slice().sort((a,b)=>(at.get(a.key) ?? 0) - (at.get(b.key) ?? 0));
-  if(next.every((x,i)=>x===ITEMS[i])) return;      // released where it started
-  remember();
-  ITEMS.length = 0; ITEMS.push(...next);
-  renumber();
-  saveOrder();
-}
-
-function endDrag(committed){
-  // A cancelled drag has to put the node back: ITEMS never changed, so leaving
-  // the preview where it is would make the grid disagree with what saves.
-  if(!committed && dragKey !== null){
-    // Reverse order: each node goes back before the sibling it had, and doing
-    // it forwards would land the later ones after cards already restored.
-    for(let i = dragHomes.length - 1; i >= 0; i--){
-      const [n, sib] = dragHomes[i];
-      grid.insertBefore(n, (sib && sib.parentNode === grid) ? sib : null);
-    }
-  }
-  dragKey=null; dragHome=undefined; dragNodes=[]; dragHomes=[];
-  stopEdgeScroll();
-  grid.querySelectorAll('.card.drag').forEach(c=>c.classList.remove('drag'));
-}
-
-// --- Auto-scroll while dragging near an edge ----------------------------
-// Without this the drag is trapped in the current viewport: with 200 cards
-// there is no way to carry #200 up to #10, because the page will not follow
-// the pointer. Speed rises the deeper into the edge band you go, so a nudge
-// creeps and a hard push travels.
-const EDGE_BAND = 100;      // px from the top/bottom edge where scrolling starts
-const EDGE_MAX  = 42;       // px per frame at the very edge
-let edgeSpeed = 0, edgeFrame = null;
-
-function edgeScroll(y){
-  const over = EDGE_BAND - y;                       // >0 once inside the top band
-  const under = y - (innerHeight - EDGE_BAND);      // >0 once inside the bottom band
-  const depth = over > 0 ? -over : (under > 0 ? under : 0);
-  edgeSpeed = Math.max(-EDGE_MAX, Math.min(EDGE_MAX,
-                       Math.round(depth / EDGE_BAND * EDGE_MAX)));
-  if(edgeSpeed && edgeFrame === null) stepEdge();
-}
-
-function stepEdge(){
-  edgeFrame = requestAnimationFrame(()=>{
-    edgeFrame = null;
-    // Guarded on dragKey as well: a drag that ends outside the window never
-    // fires drop, and an unguarded loop would scroll the page forever.
-    if(dragKey === null || !edgeSpeed) return;
-    scrollBy(0, edgeSpeed);
-    stepEdge();
-  });
-}
-
-function stopEdgeScroll(){
-  edgeSpeed = 0;
-  if(edgeFrame !== null){ cancelAnimationFrame(edgeFrame); edgeFrame = null; }
-}
-
-// On the DOCUMENT, not the grid. Grid events bubble here anyway, and at the top
-// of the window the pointer is over the sticky header -- where the grid's own
-// handler never fires, which is exactly when scrolling up is wanted.
-document.addEventListener('dragover',e=>{
-  if(dragKey===null) return;
-  e.preventDefault();
-  edgeScroll(e.clientY);
-});
-document.addEventListener('dragend',()=>endDrag(false));
-// A drop anywhere outside the grid: cancel rather than reorder by guesswork.
-document.addEventListener('drop',e=>{
-  if(dragKey===null) return;
-  e.preventDefault();
-  if(!e.target.closest('#grid')) endDrag(false);
-});
-
-// Plain document scrolling, NOT scrollIntoView. scrollIntoView aligns the
-// element with the top of the VIEWPORT, which is behind the sticky header, so
-// "Top" stopped one header short and hid the Pack 1 marker; the same alignment
-// rule cut the bottom short. The document ends where the last row does, and
-// the header floats above it, so scrolling the document reaches both edges.
-document.getElementById('top').onclick=()=>window.scrollTo({top:0});
-document.getElementById('bot').onclick=()=>
-  window.scrollTo({top:document.documentElement.scrollHeight});
-document.getElementById('all').onclick=()=>setAll(()=>true);
-document.getElementById('none').onclick=()=>setAll(()=>false);
-document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
-document.getElementById('anim').onclick=()=>{
-  ANIM_ON = !ANIM_ON;
-  try{ localStorage.setItem('animOn', ANIM_ON ? '1' : '0'); }catch(_){}
-  applyAnim();
-};
-// Preview backdrop switcher: makes black / hollow / faint emoji visible.
-const BGS=['checker','light','dark','gray'];
-const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};
-function applyBg(b){
-  BGS.forEach(x=>document.body.classList.remove('bg-'+x));
-  document.body.classList.add('bg-'+b);
-  document.getElementById('bg').textContent='Backdrop: '+BGLABEL[b];
-  try{localStorage.setItem('emojiBg',b);}catch(_){}
-}
-document.getElementById('bg').onclick=()=>{
-  const cur=BGS.find(x=>document.body.classList.contains('bg-'+x))||'checker';
-  applyBg(BGS[(BGS.indexOf(cur)+1)%BGS.length]);
-};
-applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){return 'checker';}})());
-document.getElementById('save').onclick=async()=>{
-  const excluded = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
-  try{
-    const r = await apiPost('/api/save', {excluded});
-    const j = await r.json();
-    if(r.ok){
-      setAlert('');
-      // Say WHOSE numbers these are. They come from the catalog, not the
-      // grid, and reading "213 included" under 15 visible cards is
-      // alarming until you know that.
-      const scope = HIDDEN ? ' in the catalog' : '';
-      toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
-    }else{
-      // Not a toast: a failed save you did not see is how an afternoon of
-      // work goes missing.
-      offline('The panel refused the save (' + (j.error || r.status) + ').');
-    }
-  }catch(_){ offline('The panel at this address is not responding.'); }
-};
-async function copyText(text){
-  if(!text) return;
-  // The panel is served from a loopback host, which IS a secure context, so
-  // the async clipboard API is normally available. It still REJECTS in real
-  // situations -- "Document is not focused" is the one this hit in testing --
-  // so a rejection falls through to execCommand rather than giving up.
-  if(navigator.clipboard && window.isSecureContext){
-    try{ await navigator.clipboard.writeText(text); toast('Copied ' + text); return; }
-    catch(_){ /* fall through */ }
-  }
-  let ok = false;
-  try{
-    const ta = document.createElement('textarea');
-    ta.value = text; ta.setAttribute('readonly','');
-    ta.style.cssText = 'position:fixed;top:-1000px';
-    document.body.appendChild(ta);
-    ta.select(); ta.setSelectionRange(0, text.length);
-    ok = document.execCommand('copy');
-    ta.remove();
-  }catch(_){ ok = false; }
-  // Never claim a copy that did not happen: the user would paste whatever was
-  // on the clipboard before and not know why it was wrong.
-  toast(ok ? 'Copied ' + text : 'Could not copy — select and copy manually');
-}
-
-function toast(msg){const t=document.getElementById('toast');t.textContent=msg;
-  t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
-render();
 </script>
+<script src="/static/panel-grid.js?v=__ASSET_VER__"></script>
+<script src="/static/panel-actions.js?v=__ASSET_VER__"></script>
 </body></html>

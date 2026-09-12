@@ -426,10 +426,10 @@ class CopyTheEmojiId(unittest.TestCase):
     def test_the_page_stops_the_click_before_the_toggle(self):
         """The label sits inside the card, so without this a copy also toggles.
 
-        Asserted against the served page because the ordering lives in the
+        Asserted against the served scripts because the ordering lives in the
         click handler, not in any Python function.
         """
-        page = p.PAGE
+        page = p.SCRIPT
         copy_at = page.index("closest('.copyable')")
         toggle_at = page.index("closest('.card')", copy_at - 400)
         self.assertLess(copy_at, toggle_at,
@@ -442,7 +442,7 @@ class CopyTheEmojiId(unittest.TestCase):
         Video is bounded the same way the animated cards are -- by the viewport
         observer and the Animation switch -- not by the mouse.
         """
-        page = p.PAGE
+        page = p.SCRIPT
         self.assertIn("data-play", page.replace("dataset.play", "data-play"))
         self.assertIn("video[data-play]", page)
         # The remaining hover handlers exist only for prefers-reduced-motion.

@@ -232,14 +232,21 @@ to copy that id** to the clipboard — it does not toggle the card. Visually sim
 to each other so look-alikes are quick to deselect. Click **Save**, then
 `build_collection.py` only publishes the included items.
 
+**The grid is virtual**: only the rows near the viewport exist in the page,
+whatever the catalog holds, so a thousand cards scroll and drag like a
+hundred. **Zoom** with the `−` / `100%` / `+` buttons, Ctrl+wheel or
+Ctrl+plus/minus (Ctrl+0 resets) — out to fit more emoji per screen, in to
+inspect one; below 75 % the text under each thumbnail is dropped so the rows
+pack tighter. The level is remembered across reloads.
+
 Animated `.tgs` are **pre-rendered to animated WebP on the server** (rlottie)
-and shown as plain `<img>`, so a grid of hundreds animates on the browser's
-compositor with no animation library in the page. Only cards near the viewport
-carry the animated frames; the rest hold a still. The header's **Animation:
-On/Off** button stops that everywhere (remembered across reloads), and
-`--preview-fps` sets the frame rate, which is the real lever on how heavy the
-grid feels. Video plays the same way — on its own while near the viewport,
-not on hover, since a grid of stills cannot be curated.
+and shown as plain `<img>`, so hundreds of them animate on the browser's
+compositor with no animation library in the page. Only cards inside the
+viewport carry the animated frames; the rest hold a still. The header's
+**Animation: On/Off** button stops that everywhere (remembered across reloads),
+and `--preview-fps` sets the frame rate. Video plays the same way — on its own
+while in view, not on hover, since a grid of stills cannot be curated — and a
+video card only holds a player while it is on screen.
 
 ```powershell
 .venv\Scripts\python.exe panel.py        # or run.ps1 -> B4
@@ -309,7 +316,7 @@ Emoji Mapper/                  # the whole project
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
     test/                      # vitest, fetch stubbed (never reaches Telegram)
-  assets/                      # shipped images (incl. the brand logo) + panel.html
+  assets/                      # shipped images (incl. the brand logo) + the panel page and its two scripts
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   requirements.txt

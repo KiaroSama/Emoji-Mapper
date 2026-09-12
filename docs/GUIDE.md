@@ -262,7 +262,9 @@ looking empty.
 Dark neon panel: every emoji is a big labelled card (static=image,
 video=`<video>`, animated `.tgs`=pre-rendered to animated WebP). All selected by
 default. Click to toggle, **Shift+click** for a range. Look-alikes are ordered
-adjacently. Click **Save** → writes the `included` flag to the catalog.
+adjacently. **Zoom** with `−` / `100%` / `+` or Ctrl+wheel to fit more emoji on
+a screen or to inspect one; the grid is virtual, so a thousand cards cost what
+a hundred do. Click **Save** → writes the `included` flag to the catalog.
 
 ### 6.4 Publish the catalog into new packs
 
@@ -885,14 +887,18 @@ archive has fallen behind. Say in the reply whenever you cleared it.
 | `--all` | off | Also show emoji already live in a pack. |
 | `--with-pack N` | off | Also show the emoji already live in pack **N**. Repeatable. |
 | `--port` | `9450` | Local port. |
-| `--preview-fps` | `15` | Frame rate for animated previews. The grid decodes every frame of every visible card, so this is the main lever on how heavy the panel feels. Lower it if it drags. |
+| `--preview-fps` | `15` | Frame rate for animated previews. The browser decodes every frame of every animated card that is on screen, so this is the lever on CPU while the grid is idle. |
 | `--no-open` | off | Don't auto-open the browser. |
 
 Interactions: **click** a card to toggle include/exclude, **click the
 `premium-id:` label** to copy that id to the clipboard (it stops there and does
-not toggle the card), **drag** a card to reorder (this is the publish order).
-Each card shows its **publish position** at the top; the numbers are recomputed
-from the order on every drop, never stored on the card. **The brand logo is
+not toggle the card), **drag** a card to reorder (this is the publish order),
+**zoom** with `−` / `100%` / `+`, Ctrl+wheel or Ctrl+plus/minus (Ctrl+0 resets;
+the level is remembered). Zooming out packs more emoji per screen and, below
+75 %, drops the text rows under the thumbnails; the emoji at the top of the
+screen stays at the top of the screen. Each card shows its **grid position** at
+the top; the numbers are written from the order every time the grid is
+projected, never stored on the card. **The brand logo is
 numbered and counted**, because it is the first emoji of every set it leads and
 costs one of the 200 (`capacity = per_set - 1` in `build_collection`). Leaving
 it out made the panel disagree with what ships — the owner read "200" and the
@@ -1684,10 +1690,10 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 
 | Route | Response |
 |-------|----------|
-| `GET /` | The single-page HTML (items embedded as JSON). |
+| `GET /` | The page (`assets/panel.html`: markup, CSS, items embedded as JSON, the per-run values). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
 | `GET /preview/<key>?fps=N` | A `.tgs` rendered to an **animated WebP**, cached on disk. The rate is in the URL because the response is immutable-cached. |
-| `GET /static/<file>` | Static assets (logo, favicon), traversal-guarded. |
+| `GET /static/<file>` | Static assets (logo, favicon, and the two panel scripts), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
 | `POST /api/save` | Body `{"excluded":[keys]}` → `catalog.set_inclusion(...)`. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 
@@ -1727,18 +1733,49 @@ Front-end:
   marker that matched would swallow a drop aimed past it and silently do
   nothing. Card numbers stay **grid** positions and are unchanged by the
   markers.
-- **Static and animated are both plain `<img loading="lazy">`** — the browser
-  owns decoding and compositing, and there are no player objects to build or
-  tear down. Video is `<video preload="metadata">` (muted, looping,
-  `playsinline`), started by the observer rather than by the `autoplay`
-  attribute, so playback is bounded the same way everything else is.
-- **One `IntersectionObserver` (300-px margin) drives all of it**: it swaps an
+- **The grid is virtual** (`assets/panel-grid.js`). `ITEMS` is the order and
+  the selection; the DOM holds only the rows within half a screen of the
+  viewport, between two spacers that carry the height of everything above and
+  below. Every card is the same fixed height and every row offset is integer
+  arithmetic on numbers JavaScript computes and hands to CSS as variables
+  (`--cols`, `--cardH`, `--sepH`, `--gap`, `--z`), so a render is a binary
+  search plus ~100 node moves, whatever the catalog holds. Measured on the
+  1 063-card catalog in headless Chromium: a drag step cost 24–46 ms per
+  pointer move on the old page (every one re-laid-out 1 062 cards; 40 % of
+  frames over 32 ms) and 16–24 ms here with none over 32 ms; a cold scroll
+  sweep spent 802 ms in long tasks before and 113 ms after, and the 1.8 s hang
+  the old page showed on the way back up is gone. 11 743 DOM nodes became 714.
+- **Zoom** scales the card: everything inside a card is sized in `em` off one
+  `font-size: calc(12px * var(--z))`, and the column count follows from the
+  container width, so `--z` changes both how big a tile is and how many fit.
+  Below `0.75` the body gets `compact` and the text rows are dropped. The
+  item at the top of the screen is re-scrolled to the top after the relayout.
+  Range 0.4–2.4, steps of ×1.15, persisted as `panelZoom`. Ctrl+wheel and
+  Ctrl+plus/minus/0 are intercepted (`passive:false`) so the browser's own page
+  zoom does not fire as well.
+- **Drag edits the model as you drag** (`assets/panel-actions.js`). Each
+  `dragover` that changes the target moves the carried items inside `ITEMS`
+  and re-projects the grid, so the translucent tile IS where they land; the
+  drop only records the snapshot taken at `dragstart` as history and saves; a
+  cancel restores that snapshot. There is no index arithmetic at drop time.
+  A carried card whose row scrolls out of the window is **parked** in a hidden
+  holder, never removed: the browser delivers `dragend` to the source node,
+  and a removed source leaves the gesture stuck.
+- **Static and animated are both plain `<img>`** — the browser owns decoding
+  and compositing. Not `loading="lazy"`: a card only exists once its row is
+  within half a screen, so the window is the lazy loading. Video is
+  `<video preload="metadata">` (muted, looping, `playsinline`) whose **source
+  is attached only while the card is within 300 px of the viewport** and
+  released when it leaves (`videoIO`): a media player is the most expensive
+  thing a card can create or tear down, and 56 of them alive at once was what
+  the old page paid on every load. A card that is unmounted releases its
+  player the same way.
+- **One `IntersectionObserver` (no margin) gates playback**: it swaps an
   animated card's `src` between the still (`?still=1`) and the animated WebP,
   and plays/pauses `<video>`. A grid of *everything* playing was the original
   CPU sink; the fix is the viewport bound, not hover — a grid of frozen stills
-  cannot be curated, which is why hover-only was rejected for both.
-  `content-visibility:auto` is set as well but does not by itself stop an
-  off-screen animation from costing its decoded buffers.
+  cannot be curated, which is why hover-only was rejected for both. Scrolling
+  freezes every card on frame 0 until it settles.
 - `prefers-reduced-motion` is respected: nothing plays by itself, and hover
   becomes the only way to play a video, which is what those handlers are for.
 

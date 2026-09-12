@@ -14,6 +14,7 @@ Run:  python panel.py            (serves http://127.0.0.1:9450 and opens it)
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -422,7 +423,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
                             .replace("__PREVIEW_FPS__", str(preview_fps))
                             .replace("__PER_SET__", str(PER_SET))
-                            .replace("__HIDDEN__", str(hidden_now[0])))
+                            .replace("__HIDDEN__", str(hidden_now[0]))
+                            .replace("__ASSET_VER__", ASSET_VER))
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -458,7 +460,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 self._send(200, body, "image/webp", cache=_IMMUTABLE)
                 return
             if self.path.startswith("/static/"):
-                name = unquote(self.path[len("/static/"):])
+                # The version query is for the cache, not the filesystem.
+                name = unquote(self.path[len("/static/"):].partition("?")[0])
                 f = (ASSET_DIR / name).resolve()
                 # Resolve first, then require physical containment: comparing
                 # parents would reject a legitimate subdirectory and would not
@@ -615,6 +618,12 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
 # path is exactly how the "mandatory" brand logo silently vanished on every
 # other machine. ThePanelPageActuallyShips pins that this file is present.
 PAGE = (ASSET_DIR / "panel.html").read_text(encoding="utf-8")
+# The behaviour lives in two scripts served from /static/, which is
+# immutable-cached: without a version in the URL an edited script would keep
+# being served stale from the browser cache. The version IS the content.
+SCRIPT_FILES = ("panel-grid.js", "panel-actions.js")
+SCRIPT = "\n".join((ASSET_DIR / f).read_text(encoding="utf-8") for f in SCRIPT_FILES)
+ASSET_VER = hashlib.sha1(SCRIPT.encode("utf-8")).hexdigest()[:12]
 
 
 def _detect_bot_username() -> str:
