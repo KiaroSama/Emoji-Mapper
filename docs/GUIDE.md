@@ -248,7 +248,16 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 
 ```powershell
 .venv\Scripts\python.exe panel.py [--data-dir collection] [--port 9450] [--preview-fps 15] [--no-open]
+                                   [--with-pack N ...] [--all]
 ```
+
+**An emoji already live in a pack is HIDDEN by default**, so a bare `panel.py`
+shows the next pack's candidates and nothing else. `--with-pack N` un-hides one
+published set so it can be rearranged beside them; repeat the flag per pack.
+`--all` brings back every finished pack, which is usually hundreds of cards you
+cannot act on. `run.ps1 -> B4` reads the published sets from the publisher's own
+state file and offers them (`[Y/n]`, Enter = yes) rather than leaving the grid
+looking empty.
 
 Dark neon panel: every emoji is a big labelled card (static=image,
 video=`<video>`, animated `.tgs`=pre-rendered to animated WebP). All selected by
