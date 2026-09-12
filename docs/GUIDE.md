@@ -2092,6 +2092,20 @@ The way out is to stop asking the Lottie validator at all: **render the
 animation and ship it as a VIDEO emoji.** The mask is applied by the renderer,
 so the artwork is unchanged, and `format=video` never goes near the `.tgs` path.
 
+**And the mirror case: a video source can UNDER-DECLARE its own length.** One
+sticker served by Telegram carried a `duration=3.000` container header over
+3.916 s of packets — 94 frames ending at 3.875 s. Telegram's uploader reads the
+header, so the original was accepted; our `-c copy` remux recomputes duration
+from the packets, wrote the truthful 3.916 s, and came back
+`STICKER_VIDEO_LONG`. The picture was identical, frame for frame. Here our
+re-encode is the honest one and the source is not.
+
+`reencode_in_place` therefore keeps the original whenever a remux would cross
+`WEBM_MAX_SECONDS`, exactly as it already does for the byte caps: a byte-clone
+is a lesser failure than an upload that cannot happen. To publish such a source
+as our own bytes, re-time it first — speeding the whole loop to fit keeps the
+animation, where trimming the tail does not.
+
 ### Expect flood waits, and read the log
 
 A 200-emoji publish takes roughly 45 minutes, most of it in Telegram's flood
