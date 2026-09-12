@@ -458,8 +458,27 @@ function Action-PublishCollection ($py) {
 
 function Action-Panel ($py) {
     Write-Title "Curate panel (pick which emoji go into the pack)"
+    # The panel hides emoji that are already live, so a bare `panel.py` shows the
+    # NEXT pack's candidates and nothing else. Arranging a published pack needs
+    # --with-pack per set, and opening the menu entry without it looked like the
+    # packs had vanished. Read the sets from the publisher's own state file.
+    $packs = @()
+    foreach ($state in (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'collection') `
+                        -Filter 'publish_*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $doc = Get-Content -LiteralPath $state.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($set in $doc.sets) { if ($null -ne $set.index) { $packs += [int]$set.index } }
+        } catch { }
+    }
+    $packs = $packs | Sort-Object -Unique
+    $panelArgs = @('panel.py')
+    if ($packs.Count -gt 0) {
+        $answer = Ask-YesNo ("Also show the " + $packs.Count + " pack(s) already published, so they can be rearranged?")
+        if ($answer -eq 'back') { return }
+        if ($answer) { foreach ($n in $packs) { $panelArgs += @('--with-pack', "$n") } }
+    }
     Write-Info "Opening the web panel in your browser... (Ctrl+C here to stop it)"
-    Invoke-PyReport $py @('panel.py') "Web panel"
+    Invoke-PyReport $py $panelArgs "Web panel"
 }
 
 function Action-RunBot ($py) {
