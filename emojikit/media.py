@@ -708,6 +708,20 @@ def reencode_in_place(path: Path, fmt: str) -> bool:
                 dst = Path(td) / "remux.webm"
                 _run([ffmpeg_path(), "-v", "error", "-y", "-i", str(path),
                       "-c", "copy", str(dst)])
+                # A remux recomputes the container duration FROM THE PACKETS,
+                # and some published stickers under-declare their own length: a
+                # real one served by Telegram carried a 3.000 s header over
+                # 3.916 s of frames. Telegram's uploader reads the header, so
+                # the original passed and our truthful rewrite was refused with
+                # STICKER_VIDEO_LONG. Same trade-off as the size cap below --
+                # a byte-clone beats an upload that cannot happen.
+                if probe_video(dst).duration > WEBM_MAX_SECONDS:
+                    log.warning("re-encode of %s would declare %.3fs, over the "
+                                "%.1fs cap (the source under-declares its own "
+                                "length); keeping the original",
+                                path.name, probe_video(dst).duration,
+                                WEBM_MAX_SECONDS)
+                    return False
                 out = dst.read_bytes()
         else:
             return False

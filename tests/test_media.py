@@ -634,6 +634,44 @@ class TestReencodeGivesUsOurOwnBytes(unittest.TestCase):
         self.assertEqual(p.read_bytes(), b"\x00\x01\x02")
 
 
+class AnUnderDeclaredVideoKeepsItsOriginalBytes(unittest.TestCase):
+    """A published sticker can claim to be shorter than it is.
+
+    One served by Telegram carried a 3.000 s container header over 3.916 s of
+    frames. Telegram's uploader reads the header, so the original was accepted
+    while our truthful remux -- which recomputes duration from the packets --
+    came back STICKER_VIDEO_LONG. Keeping the original is the same trade-off
+    the size cap already makes: a byte-clone beats an upload that cannot happen.
+    """
+
+    def test_a_remux_over_the_duration_cap_keeps_the_original(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "v.webm"
+            src.write_bytes(b"original-bytes")
+            before = src.read_bytes()
+            long = media.VideoInfo(width=100, height=100,
+                                   duration=media.WEBM_MAX_SECONDS + 0.9,
+                                   codec="vp9")
+            with mock.patch.object(media, "_run"),                  mock.patch.object(media, "probe_video", return_value=long),                  mock.patch.object(Path, "read_bytes", autospec=True,
+                              side_effect=lambda self: before):
+                self.assertFalse(media.reencode_in_place(src, "video"))
+            self.assertEqual(src.read_bytes(), before, "the original must survive")
+
+    def test_a_remux_inside_the_cap_still_rewrites(self):
+        """The guard must not turn every video into a byte-clone."""
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "v.webm"
+            src.write_bytes(b"original-bytes")
+            ok = media.VideoInfo(width=100, height=100,
+                                 duration=media.WEBM_MAX_SECONDS - 0.5,
+                                 codec="vp9")
+            seen = iter([b"original-bytes", b"remuxed-bytes"])
+            with mock.patch.object(media, "_run"),                  mock.patch.object(media, "probe_video", return_value=ok),                  mock.patch.object(Path, "read_bytes", autospec=True,
+                              side_effect=lambda self: next(seen)):
+                self.assertTrue(media.reencode_in_place(src, "video"))
+            self.assertEqual(src.read_bytes(), b"remuxed-bytes")
+
+
 class TestSingleFrameVideoKeepsAContentKey(unittest.TestCase):
     """A one-frame video's key must describe its PICTURE, not its bytes.
 
