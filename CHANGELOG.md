@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - the curate panel is a virtual grid, and it zooms
+
+The panel built every card up front. With six published packs open that was
+1 068 cards, and every drag step re-laid-out all of them (14-17 ms per pointer
+move, measured), while 56 `<video>` elements each held a media player from the
+moment the page loaded. Now only the rows within half a screen of the viewport
+exist; two spacers carry the height of the rest, every card is one fixed
+height, and every row offset is integer arithmetic, so a render is a binary
+search plus a hundred node moves whatever the catalog holds. Drag edits the
+order as you drag and re-projects the grid — the drop records, a cancel
+restores — and a video card gets its source only while it is near the viewport.
+Measured in headless Chromium on that catalog: drag frames 24-46 ms → 16-24 ms
+with none over two vsyncs, cold-scroll long tasks 802 ms → 113 ms, 11 743 DOM
+nodes → 714.
+
+**Zoom**: `−` / `100%` / `+` in the header, Ctrl+wheel, Ctrl+plus/minus/0.
+Out fits more emoji per screen (below 75 % the text under each thumbnail is
+dropped so rows pack tighter); in enlarges one. The level is remembered and
+the emoji at the top of the screen stays there across a change.
+
+The behaviour moved out of `assets/panel.html` into `assets/panel-grid.js` and
+`assets/panel-actions.js`, served from `/static/` under a content-hash `?v=`
+so an edited script is never served stale from the immutable cache.
+`scripts/panel_sandbox.py` now forwards `--all` / `--with-pack N` to the panel
+and clones the publish state, so a sandbox can show published packs too.
+
 ### Changed - the roster page keeps the panel's view-only controls, and gates its media
 
 Stripping "everything that mutates" from the roster page took the header
