@@ -171,19 +171,22 @@ class LosingTheServerIsNeverSilent(MutationGuard):
         status, _ = self._post("/api/order", {"order": ["s:" + "0" * 30]})
         self.assertEqual(status, 400)
 
+    # The behaviour lives in the served scripts (panel.SCRIPT); the page itself
+    # (panel.PAGE) carries only the markup the scripts act on.
+
     def test_the_page_polls_and_keeps_the_warning_up(self):
-        page = p.PAGE
-        self.assertIn("/api/ping", page)
-        self.assertIn("setInterval(", page)
+        script = p.SCRIPT
+        self.assertIn("/api/ping", script)
+        self.assertIn("setInterval(", script)
         # A banner, not a toast: the toast auto-hides after 2600ms.
-        self.assertIn("id=\"alert\"", page)
-        self.assertNotIn("setTimeout(()=>a.classList.remove('show')", page)
+        self.assertIn("id=\"alert\"", p.PAGE)
+        self.assertNotIn("setTimeout(()=>a.classList.remove('show')", script)
 
     def test_unsaved_work_is_remembered_and_retried(self):
-        page = p.PAGE
-        self.assertIn("pendingOrder", page)
+        script = p.SCRIPT
+        self.assertIn("pendingOrder", script)
         # The heartbeat flushes it, so recovery needs no action from the owner.
-        beat = page[page.index("setInterval(async ()=>{"):]
+        beat = script[script.index("setInterval(async ()=>{"):]
         self.assertIn("flushOrder(pendingOrder)", beat[:600])
 
     def test_a_restarted_panel_does_not_strand_the_page(self):
@@ -193,16 +196,16 @@ class LosingTheServerIsNeverSilent(MutationGuard):
         protects -- so this weakens nothing, and it is the difference between
         "restart the panel and lose your afternoon" and "it catches up".
         """
-        page = p.PAGE
-        api = page[page.index("async function apiPost("):]
+        script = p.SCRIPT
+        api = script[script.index("async function apiPost("):]
         body = api[:api.index("async function flushOrder")]
         self.assertIn("r.status === 403", body)
         self.assertIn("const TOKEN =", body)     # re-parsed from a fresh "/"
 
     def test_the_browser_asks_before_closing_on_unsaved_work(self):
-        page = p.PAGE
-        self.assertIn("beforeunload", page)
-        guard = page[page.index("addEventListener('beforeunload'"):]
+        script = p.SCRIPT
+        self.assertIn("beforeunload", script)
+        guard = script[script.index("addEventListener('beforeunload'"):]
         self.assertIn("if(pendingOrder)", guard[:200])
 
 

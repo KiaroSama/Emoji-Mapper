@@ -1,9 +1,11 @@
-"""Assertions against the page the panel serves (``panel.PAGE``).
+"""Assertions against what the panel serves: the page (``panel.PAGE``) and its
+two scripts (``panel.SCRIPT``, the files concatenated in load order).
 
-Drag-and-drop, undo/redo, the viewport observer and the pack separators all
-live in the page's own JavaScript, so there is no Python function to call --
-the served document is the only level at which the behaviour exists. Every
-one of these pins a bug that was actually reported.
+Drag-and-drop, undo/redo, the virtual grid, zoom, the viewport observers and
+the pack separators all live in the page's own JavaScript, so there is no
+Python function to call -- the served document is the only level at which the
+behaviour exists. Every one of these pins a bug that was actually reported, or
+a measured cost that was actually paid.
 """
 
 from __future__ import annotations
@@ -18,15 +20,20 @@ sys.path.insert(0, str(ROOT))
 
 import panel as p
 
+PAGE = p.PAGE
+SCRIPT = p.SCRIPT
+
+
+def block(src: str, start: str, end: str) -> str:
+    """The text from the first ``start`` up to the next ``end`` after it."""
+    i = src.index(start)
+    return src[i:src.index(end, i)]
+
 
 class DragAndDropOrdering(unittest.TestCase):
-    """Two reported bugs, pinned at the only level available: the served page.
+    """The model is edited AS you drag; the drop only keeps what it finds."""
 
-    The reorder itself lives in a drop handler, so there is no Python function
-    to call. What these assert is exactly what regressed.
-    """
-
-    def test_the_drop_commits_the_preview_instead_of_recomputing_it(self):
+    def test_the_drop_keeps_the_model_instead_of_recomputing_an_index(self):
         """Two bugs came from drop-time index arithmetic; there is none now.
 
         It once fell back to `ITEMS.length-1` when the release was not on a
@@ -35,78 +42,77 @@ class DragAndDropOrdering(unittest.TestCase):
         the removal -- which lands the card one slot past the tile you aimed at
         when dragging DOWN and exactly on it when dragging UP.
 
-        The drag now moves the real node, so the grid IS the proposal and the
-        drop only adopts it. No index is derived at drop time, so neither bug
-        has anywhere to live.
+        Every dragover now moves the carried items inside ITEMS and re-projects
+        the grid, so the translucent tile IS where they land. The drop compares
+        the order with the snapshot taken at dragstart and records it.
         """
-        page = p.PAGE
-        self.assertNotIn("card ? ITEMS.findIndex(x=>x.key===card.dataset.key) "
-                         ": ITEMS.length-1", page)
-        drop = page[page.index("grid.addEventListener('drop'"):]
-        drop = drop[:drop.index("grid.addEventListener('dragend'")]
+        drop = block(SCRIPT, "grid.addEventListener('drop'", "grid.addEventListener('dragend'")
         self.assertIn("commitDrag()", drop)
         for arithmetic in ("findIndex", "splice", "ITEMS.length"):
-            self.assertNotIn(arithmetic, drop,
-                             f"the drop handler must not reach for {arithmetic}")
-        commit = page[page.index("function commitDrag(){"):]
-        commit = commit[:commit.index("function endDrag")]
-        self.assertIn("grid.querySelectorAll('.card')", commit,
-                      "the committed order must be read off the DOM preview")
+            self.assertNotIn(arithmetic, drop, f"the drop handler must not reach for {arithmetic}")
+        commit = block(SCRIPT, "function commitDrag(){", "function endDrag")
+        self.assertIn("if(order.every((k,i)=>k===dragSnap.order[i])) return;", commit,
+                      "released where it started: nothing to record, nothing to save")
+        self.assertLess(commit.index("remember(dragSnap);"), commit.index("saveOrder();"))
 
-    def test_a_cancelled_drag_puts_the_card_back(self):
-        """The preview mutates the DOM, so ITEMS and the grid disagree until
-        the drop. An escape or a drop outside must undo it, or the page shows
-        an order that is not the one it would save."""
-        page = p.PAGE
-        start = page[page.index("grid.addEventListener('dragstart'"):]
-        self.assertIn("dragHome=card.nextSibling", start[:start.index("});")])
-        # Every card the gesture carried records its own home, so the same
-        # restore covers a one-card drag and a whole picked run.
-        self.assertIn("dragHomes = dragNodes.map(n => [n, n.nextSibling])",
-                      start[:start.index("});")])
-        end = page[page.index("function endDrag(committed){"):]
-        end = end[:end.index("// --- Auto-scroll")]
-        self.assertIn("if(!committed", end)
-        self.assertIn("grid.insertBefore(n,", end)
+    def test_a_cancelled_drag_restores_the_order_taken_at_dragstart(self):
+        """The model moves with the pointer, so an escape or a drop outside
+        must put the dragstart order back, or the page shows an order that is
+        not the one it saved."""
+        start = block(SCRIPT, "grid.addEventListener('dragstart'", "grid.addEventListener('dragover'")
+        self.assertIn("dragSnap=snapshot();", start)
+        end = block(SCRIPT, "function endDrag(committed){", "// --- Auto-scroll")
+        self.assertIn("if(!committed && dragKey !== null){ applyOrder(dragSnap.order); relayout(); }", end)
 
-    def test_the_preview_side_decides_before_or_after(self):
+    def test_the_pointer_side_decides_before_or_after(self):
         """Without it the last slot of a row is unreachable: every hover would
         mean "before this card"."""
-        page = p.PAGE
-        over = page[page.index("grid.addEventListener('dragover'"):]
-        over = over[:over.index("grid.addEventListener('drop'")]
+        over = block(SCRIPT, "grid.addEventListener('dragover'", "function moveCarried")
         self.assertIn("getBoundingClientRect", over)
-        self.assertIn("r.left + r.width/2", over)
-        self.assertIn("card.nextSibling", over)
+        self.assertIn("(e.clientX > r.left + r.width/2) ? j + 1 : j", over)
+
+    def test_hovering_the_slot_the_run_already_holds_changes_nothing(self):
+        """dragover fires continuously; a relayout per event that moves nothing
+        would be the old full-grid cost back under another name."""
+        move = block(SCRIPT, "function moveCarried(slot){", "grid.addEventListener('drop'")
+        self.assertIn("if(next.every((x,i)=>x===ITEMS[i])) return;", move)
+        self.assertLess(move.index("return;"), move.index("relayout();"))
 
     def test_dragging_to_an_edge_scrolls_the_page(self):
         """Without this the drag is trapped in the current viewport.
 
         With 200 cards there is otherwise no way to carry #200 up to #10.
         """
-        page = p.PAGE
-        self.assertIn("function edgeScroll(", page)
-        self.assertIn("requestAnimationFrame", page)
+        self.assertIn("function edgeScroll(", SCRIPT)
+        self.assertIn("requestAnimationFrame", SCRIPT)
         # On the document: at the top of the window the pointer sits over the
         # sticky header, where a grid-only listener never fires.
-        doc_over = page.index("document.addEventListener('dragover'")
-        self.assertIn("edgeScroll(e.clientY)", page[doc_over:doc_over + 300])
+        doc_over = SCRIPT.index("document.addEventListener('dragover'")
+        self.assertIn("edgeScroll(e.clientY)", SCRIPT[doc_over:doc_over + 300])
 
-    def test_the_position_number_is_recomputed_not_stored(self):
+    def test_a_carried_card_is_parked_never_unmounted(self):
+        """The browser delivers dragend to the SOURCE node. A carried card whose
+        row scrolls out of the window used to be a candidate for removal, and a
+        removed source leaves the gesture stuck with no drop and no dragend."""
+        retire = block(SCRIPT, "function retire(node){", "function relayout")
+        self.assertIn("if(carried.has(node.dataset.key)) park.appendChild(node);", retire)
+        self.assertIn("else unmountCard(node);", retire)
+        self.assertIn('id="park"', PAGE)
+        # And the park is emptied once nothing carries them any more.
+        end = block(SCRIPT, "function endDrag(committed){", "// --- Auto-scroll")
+        self.assertIn("while(park.firstChild) unmountCard(park.firstChild);", end)
+
+    def test_the_position_number_is_projected_not_stored(self):
         """A number written at build time is right once and wrong after a drag.
 
-        renumber() walks ITEMS, which IS the order, so there is no second copy
-        to drift. It has to run both after the first render and after a drop.
+        render() writes the index of every mounted card each time the grid is
+        projected -- ITEMS *is* the order, so there is no second copy to drift.
         """
-        page = p.PAGE
-        self.assertIn("function renumber(", page)
-        self.assertNotIn("el('span','pos', n", page)   # never filled at build time
-        render = page[page.index("function render(){"):]
-        self.assertIn("renumber();", render[:render.index("function updateCount")])
-        # Up to saveOrder(), not to the first endDrag() -- that one is the
-        # no-card early return, which sits BEFORE any reordering happens.
-        drop = page[page.index("addEventListener('drop'"):]
-        self.assertIn("renumber();", drop[:drop.index("saveOrder();")])
+        card = block(SCRIPT, "function makeCard(it){", "function packStarts")
+        self.assertIn("hdr.appendChild(el('span','pos',''));", card)
+        self.assertNotIn("el('span','pos', n", SCRIPT)   # never filled at build time
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertIn("if(pos.textContent !== String(k + 1)) pos.textContent = k + 1;", render)
 
     def test_the_logo_IS_numbered_because_it_takes_a_real_slot(self):
         """It leads every set it is added to, so it costs one of the 200.
@@ -115,27 +121,22 @@ class DragAndDropOrdering(unittest.TestCase):
         it out of the panel's numbering made the panel disagree with what ships:
         the owner read "200" and the pack was 201.
         """
-        page = p.PAGE
-        hdr = page[page.index("const hdr = el('div','hdr');"):]
-        block = hdr[:hdr.index("card.appendChild(hdr);")]
-        self.assertIn("hdr.appendChild(el('span','pos',''));", block)
+        hdr = block(SCRIPT, "const hdr = el('div','hdr');", "card.appendChild(hdr);")
+        self.assertIn("hdr.appendChild(el('span','pos',''));", hdr)
         # The tick is the one thing the logo does NOT get: it is not toggleable.
-        self.assertIn("if(!it.isLogo) hdr.appendChild(el('span','tick'", block)
-        renumber = page[page.index("function renumber(){"):]
-        renumber = renumber[:renumber.index(chr(10) + "}")]
-        self.assertNotIn("if(it.isLogo) continue", renumber,
-                         "skipping the logo is what made the count wrong")
+        self.assertIn("if(!it.isLogo) hdr.appendChild(el('span','tick'", hdr)
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertNotIn("isLogo", render, "skipping the logo is what made the count wrong")
 
     def test_a_selection_that_cannot_be_one_pack_says_so(self):
         """200 chosen emoji plus the logo is 201, over Telegram's per-set cap.
 
         Surfaced in the header rather than discovered as a surprise second set.
         """
-        page = p.PAGE
-        self.assertIn("included > PER_SET", page)
-        self.assertIn("Math.ceil(included / PER_SET)", page)
+        self.assertIn("included > PER_SET", SCRIPT)
+        self.assertIn("Math.ceil(included / PER_SET)", SCRIPT)
         # The limit comes from build_collection, not a second copy that drifts.
-        self.assertIn("PER_SET", p.PAGE)
+        self.assertIn("__PER_SET__", PAGE)
         self.assertEqual(p.PER_SET, 200)
 
     def test_the_card_header_cannot_overlap_itself(self):
@@ -144,100 +145,80 @@ class DragAndDropOrdering(unittest.TestCase):
         Absolutely positioned at left / centre / right, "animated" ran straight
         under the number and both were unreadable. They are now a centred
         COLUMN -- number over format -- with only the tick pinned to the corner,
-        which is what keeps it from pushing the stack off centre. The badge is
-        still the only one allowed to shrink, and "animated" carries a short
-        label because it does not fit.
+        which is what keeps it from pushing the stack off centre.
         """
-        page = p.PAGE
-        hdr = page[page.index(".hdr{"):]
-        rule = hdr[:hdr.index("}")]
+        rule = block(PAGE, ".hdr{", "}")
         self.assertIn("display:flex", rule)
         self.assertIn("flex-direction:column", rule)
         self.assertIn("align-items:center", rule)
         # In the column flow, so they cannot be placed on top of each other.
         for cls in (".badge{", ".pos{"):
-            r = page[page.index(cls):]
-            self.assertNotIn("position:absolute", r[:r.index("}")], cls)
+            self.assertNotIn("position:absolute", block(PAGE, cls, "}"), cls)
         # The tick is the one exception, and deliberately so.
-        tick = page[page.index(".tick{"):]
-        self.assertIn("position:absolute", tick[:tick.index("}")])
-        # The full word fits now that the header is a column, so the
-        # abbreviation that the single-strip layout forced is gone.
-        self.assertNotIn("FMT = {animated: 'anim'", page)
+        self.assertIn("position:absolute", block(PAGE, ".tick{", "}"))
 
     def test_the_scroll_loop_cannot_outlive_the_drag(self):
         """A drag released outside the window fires no drop.
 
         An unguarded rAF loop would then scroll the page forever.
         """
-        page = p.PAGE
-        step = page[page.index("function stepEdge("):]
-        self.assertIn("if(dragKey === null || !edgeSpeed) return;",
-                      step[:step.index("}")+400])
-        self.assertIn("function stopEdgeScroll(", page)
-        self.assertIn("cancelAnimationFrame", page)
+        step = SCRIPT[SCRIPT.index("function stepEdge("):]
+        self.assertIn("if(dragKey === null || !edgeSpeed) return;", step[:step.index("}") + 400])
+        self.assertIn("function stopEdgeScroll(", SCRIPT)
+        self.assertIn("cancelAnimationFrame", SCRIPT)
 
 
 class UndoRedoAndFormatColours(unittest.TestCase):
     """The header controls, the history stack, and telling formats apart."""
 
     def test_every_mutation_records_the_state_to_return_to(self):
-        """remember() must run BEFORE the change, at all three sites.
+        """remember() must hold the state from BEFORE the change, at all three
+        sites. A drag mutates from its first dragover, so it records the
+        snapshot taken at dragstart rather than one taken at the drop.
 
         A missed site is invisible until someone undoes past it and gets the
         wrong state back, which is worse than having no undo at all.
         """
-        page = p.PAGE
-        for label, marker, mutation in (
-            ("select all / invert", "function setAll(fn){", "it.included = fn(it)"),
-            ("card toggle", "if(i < 0 || ITEMS[i].isLogo) return;", "ITEMS[i].included=!ITEMS[i].included"),
-            ("drag reorder", "function commitDrag(){", "ITEMS.length = 0"),
+        for label, marker, mutation, call in (
+            ("select all / invert", "function setAll(fn){", "it.included = fn(it)", "remember()"),
+            ("card toggle", "if(i < 0 || ITEMS[i].isLogo) return;", "ITEMS[i].included=!ITEMS[i].included", "remember()"),
+            ("drag reorder", "function commitDrag(){", "saveOrder();", "remember(dragSnap)"),
         ):
-            block = page[page.index(marker):]
-            block = block[:block.index(mutation)]
-            self.assertIn("remember()", block, f"{label} does not record history first")
+            self.assertIn(call, block(SCRIPT, marker, mutation), f"{label} does not record history first")
 
     def test_the_history_is_bounded(self):
         """A long curation session must not grow the stack without limit."""
-        page = p.PAGE
-        self.assertIn("HISTORY_MAX", page)
-        block = page[page.index("function remember(){"):]
-        self.assertIn("past.shift()", block[:block.index("}")+200])
+        self.assertIn("HISTORY_MAX", SCRIPT)
+        body = SCRIPT[SCRIPT.index("function remember(snap){"):]
+        self.assertIn("past.shift()", body[:body.index("}") + 200])
 
     def test_a_new_action_drops_the_redo_branch(self):
-        page = p.PAGE
-        block = page[page.index("function remember(){"):]
-        self.assertIn("future.length = 0", block[:block.index("updateHistoryButtons")])
+        body = SCRIPT[SCRIPT.index("function remember(snap){"):]
+        self.assertIn("future.length = 0", body[:body.index("updateHistoryButtons")])
 
-    def test_undo_moves_the_cards_instead_of_rebuilding_them(self):
-        """render() here would re-request all 200 thumbnails and previews.
+    def test_undo_re_projects_the_grid_instead_of_rebuilding_it(self):
+        """A rebuild would re-request every thumbnail and preview on screen.
 
-        Appending a node that is already in the document relocates it, so the
-        loaded media survives an undo.
+        relayout() reconciles the mounted nodes: a node already in the document
+        RELOCATES on insertBefore, so the loaded media survives an undo.
         """
-        page = p.PAGE
-        block = page[page.index("function applySnapshot("):]
-        block = block[:block.index("function undo()")]
-        # Comments explain what the code deliberately does NOT do, so they
-        # mention render() -- strip them or the assertion matches the prose.
-        code = chr(10).join(ln for ln in block.splitlines()
-                            if not ln.strip().startswith("//"))
-        self.assertIn("grid.appendChild(frag)", code)
-        self.assertNotIn("render()", code)
-        # Order auto-saves, so an undone reorder must reach the catalog too.
-        self.assertIn("saveOrder()", code)
+        body = block(SCRIPT, "function applySnapshot(", "function undo()")
+        self.assertIn("relayout();", body)
+        self.assertIn("saveOrder()", body, "order auto-saves, so an undone reorder must reach the catalog")
+        self.assertNotIn("cards.clear()", SCRIPT, "nothing may throw the mounted cards away wholesale")
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertIn("if(n === cur){ cur = cur.nextSibling; continue; }", render)
+        self.assertIn("grid.insertBefore(n, cur);", render)
 
     def test_each_format_has_its_own_accent(self):
-        page = p.PAGE
         colours = {}
         for fmt in ("static", "animated", "video"):
-            rule = page[page.index(f".card.fmt-{fmt}"):]
+            rule = PAGE[PAGE.index(f".card.fmt-{fmt}"):]
             colours[fmt] = rule[rule.index("--fmt:") + 6:rule.index(";")]
         self.assertEqual(len(set(colours.values())), 3, colours)
         # The drag affordance must not be any format's colour, or the card
         # being carried reads as "this one is animated".
-        drag = page[page.index(".card.drag{"):]
-        drag = drag[:drag.index("}")]
+        drag = block(PAGE, ".card.drag{", "}")
         for fmt, c in colours.items():
             self.assertNotIn(c, drag, f"the dragged card uses the {fmt} colour")
 
@@ -251,39 +232,31 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         the box, so it ate two pixels off every thumbnail and sat flush against
         the artwork; an outline is painted outside and resizes nothing.
         """
-        page = p.PAGE
-        thumb = page[page.index(".thumb{"):]
-        rule = thumb[:thumb.index("}")]
-        self.assertIn("outline:2px solid var(--fmt", rule)
-        self.assertIn("outline-offset:", rule,
-                      "without an offset the frame still touches the artwork")
-        self.assertNotIn("border:2px solid var(--fmt", rule,
+        rule = block(PAGE, ".thumb{", "}")
+        self.assertIn("outline:.17em solid var(--fmt", rule)
+        self.assertIn("outline-offset:", rule, "without an offset the frame still touches the artwork")
+        self.assertNotIn("border:", rule.replace("border-radius", ""),
                          "an inner border shrinks the thumbnail it frames")
-        card_on = page[page.index(".card.on{"):]
-        self.assertIn("#22c55e", card_on[:card_on.index("}")],
-                      "the selected frame must be green")
+        self.assertIn("#22c55e", block(PAGE, ".card.on{", "}"), "the selected frame must be green")
 
     def test_the_tick_offers_a_click_not_a_grab(self):
         """The card is cursor:grab because it is the drag handle, and cursor
         inherits -- so the switch you are aiming at offered a hand for a drag."""
-        page = p.PAGE
-        tick = page[page.index(".tick{"):]
-        self.assertIn("cursor:pointer", tick[:tick.index("}")])
+        self.assertIn("cursor:pointer", block(PAGE, ".tick{", "}"))
 
     def test_scrolling_holds_every_card_on_frame_zero(self):
         """The one moment the decoding is pure waste: the frames go past too
         fast to read while the compositor is already busy."""
-        page = p.PAGE
-        self.assertIn("function freezeAll(){", page)
-        scroll = page[page.index("addEventListener('scroll'"):]
-        scroll = scroll[:scroll.index("}, {passive:true});")]
+        self.assertIn("function freezeAll(){", SCRIPT)
+        scroll = block(SCRIPT, "addEventListener('scroll'", "}, {passive:true});")
         self.assertIn("freezeAll()", scroll)
         self.assertIn("applyAnim()", scroll, "it must thaw again when you stop")
-        self.assertIn("passive", page[page.index("addEventListener('scroll'"):][:400],
+        self.assertIn("scheduleRender()", scroll, "the window follows the scroll")
+        self.assertIn("passive", SCRIPT[SCRIPT.index("addEventListener('scroll'"):][:400],
                       "a non-passive scroll listener blocks the scroll it watches")
-        # The band beyond the viewport animated a row nobody was looking at.
-        self.assertIn("rootMargin: '0px'", page)
-        self.assertNotIn("rootMargin: '120px'", page)
+        # The playback observer has NO margin: a band beyond the viewport
+        # animated a row nobody was looking at, above AND below.
+        self.assertIn("}, {root: null, rootMargin: '0px'})", block(SCRIPT, "const animIO", "function setPlaying"))
 
     def test_a_switch_shows_its_own_state(self):
         """On/off shown by the control itself, not only by its label.
@@ -291,70 +264,76 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         The rule is bound to `.switch`, not to one id: selection mode is a
         second switch and an id-bound rule would have left its knob dead.
         """
-        page = p.PAGE
-        self.assertIn('aria-pressed', page)
-        self.assertIn('.switch[aria-pressed="true"]  .knob{background:#22c55e}', page)
-        self.assertIn('.switch[aria-pressed="false"] .knob{background:#f43f5e}', page)
+        self.assertIn('aria-pressed', PAGE)
+        self.assertIn('.switch[aria-pressed="true"]  .knob{background:#22c55e}', PAGE)
+        self.assertIn('.switch[aria-pressed="false"] .knob{background:#f43f5e}', PAGE)
         for control in ('id="anim" class="switch"', 'id="selmode" class="switch"'):
-            self.assertIn(control, page)
-        self.assertIn("--btn:#34ebc6", page)
+            self.assertIn(control, PAGE)
+        self.assertIn("--btn:#34ebc6", PAGE)
 
     def test_the_card_header_stacks_number_over_format(self):
-        page = p.PAGE
-        hdr = page[page.index(".hdr{"):]
-        rule = hdr[:hdr.index("}")]
+        rule = block(PAGE, ".hdr{", "}")
         self.assertIn("flex-direction:column", rule)
         self.assertIn("align-items:center", rule)
         # The number is appended before the format badge, so it sits on top.
-        markup = page[page.index("const hdr = el('div','hdr');"):]
-        markup = markup[:markup.index("card.appendChild(hdr);")]
+        markup = block(SCRIPT, "const hdr = el('div','hdr');", "card.appendChild(hdr);")
         self.assertLess(markup.index("'pos'"), markup.index("'badge'"))
 
     def test_only_save_selection_sits_outside_the_centre_group(self):
-        page = p.PAGE
-        actions = page[page.index('<div class="actions">'):]
-        actions = actions[:actions.index("</div>")]
-        for btn in ("undo", "redo", "all", "none", "inv", "bg", "anim"):
+        actions = block(PAGE, '<div class="actions">', "</div>")
+        for btn in ("undo", "redo", "top", "bot", "zoomOut", "zoomReset", "zoomIn",
+                    "all", "none", "inv", "bg", "anim", "selmode"):
             self.assertIn(f'id="{btn}"', actions, btn)
-        self.assertNotIn('id="save"', actions,
-                         "Save writes; it stays out of the centre group")
+        self.assertNotIn('id="save"', actions, "Save writes; it stays out of the centre group")
         # Centred by grid columns, not by flex spacers -- spacers only centre
         # when both sides weigh the same, and the title is far wider.
-        self.assertIn("grid-template-columns:1fr auto 1fr", page)
+        self.assertIn("grid-template-columns:1fr auto 1fr", PAGE)
 
 
 class OffScreenCostsNothing(unittest.TestCase):
-    """A card you cannot see must not be decoding frames.
+    """A card you cannot see must not be decoding frames or holding a player.
 
-    Two hundred cards, 147 of them animated: if leaving the viewport did not
-    stop them the grid would decode every one of them forever, which is what
-    "the page is heavy" actually meant.
+    Four hundred and forty-one of the 1 068 cards are animated and 56 are
+    video: if leaving the viewport did not stop them the grid would decode
+    every one of them forever, which is what "the page is heavy" first meant.
     """
 
     def test_leaving_the_viewport_stops_video_AND_animation(self):
-        io_block = p.PAGE[p.PAGE.index("const animIO"):]
-        io_block = io_block[:io_block.index("}, {root:")]
+        io_block = block(SCRIPT, "const animIO", "}, {root:")
         # One flag decides both media kinds, and it is driven by intersection.
         self.assertIn("e.isIntersecting", io_block)
-        self.assertIn("setPlaying(t, live)", io_block,
-                      "video must be paused when it scrolls away, not muted")
-        self.assertIn("t.dataset.still", io_block,
-                      "an animated image must fall back to its single frame")
+        self.assertIn("setPlaying(t, live)", io_block, "video must be paused when it scrolls away, not muted")
+        self.assertIn("t.dataset.still", io_block, "an animated image must fall back to its single frame")
         # Coming back must restore it -- a one-way stop would leave a dead grid.
         self.assertIn("t.dataset.anim", io_block)
 
-    def test_every_card_is_observed_once_the_grid_is_built(self):
-        """render() creates every node, so it is what must start observing.
+    def test_a_mounted_card_is_observed_and_an_unmounted_one_released(self):
+        """mount() creates the nodes, so it is what must start observing; the
+        window moves on every scroll, so unmounting must stop it again or the
+        observer keeps a reference to every card that ever scrolled past."""
+        mount = block(SCRIPT, "function mount(k){", "function unmountCard")
+        self.assertIn("animIO.observe(n)", mount)
+        self.assertIn("videoIO.observe(n)", mount)
+        unmount = block(SCRIPT, "function unmountCard(c){", "const videoIO")
+        self.assertIn("animIO.unobserve(n)", unmount)
+        self.assertIn("videoIO.unobserve(n)", unmount)
+        self.assertIn("cards.delete(c.dataset.key);", unmount)
 
-        Reordering does NOT rebuild: undo/redo and drag move the existing
-        nodes, and appending a node already in the document relocates it. That
-        is why observation survives a reorder -- and why the check that matters
-        is on the one function that makes the nodes in the first place.
-        """
-        body = p.PAGE[p.PAGE.index("function render("):]
-        body = body[:body.index("function updateCount(")]
-        self.assertIn("observeAnimated()", body,
-                      "a freshly built grid nobody observes never pauses")
+    def test_a_video_holds_a_player_only_near_the_viewport(self):
+        """A <video> costs a media player from the moment it has a source, and
+        creating or tearing one down was the 60-140 ms frame that survived the
+        virtual grid. The card carries the URL; the observer attaches it."""
+        video = block(SCRIPT, "if(it.fmt === 'video'){", "} else if(it.fmt === 'animated'){")
+        self.assertIn("v.dataset.src = src", video)
+        self.assertNotIn("v.src =", video, "a mounted card must not create a player by itself")
+        attach = block(SCRIPT, "function attachVideo(v, on){", "function setPlaying")
+        self.assertIn("v.src = v.dataset.src", attach)
+        self.assertIn("v.removeAttribute('src'); v.load();", attach,
+                      "removing the attribute alone leaves the player alive")
+        self.assertIn("rootMargin: '300px'", block(SCRIPT, "const videoIO", "function attachVideo"),
+                      "attached one row early so a video is not blank when it arrives")
+        # Playing implies a source, whichever observer fired first.
+        self.assertIn("if (on) attachVideo(v, true);", block(SCRIPT, "function setPlaying(v, on){", "}"))
 
     def test_the_sticky_header_does_not_blur_its_backdrop(self):
         """backdrop-filter re-blurs everything behind it on every scroll frame.
@@ -362,11 +341,129 @@ class OffScreenCostsNothing(unittest.TestCase):
         It is the most expensive thing a sticky bar can do, and over an opaque
         background it buys nothing.
         """
-        header = p.PAGE[p.PAGE.index("header{"):]
         # Strip CSS comments first. Twice now a check like this has passed or
         # failed on the COMMENT explaining the rule rather than the rule.
-        rule = re.sub(r"/\*.*?\*/", "", header[:header.index("}")], flags=re.S)
+        rule = re.sub(r"/\*.*?\*/", "", block(PAGE, "header{", "}"), flags=re.S)
         self.assertNotIn("backdrop-filter", rule)
+
+
+class TheGridIsVirtual(unittest.TestCase):
+    """Only the rows near the viewport exist. Measured on the 1 063-card
+    catalog: every drag step re-laid-out 1 062 cards (24-46 ms per pointer
+    move, 40 % of frames over 32 ms) and a scroll sweep spent 802 ms in long
+    tasks. With the window it is 16-24 ms, none over 32 ms, and 113 ms.
+    """
+
+    def test_only_rows_near_the_viewport_are_in_the_document(self):
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertIn("const pad = innerHeight / 2;", render)
+        self.assertIn("let first = rowAt(viewTop - pad);", render)
+        # Two spacers carry the height of everything above and below, so the
+        # scrollbar and the jump buttons see the whole grid.
+        self.assertIn("setSpacer(padTop, first > 0 ? rows[first].top - G.gap : 0);", render)
+        self.assertIn("setSpacer(padBot, bottom < total ? total - bottom - G.gap : 0);", render)
+        for spacer in ('id="padTop"', 'id="padBot"'):
+            self.assertIn(spacer, PAGE)
+        self.assertIn(".spacer{grid-column:1/-1", PAGE)
+
+    def test_the_layout_is_arithmetic_on_whole_pixels(self):
+        """Every offset is a sum of row heights JavaScript chose, handed to CSS
+        as variables and rounded to whole pixels; a fractional row height would
+        drift the window by a pixel per row over a long grid. A card is a
+        fixed height for the same reason: a row whose height depends on its
+        longest label cannot be positioned without rendering it first."""
+        layout = block(SCRIPT, "function layoutRows(){", "function measure")
+        self.assertIn("Math.round(BASE.gap * zoom)", layout)
+        self.assertIn("Math.round((compact ? BASE.cardHCompact : BASE.cardH) * zoom)", layout)
+        self.assertIn("grid.style.setProperty('--cardH', G.cardH + 'px');", layout)
+        card = block(PAGE, ".card{", "}")
+        self.assertIn("height:var(--cardH", card)
+        self.assertIn("overflow:hidden", card)
+        # Line-anchored: `.card.logo .lbl{` comes first in the sheet and would match.
+        self.assertIn("-webkit-line-clamp:2", block(PAGE, "\n.lbl{", "}"), "the label cannot decide the height")
+        # The window IS the lazy loading; the old per-card hint has no job left.
+        self.assertNotIn("content-visibility", PAGE)
+        self.assertNotIn("contain-intrinsic-size", PAGE)
+
+    def test_a_separator_starts_a_fresh_row_like_css_would(self):
+        """Card rows are chunked exactly as CSS grid auto-placement would place
+        them: a full-width marker takes its own row and the next card row
+        starts under it. If the arithmetic and the browser ever disagreed, the
+        spacers would be wrong by one row for every pack."""
+        layout = block(SCRIPT, "function layoutRows(){", "function measure")
+        self.assertIn("if(sepAt.has(i)){", layout)
+        self.assertIn("const end = Math.min(i + G.cols, stop);", layout)
+
+    def test_scrolling_within_the_same_rows_costs_a_binary_search(self):
+        """render() runs once per frame while scrolling. Between row
+        transitions it must find the same window and stop; a full reconcile
+        per frame measured 4 ms of JavaScript on every scroll frame."""
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertIn("if(first === win.first && last === win.last) return;", render)
+        # But a changed model must always project, whatever the window was.
+        layout = block(SCRIPT, "function layoutRows(){", "function measure")
+        self.assertIn("win = {first: -1, last: -1};", layout)
+        self.assertIn("requestAnimationFrame", block(SCRIPT, "function scheduleRender(){", "}"))
+
+    def test_reconciling_moves_nodes_and_retires_only_the_stale_ones(self):
+        render = block(SCRIPT, "function render(){", "function retire")
+        self.assertIn("if(n === cur){ cur = cur.nextSibling; continue; }", render)
+        self.assertIn("grid.insertBefore(n, cur);", render)
+        self.assertIn("retire(stale)", render)
+
+
+class ZoomFitsMoreOrLess(unittest.TestCase):
+    """Zoom out to see more emoji per screen, in to inspect one."""
+
+    def test_the_header_offers_zoom_in_out_and_reset(self):
+        for btn in ('id="zoomOut"', 'id="zoomReset"', 'id="zoomIn"'):
+            self.assertIn(btn, PAGE)
+        self.assertIn("document.getElementById('zoomIn').onclick = ()=>setZoom(zoom * ZOOM_STEP);", SCRIPT)
+        self.assertIn("document.getElementById('zoomOut').onclick = ()=>setZoom(zoom / ZOOM_STEP);", SCRIPT)
+        self.assertIn("document.getElementById('zoomReset').onclick = ()=>setZoom(1);", SCRIPT)
+
+    def test_ctrl_wheel_and_ctrl_keys_are_taken_over_from_the_browser(self):
+        """Ctrl+wheel is the browser's own page zoom. Left alone, both would
+        fire: the grid re-zooms AND the whole page scales."""
+        wheel = block(SCRIPT, "addEventListener('wheel'", "{passive: false});")
+        self.assertIn("if(!e.ctrlKey) return;", wheel)
+        self.assertIn("e.preventDefault();", wheel, "without it the browser zooms too")
+        keys = block(SCRIPT, "addEventListener('keydown', e=>{", "});")
+        for key in ("'='", "'-'", "'0'"):
+            self.assertIn(key, keys)
+
+    def test_the_level_is_clamped_and_remembered(self):
+        z = block(SCRIPT, "function setZoom(z){", "function paintZoom")
+        self.assertIn("Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))", z)
+        self.assertIn("localStorage.setItem('panelZoom'", z)
+        self.assertIn("localStorage.getItem('panelZoom')", block(SCRIPT, "function loadZoom(){", "}"))
+
+    def test_zooming_keeps_the_top_item_on_screen(self):
+        """Zooming is for seeing more or less of the same place, not for losing
+        it: the item at the top of the screen is re-scrolled to the top."""
+        z = block(SCRIPT, "function setZoom(z){", "function paintZoom")
+        self.assertLess(z.index("const anchor = firstVisibleIndex();"), z.index("zoom = z;"))
+        self.assertLess(z.index("layoutRows();"),
+                        z.index("scrollTo(0, gridTop + rows[rowOfItem[anchor]].top - headerH)"))
+
+    def test_far_out_the_text_rows_are_dropped(self):
+        """Zoomed far out the text under a thumbnail is unreadable anyway;
+        dropping it lets the rows pack tighter, which is what zooming out is
+        for. The height model follows: a compact card has its own base height."""
+        self.assertIn("const COMPACT_BELOW = 0.75;", SCRIPT)
+        self.assertIn("document.body.classList.toggle('compact', compact);", SCRIPT)
+        self.assertIn("body.compact .glyph,body.compact .lbl,body.compact .sub{display:none}", PAGE)
+
+    def test_everything_in_a_card_scales_from_one_font_size(self):
+        """One `font-size` on the card, everything inside in em: the zoom
+        factor scales thumbnail, badges and label as one unit. A pixel size
+        left inside would stay put while the card around it grew."""
+        card = block(PAGE, ".card{", "}")
+        self.assertIn("font-size:calc(12px*var(--z", card)
+        self.assertIn("width:9em;height:9em", block(PAGE, ".thumb{", "}"))
+        self.assertIn("width:8.67em;height:8.67em", block(PAGE, ".thumb img,.thumb video{", "}"))
+        self.assertNotIn("104px", PAGE)
+        self.assertNotIn("img.width = 104", SCRIPT, "an attribute size would pin the artwork at 100 %")
 
 
 class ThePanelPageActuallyShips(unittest.TestCase):
@@ -388,13 +485,13 @@ class ThePanelPageActuallyShips(unittest.TestCase):
 
     def test_the_loaded_page_is_the_document_the_handler_expects(self):
         """Loaded, not just present: an empty or truncated file must not pass."""
-        self.assertTrue(p.PAGE.startswith("<!doctype html>"))
-        self.assertTrue(p.PAGE.rstrip().endswith("</html>"))
+        self.assertTrue(PAGE.startswith("<!doctype html>"))
+        self.assertTrue(PAGE.rstrip().endswith("</html>"))
         # Every placeholder the handler substitutes must survive extraction --
         # a page missing one renders the literal token to the browser.
         for token in ("__ITEMS__", "__TOKEN__", "__PREVIEW_FPS__",
-                      "__PER_SET__", "__HIDDEN__"):
-            self.assertIn(token, p.PAGE, f"{token} lost in the asset")
+                      "__PER_SET__", "__HIDDEN__", "__ASSET_VER__"):
+            self.assertIn(token, PAGE, f"{token} lost in the asset")
 
 
 class SelectionModeCarriesARun(unittest.TestCase):
@@ -409,50 +506,46 @@ class SelectionModeCarriesARun(unittest.TestCase):
         """They answer different questions -- "does this ship" and "does this
         move with the others". One control for both would let arranging drop an
         emoji from the pack by accident."""
-        page = p.PAGE
-        self.assertIn("el('span','pick'", page)
-        self.assertIn("el('span','tick'", page)
-        self.assertIn(".pick{", page)
+        self.assertIn("el('span','pick'", SCRIPT)
+        self.assertIn("el('span','tick'", SCRIPT)
         # Invisible until the mode is on, so the card is unchanged until asked.
-        css = page[page.index(".pick{"):]
-        self.assertIn("display:none", css[:css.index("}")])
-        self.assertIn("body.selmode .pick{display:flex}", page)
+        self.assertIn("display:none", block(PAGE, ".pick{", "}"))
+        self.assertIn("body.selmode .pick{display:flex}", PAGE)
 
     def test_leaving_the_mode_drops_the_picks(self):
         """A hidden selection that still moves cards on the next drag is worse
         than no selection at all."""
-        self.assertIn("if(!selMode) clearPicked();", p.PAGE)
+        self.assertIn("if(!selMode) clearPicked();", SCRIPT)
 
     def test_arranging_never_changes_what_ships(self):
         """The card click toggles `included`. In selection mode a stray click
         while moving cards must not quietly drop an emoji from the pack."""
-        body = p.PAGE[p.PAGE.index("grid.addEventListener('click'"):]
-        body = body[:body.index("// --- Undo / redo")]
+        body = block(SCRIPT, "grid.addEventListener('click'", "// --- Undo / redo")
         self.assertIn("if(selMode) return;", body)
         self.assertLess(body.index("if(selMode) return;"), body.index("remember();"),
                         "the guard has to come before anything mutates")
 
-    def test_dragging_a_picked_card_carries_the_whole_set(self):
-        body = p.PAGE[p.PAGE.index("grid.addEventListener('dragstart'"):]
-        body = body[:body.index("grid.addEventListener('dragover'")]
+    def test_dragging_a_picked_card_carries_the_whole_set_even_off_screen(self):
+        """The carried set is read from ITEMS, not from the DOM: a picked card
+        whose row is not mounted must still travel, or the run splits in two."""
+        body = block(SCRIPT, "grid.addEventListener('dragstart'", "grid.addEventListener('dragover'")
         self.assertIn("picked.has(dragKey)", body)
-        self.assertIn("querySelectorAll('.card.picked')", body)
+        self.assertIn("ITEMS.filter(x=>picked.has(x.key) && !x.isLogo)", body)
+        self.assertNotIn("querySelectorAll('.card.picked')", body)
         # An unpicked card is still the single-card gesture that always worked.
-        self.assertIn("[card]", body)
+        self.assertIn("[dragKey]", body)
 
-    def test_a_cancelled_group_drag_puts_every_card_back(self):
-        """ITEMS never changed, so a half-restored preview would leave the grid
-        disagreeing with what saves -- for every card the gesture carried."""
-        body = p.PAGE[p.PAGE.index("function endDrag("):]
-        body = body[:body.index(chr(10) + "}")]
-        self.assertIn("dragHomes.length - 1", body)
-        self.assertIn("i >= 0; i--", body)
+    def test_a_pick_survives_the_card_being_unmounted(self):
+        """Picks live in a Set keyed by content key; the card only PAINTS it,
+        and a card built later for the same key paints it again."""
+        self.assertIn("if(node) node.classList.toggle('picked', on);", SCRIPT)
+        self.assertIn("c.classList.toggle('picked', picked.has(it.key));",
+                      block(SCRIPT, "function mount(k){", "function unmountCard"))
 
     def test_dragging_back_shrinks_the_run(self):
         """Overshooting has to be correctable inside the same stroke; without a
         baseline the run only ever grows and the mode has to be left to fix it."""
-        body = p.PAGE[p.PAGE.index("function applyStroke("):]
-        body = body[:body.index(chr(10) + "}")]
+        body = block(SCRIPT, "function applyStroke(", chr(10) + "}")
         self.assertIn("strokeBase.has(", body)
         self.assertIn("if(!now.has(k))", body)
 
@@ -467,22 +560,17 @@ class PackSplitsAndJumpButtons(unittest.TestCase):
         aimed past it and do nothing -- the same shape as the bug where a drop
         on a grid gap silently threw the emoji to the end. It is `.packsep`.
         """
-        page = p.PAGE
-        css = page[page.index(".packsep{"):]
-        self.assertIn("grid-column:1/-1", css[:css.index("}")])
-        body = page[page.index("function makeSep("):]
-        body = body[:body.index("\nfunction ")]
+        self.assertIn("grid-column:1/-1", block(PAGE, ".packsep{", "}"))
+        body = block(SCRIPT, "function sepNode(", chr(10) + "function ")
         self.assertIn("el('div','packsep')", body)
         self.assertNotIn("'card'", body)
-        self.assertNotIn("packsep card", page)
+        self.assertNotIn("packsep card", SCRIPT)
         # And the drop handler still keys off .card, so the two cannot meet.
-        self.assertIn("e.target.closest('.card')", page)
+        self.assertIn("e.target.closest('.card')", SCRIPT)
 
     def test_the_splits_are_counted_from_included_items_only(self):
         """An unticked card never ships, so it cannot push the boundary."""
-        body = p.PAGE[p.PAGE.index("function renumber("):]
-        body = body[:body.index("\n// Only the cards you can actually see")] \
-            if "\n// Only the cards you can actually see" in body else body[:4000]
+        body = block(SCRIPT, "function packStarts(){", "function layoutRows")
         self.assertIn("!it.isLogo && it.included", body)
         # capacity leaves a slot for the logo, exactly as build_collection does.
         self.assertIn("PER_SET - (logo ? 1 : 0)", body)
@@ -493,12 +581,8 @@ class PackSplitsAndJumpButtons(unittest.TestCase):
         single card moved. The owner arranges by dropping candidates into a
         pack, so that made the grid unusable exactly when it was being used.
         """
-        # The JS string literal, not the prose: the comment explaining why
-        # the marker is gone names it, and matching that would fail on a
-        # page that is in fact correct.
-        self.assertNotIn("'Not in a pack yet'", p.PAGE)
-        body = p.PAGE[p.PAGE.index("function renumber("):]
-        body = body[:body.index("Pass 2: one marker")]
+        self.assertNotIn("'Not in a pack yet'", SCRIPT)
+        body = block(SCRIPT, "function packStarts(){", "function layoutRows")
         # A null pack leaves `cur` alone, so the run it was dropped into
         # continues -- which is also the pack it will publish into.
         self.assertIn("pk !== null && (!starts.length || pk !== cur)", body)
@@ -507,42 +591,39 @@ class PackSplitsAndJumpButtons(unittest.TestCase):
         """The logo IS emoji 0 of its pack. While it was excluded from run
         detection the marker landed one card below it, so pack 5's logo drew
         above pack 5's header and read as part of the pack before it."""
-        body = p.PAGE[p.PAGE.index("function renumber("):]
-        body = body[:body.index("Pass 2: one marker")]
+        body = block(SCRIPT, "function packStarts(){", "function layoutRows")
         i_mem = body.index("if(byMembership){")
         i_cap = body.index("} else if(!it.isLogo && it.included){")
         self.assertLess(i_mem, i_cap, "membership mode must not filter logos out")
-        self.assertNotIn("isLogo", body[i_mem:i_cap],
-                         "a logo has to be able to start its pack's run")
+        self.assertNotIn("isLogo", body[i_mem:i_cap], "a logo has to be able to start its pack's run")
 
     def test_selection_changes_recompute_the_splits(self):
-        """Both inclusion paths must renumber, not just update the counter.
+        """Both inclusion paths must relayout, not just update the counter.
 
-        Only reorder called renumber() before; unticking enough cards genuinely
-        moves a boundary, so a counter-only refresh left the markers lying.
+        Unticking enough cards genuinely moves a boundary, so a counter-only
+        refresh left the markers lying.
         """
-        page = p.PAGE
-        self.assertIn("renumber(); updateCount(); }", page)     # setAll
-        self.assertIn("lastIdx=i; renumber(); updateCount();", page)  # one card
+        self.assertIn("relayout(); updateCount(); }", SCRIPT)          # setAll
+        self.assertIn("lastIdx=i; relayout(); updateCount();", SCRIPT)  # one card
 
-    def test_separators_are_rebuilt_rather_than_accumulated(self):
-        body = p.PAGE[p.PAGE.index("function renumber("):]
-        self.assertIn("querySelectorAll('.packsep')", body[:600])
-        self.assertIn("s.remove()", body[:600])
+    def test_separators_are_part_of_the_row_model_not_accumulated(self):
+        """Rebuilt from the pack starts on every layout and reused by title, so
+        they can neither pile up nor go stale."""
+        layout = block(SCRIPT, "function layoutRows(){", "function measure")
+        self.assertIn("const sepAt = new Map();", layout)
+        self.assertIn("rows.push({sep: sepAt.get(i), at: i, top: y, h: G.sepH});", layout)
 
     def test_one_pack_needs_no_divider(self):
-        body = p.PAGE[p.PAGE.index("function renumber("):]
-        self.assertIn("if(starts.length < 2) return;", body)
+        self.assertIn("if(starts.length >= 2){", block(SCRIPT, "function layoutRows(){", "function measure"))
 
     def test_the_header_offers_top_and_bottom(self):
-        page = p.PAGE
-        self.assertIn('id="top"', page)
-        self.assertIn('id="bot"', page)
+        self.assertIn('id="top"', PAGE)
+        self.assertIn('id="bot"', PAGE)
         # Document scrolling, NOT scrollIntoView: that aligns with the top of
         # the viewport, which sits behind the sticky header, so Top stopped one
-        # header short of the Pack 1 marker and Bottom stopped short too.
-        jump = page[page.index("document.getElementById('top').onclick"):]
-        jump = jump[:400]
+        # header short of the Pack 1 marker and Bottom stopped short too. The
+        # bottom spacer makes scrollHeight exact, so Bottom really is the end.
+        jump = SCRIPT[SCRIPT.index("document.getElementById('top').onclick"):][:400]
         self.assertIn("window.scrollTo({top:0})", jump)
         self.assertIn("document.documentElement.scrollHeight", jump)
         self.assertNotIn("scrollIntoView", jump)
