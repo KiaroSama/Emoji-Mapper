@@ -17,166 +17,31 @@ machine with no browser is worse than no browser test at all. Set
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import tempfile
-import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
-from pathlib import Path
 
-from PIL import Image
-
+from tests import _panel_browser_fixtures as fx
 from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
 import panel
-import panel_view
-from emojikit.catalog import Catalog
+from tests._panel_browser_fixtures import DENY_STORAGE, synth
 
-OPT_OUT = "EMOJI_MAPPER_NO_BROWSER_TESTS"
-_HOWTO = (f"the panel browser tests need playwright and Chromium:\n"
-          f"    python -m pip install -r requirements-dev.txt\n"
-          f"    python -m playwright install chromium\n"
-          f"Set {OPT_OUT}=1 to skip them deliberately.")
-
-if os.environ.get(OPT_OUT) == "1":
-    raise unittest.SkipTest(f"{OPT_OUT}=1")
-
-try:
-    from playwright.sync_api import sync_playwright
-except ModuleNotFoundError as exc:       # a bare ImportError reads as a typo
-    raise ModuleNotFoundError(_HOWTO) from exc
-
-TOKEN = "test-token-value"
-VIEWPORT = {"width": 1200, "height": 900}
-
-# Test scaffolding, injected before the page's own scripts. The fetch gate is
-# what makes an out-of-order acknowledgement reproducible: without control of
-# WHEN each reply lands, the interleaving that loses an arrangement happens
-# once in a hundred runs and never in CI.
-STUB = """
-window.__net = {calls: [], pingOk: true, passthrough: false};
-window.__rejections = [];
-window.__plays = 0;
-addEventListener('unhandledrejection', e => window.__rejections.push(String(e.reason)));
-const _play = HTMLMediaElement.prototype.play;
-HTMLMediaElement.prototype.play = function(){ window.__plays++; return _play.apply(this, arguments); };
-const _fetch = window.fetch.bind(window);
-window.fetch = function(u, o){
-  const s = String(u);
-  if(window.__net.passthrough) return _fetch(u, o);
-  if(s.indexOf('/api/ping') >= 0){
-    return window.__net.pingOk
-      ? Promise.resolve({ok: true, status: 200, json: () => Promise.resolve({ok: true})})
-      : Promise.reject(new TypeError('offline'));
-  }
-  if(s.indexOf('/api/order') >= 0 || s.indexOf('/api/save') >= 0){
-    const rec = {path: s, body: JSON.parse(o.body), settled: false};
-    rec.p = new Promise((res, rej) => { rec.res = res; rec.rej = rej; });
-    window.__net.calls.push(rec);
-    return rec.p;
-  }
-  return _fetch(u, o);
-};
-window.__sent = (kind) => window.__net.calls
-  .map((c, i) => ({i: i, path: c.path, body: c.body, settled: c.settled}))
-  .filter(c => !kind || c.path.indexOf(kind) >= 0);
-window.__settle = (i, status) => {
-  const rec = window.__net.calls[i];
-  rec.settled = true;
-  if(status === 0) rec.rej(new TypeError('network'));
-  else rec.res({ok: status < 300, status: status,
-                json: () => Promise.resolve(
-                  {ok: status < 300, included: 1, excluded: 1, error: 'refused'})});
-};
-// The exact pair of statements a drop runs: the model moves, then the order is
-// queued. Driving them directly is what makes an interleaving deterministic;
-// `test_F01_a_real_drag...` proves the same path through the real gesture.
-window.__reorder = (from, to) => {
-  carried.clear(); carried.add(ITEMS[from].key); moveCarried(to); carried.clear(); saveOrder();
-};
-window.__unload = () => {
-  const e = new Event('beforeunload', {cancelable: true});
-  dispatchEvent(e);
-  return e.defaultPrevented;
-};
-window.__topRow = () => {
-  let r = rowAt(scrollY + headerH - gridTop);
-  while(r < rows.length && rows[r].sep) r++;
-  return r < rows.length ? {start: rows[r].start, end: rows[r].end} : null;
-};
-window.__anchor = () => ({
-  idx: firstVisibleIndex(),
-  cols: G.cols,
-  top: window.__topRow(),
-  atEnd: Math.ceil(scrollY + innerHeight) >= document.documentElement.scrollHeight - 1,
-});
-// A real flick keeps firing scroll events, which keeps the freeze window open;
-// one scrollBy closes it in 180 ms, long before an observer round trip.
-window.__keepScrolling = (ms) => {
-  const end = performance.now() + ms;
-  const step = () => { scrollBy(0, 50);
-                       if(performance.now() < end) requestAnimationFrame(step); };
-  step();
-};
-window.__animating = () => [...document.querySelectorAll('#grid img[data-anim]')]
-  .filter(n => n.getAttribute('src') === n.dataset.anim).length;
-window.__mounted = () => document.querySelectorAll('#grid img[data-anim]').length;
-"""
-
-# Denied site data. Chrome throws on the PROPERTY, not just on getItem, when a
-# profile blocks storage -- which is why an unguarded read at module scope took
-# the rest of the file with it.
-DENY_STORAGE = """
-const boom = () => { throw new DOMException('site data is blocked', 'SecurityError'); };
-Object.defineProperty(window, 'localStorage', {configurable: true, get: boom});
-"""
-
-BROWSER = None
-_PW = None
+# Eight, because the drag and revision suites below reach for card six. One
+# catalog for the module rather than one per class: the tests that care about
+# real rows read the order back out of it, and the rest serve a synthetic model.
+H = fx.Harness(catalog_size=8)
 
 
 def setUpModule():
-    global BROWSER, _PW
-    _PW = sync_playwright().start()
-    try:
-        BROWSER = _PW.chromium.launch(headless=True)
-    except Exception as exc:             # re-raised, with the cure attached
-        _PW.stop()
-        raise RuntimeError(_HOWTO) from exc
+    H.start()
 
 
 def tearDownModule():
-    if BROWSER is not None:
-        BROWSER.close()
-    if _PW is not None:
-        _PW.stop()
-
-
-def synth(n, *, logo=False, fmt="static", packs=None, excluded=()):
-    """A model in the exact shape ``panel.build_view`` produces.
-
-    Four hundred rows of real catalog would cost four hundred PNGs and four
-    hundred phash comparisons to prove arithmetic that never touches the
-    database. The page, its scripts and its CSS are the real ones; only the
-    catalog behind them is a fixture.
-    """
-    out = []
-    if logo:
-        out.append({"key": panel_view.LOGO_KEY, "fmt": "static", "isLogo": True,
-                    "label": "Brand logo (auto-added on publish)", "emoji": "",
-                    "included": True})
-    for i in range(n):
-        card = {"key": f"x:{i:030d}", "fmt": fmt, "label": f"item {i}",
-                "copyId": None, "emoji": "", "included": i not in excluded}
-        if packs is not None:
-            card["pack"] = packs[i]
-        out.append(card)
-    return out
+    H.stop()
 
 
 class PanelInABrowser(unittest.TestCase):
@@ -184,82 +49,27 @@ class PanelInABrowser(unittest.TestCase):
 
     Headless on purpose: an occluded headed window is throttled to 1-2 rAF a
     second, which turns every timing assertion here into a coin toss.
+
+    The harness itself lives in `_panel_browser_fixtures` so the queue suite can
+    drive the same page without importing this module -- importing a module that
+    owns `test_*` methods collects those tests a second time rather than sharing
+    anything.
     """
 
-    CATALOG = 4
+    def setUp(self):
+        self.errors: list[str] = []
 
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
-        cls.data = Path(cls.tmp.name)
-        cls.db = cls.data / "catalog.db"
-        with Catalog(cls.db) as cat:
-            for i in range(cls.CATALOG):
-                img = cls.data / "media" / "static" / f"i{i}.png"
-                img.parent.mkdir(parents=True, exist_ok=True)
-                Image.new("RGBA", (40, 40), (9 * i % 256, 20, 30, 255)).save(img, "PNG")
-                cat.add(content_key=f"s:item{i:030d}", fmt="static", file_path=img,
-                        keywords=[f"item{i}"])
-            view, by_key, hidden = panel.build_view(cat, "")
-        cls.png = (cls.data / "media" / "static" / "i0.png").read_bytes()
-        handler = panel.make_handler(view, by_key, cls.db, TOKEN, hidden=hidden)
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        cls.url = f"http://127.0.0.1:{cls.httpd.server_address[1]}/"
-        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.thread.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.thread.join(timeout=10)
-        alive = cls.thread.is_alive()
-        cls.httpd.server_close()
-        cls.tmp.cleanup()
-        if alive:
-            raise AssertionError("panel server thread leaked")
-
-    def open(self, items=None, *, init=None, clock=False, **ctx_args):
-        """The served page, with an optional synthetic model."""
-        ctx = BROWSER.new_context(viewport=VIEWPORT, **ctx_args)
-        self.addCleanup(ctx.close)
-        page = ctx.new_page()
-        self.errors = []
-        page.on("pageerror", lambda e: self.errors.append(str(e)))
-        if clock:
-            page.clock.install()
-        page.add_init_script(STUB)
-        if init:
-            page.add_init_script(init)
-        if items is not None:
-            page.route(self.url, self._rewrite(items))
-        # Media is not what any of these test, and a synthetic model would
-        # otherwise 404 once per card against the real server.
-        for pattern in ("**/img/**", "**/preview/**"):
-            page.route(pattern, lambda r: r.fulfill(
-                status=200, content_type="image/png", body=self.png))
-        page.goto(self.url, wait_until="load", timeout=30_000)
+    def open(self, items=None, **kw):
+        page = H.open(items, on_error=self.errors.append,
+                      cleanup=self.addCleanup, **kw)
         return page
 
-    def _rewrite(self, items):
-        payload = panel._json_for_script(items)
-
-        def handler(route):
-            served = route.fetch()
-            html = re.sub(
-                r'(<script id="items-data" type="application/json">).*?(</script>)',
-                lambda m: m.group(1) + payload + m.group(2), served.text(), flags=re.S)
-            route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                          body=html)
-        return handler
-
     def db_order(self):
-        with Catalog(self.db) as cat:
-            return [it.content_key for it in cat.all_items()]
+        return H.db_order()
 
     def assertNoPageErrors(self, page):
         self.assertEqual(self.errors, [], "the page threw during setup")
-        self.assertEqual(page.evaluate("__rejections"), [],
-                         "an unhandled promise rejection reached the console")
+
 
 
 class F01OrderSavesAreRevisioned(PanelInABrowser):

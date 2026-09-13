@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - a second audit: identity, migration and the panel's queues
+
+- **Video identity now fails closed.** A missing `libvpx-vp9`, a failed codec
+  probe or a container naming no codec used to answer "no decoder needed",
+  which drops VP9's separate alpha layer — and a probe failure was CACHED, so
+  one transient error made every later decode of that file lose its alpha
+  silently. Two clips differing only in opacity then share one content key, and
+  `Catalog.add` merges them and deletes the file it merged away. All three paths
+  now raise `UndecodableVideo`, and nothing undecidable reaches the catalog.
+- **Comparing two videos walks the timeline.** `same_image(..., "video")` read
+  frame zero and nothing else: two clips sharing ten opening frames compared
+  equal. It now compares every sampled frame at 30 fps with no averaging, and no
+  longer accepts content-key equality as proof for video — the identity stream
+  is sampled at 10 fps, so a change shorter than one interval falls between its
+  frames.
+- **A content-key migration is one versioned change** (`collection_migrate.py`).
+  The previous round moved three tables and stopped, leaving the publisher's
+  state file naming keys the catalog no longer had — which `reconcile_set` reads
+  as a reordered pack — plus stale derived hashes and archived filenames still
+  carrying the old key. Every durable reference now moves together, under the
+  pack-family lock, behind a verified snapshot taken with SQLite's online backup
+  API (`copy2` of a WAL database opens as `no such table: items`). Stages are
+  idempotent and journalled, so an interrupted run resumes and a second run is a
+  verified no-op. `--from-backup` repairs a migration that ran before journals
+  existed, pairing rows by content rather than position.
+- **A failed inspection is not a success.** A row whose media was missing was
+  counted as "unchanged", so a catalog nobody could read printed "Every video
+  key already matches" and exited 0. Outcomes are counted apart and exit 4 means
+  incomplete — distinct from clean (0) and from pending (3).
+- **Unique attribution requires excluding every rival.** With two candidates
+  matching one live sticker the resolver correctly reported ambiguity; deleting
+  one candidate's FILE made it answer "unique" with the survivor.
+- **The panel tells unsaved work from an in-flight request.** An acknowledgement
+  of an older snapshot used to clear the dirty state, show "Saved" and drop the
+  navigation guard while newer ticks were unsaved. It now tracks what the server
+  has acknowledged, marks the Save button, and guards the tab until the visible
+  selection is stored.
+- **A refusal that retrying cannot fix stops being resubmitted.** HTTP 400/409
+  ended the retry loop its own comment said could not help; the five-second
+  heartbeat now honours the backoff instead of bypassing it; and a request that
+  never resolves is released by a raced deadline rather than claiming the queue
+  for the life of the page.
+- **The Worker cannot leak a bot token through an error.** Every Bot API URL
+  embeds it and a transport failure names the URL, which reached the HTTP 502
+  body and every log sink. One redactor now covers the URL shape, the bare token
+  shape and the configured secrets, on every path out.
+
 ### Fixed - identity, locking and validation defects found by an external audit
 
 Fifteen numbered findings and eight adjacent-path items, each reproduced against

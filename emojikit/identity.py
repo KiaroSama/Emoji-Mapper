@@ -57,6 +57,26 @@ def _norm_pixels(img: Image.Image, n: int = 64) -> bytes:
 UPLOAD_PHASH_TOLERANCE = 6
 UPLOAD_MEAN_DELTA = 8.0
 
+# A video is compared across its timeline, not at one frame.
+#
+# The comparison rate is NOT the identity rate. `SAMPLE_FPS` (10) is frozen --
+# every stored content key is a hash of that stream -- and it is too coarse to
+# compare with: measured on a 30 fps clip with ONE differing frame, the
+# difference is present at 30 fps and gone at both 10 and 15, because ffmpeg's
+# fps filter takes the nearest frame to each output timestamp and a change
+# shorter than one interval falls between them. 30 is `media.WEBM_FPS`, the rate
+# every emoji video this project encodes is normalised to, so two of our own
+# clips align frame for frame.
+VIDEO_COMPARE_FPS = 30
+
+# Bounded work: 30 fps over WEBM_MAX_SECONDS is ~90 frames of 64x64. An explicit
+# ceiling so a change to either of those cannot quietly turn one comparison into
+# unbounded work. One frame of slack absorbs the rounding at the end of a
+# re-encoded stream -- more than that is a clip of a different length, which is
+# a different clip however well its opening matches.
+VIDEO_MAX_FRAMES = 128
+VIDEO_FRAME_SLACK = 1
+
 
 def _premultiplied(path: Path, n: int = 64, *, fmt: str = "static") -> Image.Image | None:
     """A 64x64 RGBA render with each colour scaled by its own alpha.
@@ -78,11 +98,73 @@ def _premultiplied(path: Path, n: int = 64, *, fmt: str = "static") -> Image.Ima
             return None
     else:
         img = Image.open(path).convert("RGBA")
+    return _premultiply(img, n)
+
+
+def _premultiply(img: Image.Image, n: int = 64) -> Image.Image:
+    """The pixel normalisation above, on an image already in hand.
+
+    Split out because a video is compared frame by frame now and each frame
+    needs exactly this treatment; going back through a path would re-decode the
+    whole clip once per frame.
+    """
     img = img.convert("RGBA").resize((n, n), Image.LANCZOS)
     r, g, b, a = img.split()
     return Image.merge("RGBA", (ImageChops.multiply(r, a),
                                 ImageChops.multiply(g, a),
                                 ImageChops.multiply(b, a), a))
+
+
+def _frame_images(path: Path) -> list[Image.Image]:
+    """Every frame of the COMPARISON stream, in order.
+
+    Denser than the identity stream on purpose (see `VIDEO_COMPARE_FPS`), and
+    cached by `video_decode` under its own rate, so asking for both streams of
+    one file decodes each once.
+    """
+    raw = video_decode.frames_rgba(path, fps=VIDEO_COMPARE_FPS)
+    side = video_decode.FRAME_SIDE
+    stride = video_decode.FRAME_BYTES
+    count = min(len(raw) // stride, VIDEO_MAX_FRAMES)
+    return [Image.frombytes("RGBA", (side, side), raw[i * stride:(i + 1) * stride])
+            for i in range(count)]
+
+
+def _same_frame(x: Image.Image, y: Image.Image) -> bool:
+    """One frame pair, under the same two-agreement rule static images get."""
+    if hamming(_dhash(x), _dhash(y)) > UPLOAD_PHASH_TOLERANCE:
+        return False
+    diff = ImageChops.difference(_premultiply(x), _premultiply(y))
+    return sum(ImageStat.Stat(diff).mean) / 4.0 <= UPLOAD_MEAN_DELTA
+
+
+def _same_video(a: Path, b: Path) -> bool | None:
+    """Do two clips hold the same picture THROUGHOUT? None when undecidable.
+
+    The first-frame answer was a false positive generator. Two real one-second
+    30 fps clips sharing ten opening red frames -- one then blue, the other
+    green -- had different content keys and still compared equal, because both
+    the perceptual hash and the colour check read frame zero and nothing else.
+    Reconciliation then bound the foreign clip's file_unique_id and
+    custom_emoji_id to our catalog item, and that survived reopening SQLite.
+
+    So: compare the timelines. Length first, because a clip that runs longer is
+    not the same clip however well its opening matches; then every sampled frame
+    pair, each under the same two-agreement rule a static image gets. Every pair
+    must agree -- an average over the clip is exactly what lets one differing
+    segment hide, so there is no averaging across frames here.
+
+    The re-encode tolerance the callers depend on is preserved: the sampler
+    normalises rate and geometry, and per-frame tolerances absorb what a lossy
+    round trip does to colour. One frame of slack in the count absorbs the
+    rounding at the end of a stream, and nothing more.
+    """
+    fa, fb = _frame_images(a), _frame_images(b)
+    if not fa or not fb:
+        return None                  # nothing to look at; unknown is not false
+    if abs(len(fa) - len(fb)) > VIDEO_FRAME_SLACK:
+        return False                 # different duration: a different clip
+    return all(_same_frame(x, y) for x, y in zip(fa, fb, strict=False))
 
 
 def same_image(a: Path, b: Path, fmt: str) -> bool | None:
@@ -109,6 +191,19 @@ def same_image(a: Path, b: Path, fmt: str) -> bool | None:
     not perform.
     """
     try:
+        if fmt == "video":
+            # Straight to the timeline, WITHOUT the content-key shortcut below.
+            #
+            # That shortcut is unsound for video and measurably so. The content
+            # key hashes the IDENTITY stream, sampled at 10 fps, and a change
+            # shorter than one sampling interval falls between its frames: two
+            # real 30 fps clips differing in exactly one frame (flat blue vs
+            # flat green, premultiplied mean delta 100.5) hash to the SAME key.
+            # Answering True from that equality reports two different clips as
+            # one picture, which is the attribution this function exists to
+            # prevent. Comparing the denser stream costs one cached decode and
+            # cannot be fooled that way.
+            return _same_video(a, b)
         if content_key(a, fmt) == content_key(b, fmt):
             return True
         ha, hb = perceptual_hash(a, fmt), perceptual_hash(b, fmt)

@@ -241,9 +241,21 @@ def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
         # "I could not look" -- a very different answer.
         return None if fmt == "animated" else UNDECIDABLE
 
-    close = [it for it in cat.all_items()
-             if it.fmt == fmt and it.phash is not None
-             and identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
+    try:
+        items = [it for it in cat.all_items() if it.fmt == fmt]
+    except Exception as exc:  # noqa: BLE001 - a failed search is not a miss
+        log.warning("could not enumerate catalog candidates: %s", exc)
+        return UNDECIDABLE
+
+    # The hash NOMINATES; it is an optimisation for skipping items that are
+    # obviously distant. An item with no stored hash cannot be skipped that way
+    # -- and dropping it out of the search silently turns "never looked at this
+    # candidate" into "it is not a match" -- so it goes through the same content
+    # comparison as a nominated one. (Animated never reaches here: its probe is
+    # None above.)
+    close = [it for it in items
+             if it.phash is None
+             or identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
     if not close:
         return None
 
@@ -261,6 +273,14 @@ def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
             unknown += 1
     if len(verified) > 1:
         return AMBIGUOUS
+    if verified and unknown:
+        # UNIQUE means every rival was excluded, and a rival we could not read
+        # is not excluded. This returned `verified[0]` here: with two catalog
+        # entries matching one live sticker it correctly reported ambiguity,
+        # and deleting one candidate's FILE made it answer "unique" with the
+        # survivor -- an unproven attribution the caller writes permanently.
+        # Removing evidence must never promote a guess to a certainty.
+        return UNDECIDABLE
     if verified:
         return verified[0]
     # Nothing verified. If any candidate could not be examined, the honest

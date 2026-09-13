@@ -13,6 +13,7 @@
  *    worth storing.
  */
 
+import { errText, redact as sanitise } from "./redact";
 import { Telegram } from "./telegram";
 import type { BotName, Env } from "./types";
 
@@ -98,7 +99,7 @@ const EVICT_EVERY = 250;
  * what is NOT there in the one position that matters. The first version had it
  * and passed every test until one used a real URL shape.
  */
-const TOKEN_RE = /\d{6,12}:[A-Za-z0-9_-]{30,}/g;
+// The token shape this used to hold now lives in `redact.ts`.
 
 /**
  * Cap on one line's detail.
@@ -110,8 +111,11 @@ const TOKEN_RE = /\d{6,12}:[A-Za-z0-9_-]{30,}/g;
  */
 const DETAIL_LIMIT = 2000;
 
-export function redact(s: string): string {
-  const out = s.replace(TOKEN_RE, "[REDACTED]");
+export function redact(s: string, env?: Partial<Env>): string {
+  // Secrecy lives in `redact.ts` -- one redactor, so a rule added for the HTTP
+  // response body also protects the log line. What stays here is the LENGTH
+  // cap, which is a storage-budget concern and nothing to do with credentials.
+  const out = sanitise(s, env);
   return out.length > DETAIL_LIMIT
     ? `${out.slice(0, DETAIL_LIMIT)}… (+${out.length - DETAIL_LIMIT} chars)`
     : out;
@@ -154,9 +158,12 @@ function utcStamp(atMs: number): string {
  * the tag is the first thing you look for when scanning it on a phone.
  */
 export function formatLine(e: LogEntry, atMs: number = Date.now(),
-                           suppressed = 0): string {
+                           suppressed = 0, env?: Partial<Env>): string {
   const lines = [`[${e.bot}]`, `${LEVEL_EMOJI[e.level]} ${e.level} ${e.event}`];
-  if (e.detail) lines.push(redact(e.detail));
+  // `env` is threaded in so the CONFIGURED secrets are masked too, not just
+  // anything that happens to look like a token. Optional because the shape
+  // rules stand on their own wherever a caller has no env to hand.
+  if (e.detail) lines.push(redact(e.detail, env));
   lines.push(utcStamp(atMs));
   if (suppressed > 0) lines.push(`(+${suppressed} suppressed by rate limit)`);
   const text = lines.join("\n");
@@ -182,7 +189,7 @@ const rate = { windowStartMs: 0, sentInWindow: 0, suppressed: 0 };
 
 async function writeToD1(env: Env, e: LogEntry): Promise<void> {
   if (!env.DB) return;
-  const detail = e.detail ? redact(e.detail) : null;
+  const detail = e.detail ? redact(e.detail, env) : null;
   // Byte length, not character count: a Persian or emoji-bearing detail costs
   // more than its .length suggests, and undercounting would push the table
   // past the budget it is supposed to hold.
@@ -220,7 +227,7 @@ async function writeToChannel(env: Env, e: LogEntry, atMs: number): Promise<void
   const carried = rate.suppressed;
   rate.suppressed = 0;
   const tg = new Telegram(token, env.TELEGRAM_API_BASE);
-  await tg.sendMessage(chat, formatLine(e, atMs, carried));
+  await tg.sendMessage(chat, formatLine(e, atMs, carried, env));
 }
 
 /**
@@ -234,14 +241,16 @@ export function log(env: Env, e: LogEntry): Promise<void> {
   const atMs = Date.now();
   // console.log stays as well: it is the only sink that survives a D1 outage,
   // and `wrangler tail` reads it.
-  console.log(formatLine(e, atMs));
+  console.log(formatLine(e, atMs, 0, env));
   const jobs = [writeToD1(env, e)];
   if (toChannel) jobs.push(writeToChannel(env, e, atMs));
   return Promise.allSettled(jobs).then((results) => {
     for (const r of results) {
       if (r.status === "rejected") {
-        console.error(`[${e.bot}] ERROR log-sink`,
-                      r.reason instanceof Error ? r.reason.message : String(r.reason));
+        // Redacted like every other sink. A D1 or channel failure reports the
+        // request it was making, and this is the LAST place a credential could
+        // still slip out -- an error path nobody reads until it matters.
+        console.error(`[${e.bot}] ERROR log-sink`, errText(r.reason, env));
       }
     }
   });

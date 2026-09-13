@@ -295,6 +295,37 @@ The tests stub `fetch`, so nothing in them can reach Telegram — the same rule
 the Python suite enforces, for the same reason: a test once reached live
 Telegram and replaced a sticker in a published pack.
 
+## Errors never carry a credential
+
+Every Bot API request URL embeds the bot token (`/bot<token>/sendMessage`), and
+a transport failure names the URL it was attempting. That message travelled out
+of `Telegram.call`, through the publish handler's catch, into the HTTP 502 body
+**and** into every log sink — so a caller holding only the publish bearer could
+be handed the bot token instead.
+
+`src/redact.ts` is the one redactor, and everything on its way out goes through
+it. Three independent rules, because each covers a hole the others do not:
+
+| rule | catches |
+|---|---|
+| `/bot…/` URL shape | a token this Worker never had in `env` — another bot, a stale deployment, a token quoted inside an upstream description |
+| bare `digits:secret` shape | a token outside a URL |
+| the configured `env` literals | a secret with no recognisable shape, such as a webhook secret echoed back |
+
+The credential env values are listed explicitly rather than derived by scanning
+`env`: a binding added later must be considered rather than assumed harmless,
+and a chat id or api base must stay readable in the messages that need it.
+
+`errText` also flattens an error's `cause` chain before redacting — `String(err)`
+hides a cause and `JSON.stringify` of an Error yields `{}`, so an unsanitised
+cause is both invisible and liable to surface wherever something serialises it
+more thoroughly. `logging.ts` keeps its own length cap, which is a storage-budget
+concern and nothing to do with credentials.
+
+`test/redaction.test.ts` asserts that a synthetic, correctly-shaped token appears
+in no response body, no log line and no nested cause — while a successful
+publish and an ordinary refusal still read normally.
+
 ## Behaviour worth knowing
 
 - **Webhook handlers return 200 even when handling fails.** Telegram redelivers
