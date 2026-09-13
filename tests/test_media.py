@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image, ImageDraw  # noqa: E402
 
-from emojikit import identity, media  # noqa: E402
+from emojikit import identity, media, video_decode  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # Generating a 2-second clip takes well under a second; anything near this bound
@@ -62,6 +62,18 @@ def _clear_pixels(webm: Path) -> int:
          "-pix_fmt", "rgba", "-"],
         capture_output=True, check=True).stdout
     return sum(1 for i in range(3, len(raw), 4) if raw[i] == 0)
+
+
+def _ffmpeg_calls(cmds: list[list[str]]) -> list[list[str]]:
+    """Only the ffmpeg launches, dropping the ffprobe that precedes them.
+
+    Choosing a decoder means reading the file's real codec first, so an encode
+    or a sample is now a probe plus a run through one ``_run``. A probe reads
+    the header and stops; counting it as a decode would make every "one decode"
+    assertion read two and say nothing about the expensive half.
+    """
+    return [c for c in cmds if "ffprobe" not in Path(c[0]).name.lower()]
+
 
 class TestDetection(unittest.TestCase):
     def setUp(self):
@@ -357,22 +369,46 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
         self.assertGreater(_clear_pixels(again), 0,
                            "re-encoding a transparent webm flattened it")
 
-    def test_only_a_webm_input_names_the_alpha_decoder(self):
-        """A GIF or PNG input must not be handed a vp9 decoder."""
+    def test_only_a_real_video_input_names_the_alpha_decoder(self):
+        """A GIF or PNG input must not be handed a vp9 decoder.
+
+        The decoder is chosen from the PROBED codec, never the extension -- a
+        `.webm` is a container and says nothing about what is inside it -- so
+        the encode is now preceded by an ffprobe. Only the ffmpeg calls are
+        the subject here; `_ffmpeg_calls` drops the probe.
+        """
         seen = []
 
         def fake_run(cmd, *a, **kw):
             seen.append(cmd)
             (self.tmp / "o.webm").write_bytes(b"x")     # tiny -> loop stops
 
-        with mock.patch.object(media, "_run", fake_run):
-            for name in ("a.webm", "a.gif"):
-                media.to_video_webm(self.tmp / name, self.tmp / "o.webm")
-        webm_cmd, gif_cmd = seen[0], seen[-1]
+        # Real inputs, because the decoder is decided by probing them -- and
+        # the probe has to happen for real, before `_run` is replaced. It is
+        # memoised per file, so the mocked encode below reuses this answer
+        # instead of asking a stub that cannot reply.
+        gif = _make_anim_gif(self.tmp / "a.gif")
+        webm = media.to_video_webm(gif, self.tmp / "src.webm")
+        cmds = {}
+        for name, src in (("webm", webm), ("gif", gif)):
+            self.assertEqual(video_decode.decoder_args(src),
+                             ["-c:v", "libvpx-vp9"] if name == "webm" else [])
+            seen.clear()
+            with mock.patch.object(media, "_run", fake_run):
+                media.to_video_webm(src, self.tmp / "o.webm")
+            cmds[name] = _ffmpeg_calls(seen)[-1]
+        webm_cmd, gif_cmd = cmds["webm"], cmds["gif"]
         self.assertIn("libvpx-vp9", webm_cmd[:webm_cmd.index("-i")])
         self.assertNotIn("libvpx-vp9", gif_cmd[:gif_cmd.index("-i")])
 
-    def test_video_runs_ffmpeg_once_not_twice(self):
+    def test_video_decodes_once_not_twice(self):
+        """One DECODE, which is the expensive half.
+
+        The metadata probe that picks the decoder is an ffprobe: it reads the
+        header and stops, and without it the decoder would be guessed from the
+        extension -- the defect that made two clips differing only in opacity
+        share one content key. What must not double is the frame decode.
+        """
         gif = _make_anim_gif(self.tmp / "anim.gif")
         webm = media.to_video_webm(gif, self.tmp / "anim.webm")
         real_run, calls = media._run, []
@@ -383,8 +419,8 @@ class TestFingerprintMatchesTheSeparateCalls(unittest.TestCase):
 
         with mock.patch.object(media, "_run", counting):
             identity.fingerprint(webm, "video")
-        self.assertEqual(len(calls), 1,
-                         "the whole point of fingerprint() is one ffmpeg launch")
+        self.assertEqual(len(_ffmpeg_calls(calls)), 1,
+                         "the whole point of fingerprint() is one decode")
 
     def test_animated_has_no_raster_hash_and_still_keys(self):
         lottie = {"v": "5.5", "w": 512, "h": 512, "fr": 60, "ip": 0, "op": 60,

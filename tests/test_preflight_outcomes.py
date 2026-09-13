@@ -92,12 +92,21 @@ class PreflightOutcomes(unittest.TestCase):
 
     def test_a_total_transport_failure_is_never_success(self):
         """The audit's reproduction: zero verdicts obtained, yet it reported
-        acceptance and exited 0."""
+        acceptance and exited 0.
+
+        PARTIAL and not FAILED, even though NOTHING was validated: FAILED is
+        the code a Telegram refusal returns, and answering a dropped connection
+        with it sends someone editing artwork that was never the problem. The
+        count of unreachable files does not change what happened -- nobody
+        said no.
+        """
         boom = RuntimeError("connection reset by peer")
         code, tg = self.run_preflight({f"i{i}.png": boom for i in range(3)})
         self.assertEqual(len(tg.asked), 3)
-        self.assertEqual(code, EXIT_FAILED,
-                         "no file was validated, so this cannot be a pass")
+        self.assertNotEqual(code, EXIT_OK,
+                            "no file was validated, so this cannot be a pass")
+        self.assertEqual(code, EXIT_PARTIAL,
+                         "an unreachable server is not a bad file")
 
     def test_a_partial_transport_failure_is_not_success_either(self):
         code, _tg = self.run_preflight({"i1.png": RuntimeError("timed out")})
@@ -161,7 +170,8 @@ class TheSummaryMatchesTheOutcome(unittest.TestCase):
 
     def test_an_unknown_never_prints_an_acceptance_claim(self):
         code, out = self.capture(0, [], [], [("k", "n.png", "timed out")])
-        self.assertEqual(code, EXIT_FAILED)
+        # PARTIAL: nothing was accepted, but nothing was refused either.
+        self.assertEqual(code, EXIT_PARTIAL)
         self.assertNotIn("acceptable to Telegram", out)
         self.assertIn("1 not checked", out)
         self.assertIn("proves nothing about them", out)
