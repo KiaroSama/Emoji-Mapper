@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - the launcher's yes/no prompts
+
+- **A "yes" answer at four launcher prompts silently acted as "go back".**
+  `Ask-YesNo` returns a bare `[bool]` for a plain yes/no or the string `'back'`
+  for an explicit `0`; comparing a `[bool]` to `'back'` with `-eq` coerces the
+  string operand to match the bool side (`'back'` becomes `$true`), so
+  `$true -eq 'back'` is `True`. Every "yes" — including the default on a bare
+  Enter — read as "back". B4 (open the curate panel) was the visible case: an
+  answer of "yes" to "show the published packs too?" silently returned to the
+  menu with no error, and "no" fell through correctly but then opened the
+  panel without `--with-pack`, showing 1 catalog emoji instead of every pack.
+  The same anti-pattern also affected A1 and A3's "run it now?" confirmation
+  and B3's "dry-run then upload now?" — a "yes" there stepped the wizard back
+  one screen instead of proceeding. Fixed at all four sites by checking the
+  return type instead of relying on implicit string/bool coercion.
+
 ### Fixed - a second audit: identity, migration and the panel's queues
 
 - **Video identity now fails closed.** A missing `libvpx-vp9`, a failed codec
