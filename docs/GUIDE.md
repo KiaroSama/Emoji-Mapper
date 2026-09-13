@@ -274,9 +274,20 @@ looking empty.
 Dark neon panel: every emoji is a big labelled card (static=image,
 video=`<video>`, animated `.tgs`=pre-rendered to animated WebP). All selected by
 default. Click to toggle, **Shift+click** for a range. Look-alikes are ordered
-adjacently. **Zoom** with `−` / `100%` / `+` or Ctrl+wheel to fit more emoji on
-a screen or to inspect one; the grid is virtual, so a thousand cards cost what
-a hundred do. Click **Save** → writes the `included` flag to the catalog.
+adjacently. **Zoom** with `−` / `+`, Ctrl+wheel, or type an exact percentage
+into the field between them (Enter applies it, double-click resets to 100%);
+the grid is virtual, so a thousand cards cost what a hundred do. Click
+**Save** → writes the `included` flag to the catalog.
+
+**Selection mode** (the pill next to Zoom) is for moving several emoji as one
+group: drag across the small pick box in a card's top-left corner to select a
+run, then drag any picked card to carry the whole set. While it is on, Select
+all / Deselect all / Invert act on the picks instead of on publish inclusion.
+**Holding** (the strip under the count line) is a place to park emoji out of
+the way: drag one onto it to exclude it from the next publish without hunting
+for its tick in a long grid, drag a parked one back in to re-include it at
+the exact position dropped — a pack short a few emoji still auto-fills from
+whatever candidates follow it, same as unticking one in place always has.
 
 ### 6.4 Publish the catalog into new packs
 
@@ -1875,7 +1886,7 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 | `GET /` | The page (`assets/panel.html`: markup, CSS, items embedded as JSON, the per-run values). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
 | `GET /preview/<key>?fps=N` | A `.tgs` rendered to an **animated WebP**, cached on disk. The rate is in the URL because the response is immutable-cached. |
-| `GET /static/<file>` | Static assets (logo, favicon, and the two panel scripts), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
+| `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
 | `POST /api/save` | Body `{"excluded":[keys], "known":[keys]}` → `catalog.set_inclusion(...)`, **restricted to `known`**. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 
@@ -1917,7 +1928,26 @@ Front-end:
   **document**, not `scrollIntoView`: that aligns an element with the top of
   the viewport, which sits behind the sticky header, so Top stopped a
   header-height short — hiding the Pack 1 marker — and Bottom stopped short for
-  the same reason.
+  the same reason. Select all / Deselect all / Invert are mode-dependent: while
+  selection mode is on they drive `picked` (`pickAll`/`clearPicked`/
+  `invertPicked`), otherwise `included` (`setAll`) — before this they only ever
+  touched `included`, so picking several emoji looked broken because nothing
+  on screen responded to them.
+- **Holding area** (`assets/panel-holding.js`, a full-width row inside the
+  sticky header so it stays reachable mid-drag). It reuses `included` exactly
+  as the tick does — a held emoji is simply excluded — rendered in its own
+  strip instead of wherever the card's position happens to be. Dragging a card
+  onto it reads the SAME `carried`/`dragKey` state a normal grid drag already
+  sets; dragging a parked card back sets `dragKey`/`carried`/`dragSnap` itself
+  so the grid's own `dragover`/`drop` repositions it, and its own `dragend`
+  (fired on the source regardless of drop target) flips `included=true` only
+  when `dropEffect==='move'` — 'none' means it was released over nothing, so
+  the emoji stays held. `panel-actions.js` and `panel-grid.js` were both at or
+  over the 700-line closed-to-new-code line, so this is a new file that only
+  reads their already-shared globals; nothing was added to either beyond
+  wrapping `updateCount()` once (already every include/exclude path's "the
+  counts changed, repaint" signal) and changing 3 existing one-line handlers
+  in place (net-zero growth).
 - **Pack boundaries are drawn in the grid.** When the selection needs more than
   one set, a full-width marker carrying the brand logo sits at the head of each
   pack, labelled with the grid range it spans (`Pack 2 · #201–#399`), so you can
@@ -1929,7 +1959,12 @@ Front-end:
   a `.card`: the drop handler resolves its target with `closest('.card')`, so a
   marker that matched would swallow a drop aimed past it and silently do
   nothing. Card numbers stay **grid** positions and are unchanged by the
-  markers.
+  markers. The LAST pack's upper bound is the last actually-included,
+  non-logo item — not `ITEMS.length`, which is the raw array size and used to
+  count a held (excluded) tail as if it still occupied a slot: parking 5 of a
+  200-item pack's own emoji left it claiming `#1–#200` instead of `#1–#195`.
+  A pack that is not last is unaffected — its bound is the next pack's start,
+  and it correctly keeps claiming a full 200 by drawing on whatever follows.
 - **The grid is virtual** (`assets/panel-grid.js`). `ITEMS` is the order and
   the selection; the DOM holds only the rows within half a screen of the
   viewport, between two spacers that carry the height of everything above and
@@ -1949,7 +1984,12 @@ Front-end:
   item at the top of the screen is re-scrolled to the top after the relayout.
   Range 0.4–2.4, steps of ×1.15, persisted as `panelZoom`. Ctrl+wheel and
   Ctrl+plus/minus/0 are intercepted (`passive:false`) so the browser's own page
-  zoom does not fire as well.
+  zoom does not fire as well. `zoomReset` is a typeable `<input>`, not a
+  reset-only button: Enter parses and applies a percentage, double-click still
+  resets to 100 %. `paintZoom()` writes `.value`, not `.textContent` — the
+  latter is silently inert on an `<input>`, which is exactly why the click
+  handler that used to live there moved to `panel-holding.js` instead of
+  growing in place.
 - **Drag edits the model as you drag** (`assets/panel-actions.js`). Each
   `dragover` that changes the target moves the carried items inside `ITEMS`
   and re-projects the grid, so the translucent tile IS where they land; the

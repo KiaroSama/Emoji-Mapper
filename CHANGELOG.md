@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - a holding area for parked emoji
+
+- **A holding area in the curate panel.** Drag an emoji onto it to exclude it
+  from the next publish without hunting for its tick in a long grid; drag a
+  parked one back into the grid to re-include it at the exact position
+  dropped. Reuses the existing `included` flag — no new state, no backend
+  change — rendered in its own strip inside the sticky header instead of
+  wherever the card's position happens to be.
+- **Zoom now takes an exact percentage.** `zoomReset` is a typeable field:
+  type a value and press Enter to apply it, double-click still resets to
+  100 %.
+
+### Fixed - selection mode looked broken, and a pack's own count lied
+
+- **Select all / Deselect all / Invert only ever touched publish inclusion.**
+  While selection mode was on (picking several emoji to move together), these
+  three buttons had no visible effect on the picks at all — nothing on
+  screen responded, which read as the mode being broken outright. They now
+  drive the picks while selection mode is on, publish inclusion otherwise.
+- **The pick checkbox was easy to miss.** Its resting-state border and glyph
+  used the same near-invisible colour as the card's own border; it now uses
+  the same contrast the publish tick already has.
+- **A pack's own upper bound could overcount by exactly what was excluded
+  from its tail.** It was computed from the raw size of the underlying array,
+  which counts an excluded item sitting past the pack's real end as if it
+  still occupied a slot. It is now the last actually-included item, wherever
+  it sits — a pack that is not the last one is unaffected, since it correctly
+  keeps drawing on whatever candidates follow to stay full.
+
 ### Fixed - the launcher's yes/no prompts
 
 - **A "yes" answer at four launcher prompts silently acted as "go back".**

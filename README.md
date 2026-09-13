@@ -322,7 +322,7 @@ Emoji Mapper/                  # the whole project
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
     test/                      # vitest, fetch stubbed (never reaches Telegram)
-  assets/                      # shipped images (incl. the brand logo) + the panel page and its two scripts
+  assets/                      # shipped images (incl. the brand logo) + the panel page and its scripts
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   scripts/identity_repair.py   # report/migrate catalog keys after a decode fix
