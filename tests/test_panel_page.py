@@ -622,8 +622,12 @@ class PackSplitsAndJumpButtons(unittest.TestCase):
         Unticking enough cards genuinely moves a boundary, so a counter-only
         refresh left the markers lying.
         """
-        self.assertIn("relayout(); updateCount(); }", SCRIPT)          # setAll
-        self.assertIn("lastIdx=i; relayout(); updateCount();", SCRIPT)  # one card
+        # `markSelDirty()` rides along on both paths now -- a selection change
+        # is also the moment the page learns it differs from what the server
+        # acknowledged -- so this asserts the relayout, not the exact tail.
+        self.assertIn("relayout(); updateCount(); markSelDirty(); }", SCRIPT)
+        self.assertIn("lastIdx=i; relayout(); updateCount(); markSelDirty();",
+                      SCRIPT)
 
     def test_separators_are_part_of_the_row_model_not_accumulated(self):
         """Rebuilt from the pack starts on every layout and reused by title, so
