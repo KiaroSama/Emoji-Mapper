@@ -22,10 +22,12 @@ cannot fail at the moment it is needed.
 Tests use Python's stdlib `unittest` (no extra dependencies). Video tests are
 skipped automatically when `ffmpeg`/`ffprobe` are not on `PATH`.
 
-One module is the exception: `test_panel_browser.py` needs playwright and a
-Chromium build, and it **raises** rather than skipping when they are missing —
-a browser test that reports green on a machine with no browser is worse than no
-browser test at all.
+Two modules are the exception: `test_panel_browser.py` and
+`test_panel_queues.py` need playwright and a Chromium build, and they **raise**
+rather than skipping when those are missing — a browser test that reports green
+on a machine with no browser is worse than no browser test at all. Both reach
+the page through `_panel_browser_fixtures.py`, which is also what
+`test_ci_coverage.py` watches.
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
@@ -33,9 +35,11 @@ browser test at all.
 ```
 
 Set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out on purpose. CI does exactly
-that in the Python matrix and runs the module in its own `panel-browser:` job
-instead: it tests JavaScript, so once per Python version would download
-Chromium twice to prove the same thing.
+that in the Python matrix and runs both modules in its own `panel-browser:` job
+instead: they test JavaScript, so once per Python version would download
+Chromium twice to prove the same thing. That job names its modules explicitly
+rather than globbing, so `test_ci_coverage.py` fails if a new browser suite is
+added without being listed there.
 
 ## The suite never touches the real network
 
@@ -66,7 +70,9 @@ rather than adding an opt-out.
 | `test_lottie_repaint.py` | `validate_tgs` against a timeline that is not a number (NaN defeats every comparison), and `repaint_in_place` against the two shapes it silently skipped: a keyframed colour and a gradient's opacity ramp |
 | `test_catalog.py` | catalog dedup (exact + perceptual), `file_unique_id` skip, pending/upload tracking, persistence |
 | `test_catalog_order.py` | the manual publish order (the `position` column) shared by the panel's drag-and-drop and `build_collection`'s publish order |
-| `test_identity_repair.py` | `scripts/identity_repair.py`: moving every catalog row that stores a content key when the decoder changes what that key IS. The properties under test are the refusals — a collision stops the migration rather than merging two rows, an undecodable file stops it rather than half-converting, and `--apply` is required before anything is written |
+| `test_identity_migration.py` | `collection_migrate.py` + `scripts/identity_repair.py`: moving EVERY durable reference to a content key when the decoder changes what that key IS — three tables, the derived `phash`, the publisher state and plan files, and the archived filenames that embed `key[:12]`. The properties under test are the refusals and the recoveries: a collision stops it rather than merging two rows, an unreadable row stops it rather than half-converting, the backup is taken through SQLite's online API (a `copy2` of a WAL database opens as `no such table: items`), a crash between any two stages resumes because every stage is idempotent, and a second run is a verified no-op |
+| `test_video_identity_fidelity.py` | identity-grade decoding either carries a video's alpha or refuses. A missing `libvpx-vp9`, a failed codec probe and a container naming no codec all used to answer "no decoder needed", which drops the alpha layer — two clips differing only in opacity then share one key, and `Catalog.add` merges them and deletes the file it merged away. Real VP9 and VP8 encodes |
+| `test_video_timeline_comparison.py` | `same_image` on video compares the whole timeline, not frame zero. Two clips sharing ten opening frames used to compare equal; so did two differing in exactly one frame, because the identity stream is sampled at 10 fps and the content-key shortcut answered from that. Ends at `_resolve_sticker_key`, asserting no foreign id is written |
 | `test_resume_safety.py` | the duplicate-upload paths, driven through `build_pack.main()`: recorded-cursor resume, write-ahead in-flight record, atomic state writes, refusal to guess on unexplained drift, per-set limits |
 | `test_unresolved_mutation.py` | the same engine when the live state is UNKNOWN: an ambiguous create, an unresolved in-flight record, a recorded set that no longer reads back. The guarantee is that the run stops rather than guess |
 | `test_telegram_client.py` | `telegram_api.Telegram` on its own: token redaction, the STICKERSET_INVALID retry scope, and what the client accepts as evidence that an upload landed |
@@ -80,6 +86,7 @@ rather than adding an opt-out.
 | `test_publish_contracts.py` | the publisher contracts that are NOT collection state: pack titles as one sequence, the mixed-family layout, the blank-video guard, and the announcement path all three publishers share |
 | `test_publish_invariants.py` | two invariants the publisher states but only enforced in one place each: a set that closed mid-run is never appended to on the next item, and the blank-media check gets the ITEM's format rather than the family's, so `--mixed` cannot bypass it |
 | `test_preflight_outcomes.py` | preflight may not report acceptance it never obtained. The old counter counted ATTEMPTS, so a run in which every `check_uploadable` failed at the transport reported "all accepted" |
+| `test_reconcile_uniqueness.py` | unique attribution means every rival was EXCLUDED. With two candidates matching one live sticker the function correctly reported ambiguity — and deleting one candidate's FILE made it answer "unique" with the survivor, so removing evidence promoted a guess to a certainty |
 | `test_reconcile_identity.py` | recovery must never give a stranger's picture our item's identity. dHash is a grayscale STRUCTURE hash — an opaque red square and an opaque blue one are zero apart — so a perceptual match may only NOMINATE; content verification decides, and "more than one" and "could not examine" stay distinct from "no match" |
 | `test_brand_logo.py` | the mandatory logo-first behaviour in `build_collection`: its conversion per format, that the real shipped asset is used, and that the coin bot stays exempt |
 | `test_pack_manifest.py` | the `packs/` roster: what it records, and when it admits to being stale |
@@ -103,6 +110,9 @@ rather than adding an opt-out.
 | `test_panel_page.py` | assertions against what the panel serves — the page (`panel.PAGE`) and its two scripts concatenated (`panel.SCRIPT`): drag-and-drop (every dragover edits the model and re-projects the grid, the drop records the dragstart snapshot instead of computing an index, a cancel restores it, the pointer's side of a tile decides before-or-after, a carried card is parked rather than unmounted), undo/redo, the virtual grid (only rows near the viewport exist, integer row arithmetic, an unchanged window costs a binary search), zoom (buttons, Ctrl+wheel, clamping, the top item anchored, compact below 75 %), the viewport observers (playback, and video sources attached only near the viewport), the scroll-time animation freeze, selection mode, the pack separators and the jump buttons. Those live in the page's own JavaScript, so the served text is the only level at which the behaviour exists |
 | `test_panel_assets.py` | the scripts ship as real files, the page loads both in order with a version that is their content hash (`panel.ASSET_VER`), the inline block carries values not behaviour, and `/static/<script>?v=…` reaches the file on disk (immutable-cached, so a stale script would otherwise be served forever) |
 | `test_panel_save_scope.py` | `POST /api/save` carries the FULL selection, so a request with no notion of scope speaks for rows the page never saw. The request now states what it was showing, the server applies the decision only inside that scope, and a page too old to say is refused with 409. Driven through the real handler on a real socket |
+| `test_panel_queues.py` | what the panel still owes the server, on a fake clock: unsaved ticks are dirty even when no Save is in flight, an older acknowledgement cannot clear newer unsaved work, a permanent 400/409 stops resubmitting (its own comment said retrying could not fix it, and it retried anyway), the 5-second heartbeat obeys the backoff instead of walking past it, and a fetch that never resolves is released by a raced deadline rather than claiming the queue forever |
+| `test_ci_coverage.py` | the browser job runs from a hand-maintained list of module names, so this fails when a suite imports the harness without being named there — and asserts none is run twice |
+| `test_fake_contracts.py` | every test double whose method shadows a `Telegram` method must accept what the real client passes. `FakeTelegram.send_message()` rejected `disable_preview`, so every happy-path announcement in two suites was silently exercising the swallowed error path while the tests stayed green |
 | `test_panel_browser.py` | what the panel's client code actually DOES, in headless Chromium: the save pipeline's revisioned queues, the separator nodes, the zoom anchor, the animation freeze, the pack count, and a denied `localStorage`. A source-text assertion cannot tell a correct implementation of any of these from a broken one. Needs `requirements-dev.txt` and `python -m playwright install chromium`; set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out deliberately, never to make a missing browser look green |
 | `test_panel_server.py` | the panel as a process: which Host may reach it, and who owns the port. Real subprocesses and real sockets, so the slowest of the four |
 | `test_repaintable.py` | the `--repaintable` gate: the flag is read off the STICKER not the set, only an explicit yes proceeds, `skip`/`keep` never prompt, and an unanswerable prompt (EOF, Ctrl-C) is a no rather than a crash. Also `--tint`, which bakes the repaint instead of skipping: colour parsing, a Lottie recoloured through its tree (fills, strokes and gradient stops, offsets kept), a static filled through its alpha, video refused, and the tint recorded on the item |
@@ -110,8 +120,8 @@ rather than adding an opt-out.
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
 
 `_pack_fixtures.py`, `_rebuild_fixtures.py`, `_cli_fixtures.py`,
-`_bc_fixtures.py`, `_panel_fixtures.py`, `_media_fixtures.py` and
-`_coin_fixtures.py` hold the
+`_bc_fixtures.py`, `_panel_fixtures.py`, `_media_fixtures.py`,
+`_panel_browser_fixtures.py` and `_coin_fixtures.py` hold the
 fakes shared by the modules above them (the PNG builders, `FakeTelegram`,
 `RebuildCase`, and the standalone-script loader every entry-point contract
 module imports). One copy each, because a duplicated fake drifts away from the

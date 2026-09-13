@@ -22,13 +22,12 @@ import { parseAdmins, verifyBearer, verifyWebhook } from "./auth";
 import { announce, handleUpdate, LOG_ECHO } from "./handle";
 import { log } from "./logging";
 import { Telegram } from "./telegram";
+import { errText } from "./redact";
 import { validatePublishRequest } from "./validate";
 import type { BotName, Env, TgUpdate } from "./types";
 
 /** Telegram retries any non-2xx, so failures must be deliberate. */
 const OK = () => new Response("ok");
-
-const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function botConfig(env: Env, bot: BotName): { token: string; secret: string } {
   return bot === "general"
@@ -77,7 +76,7 @@ async function onWebhook(request: Request, env: Env, ctx: ExecutionContext,
     // partial success posts the same reply twice. The error is logged instead,
     // and this one IS worth a channel message: nothing else will report it.
     ctx.waitUntil(log(env, { bot, level: "ERROR", event: "webhook",
-                             detail: `update ${update.update_id}: ${errText(err)}` }));
+                             detail: `update ${update.update_id}: ${errText(err, env)}` }));
   }
   return OK();
 }
@@ -121,7 +120,7 @@ async function onPublish(request: Request, env: Env,
     }));
     return Response.json({ ok: true, message_ids: messageIds });
   } catch (err) {
-    const msg = errText(err);
+    const msg = errText(err, env);
     ctx.waitUntil(log(env, { bot, level: "ERROR", event: "publish", detail: msg }));
     // Reported, never retried here: sendMessage is not idempotent, so the
     // caller decides -- and it can see from the channel whether it landed.

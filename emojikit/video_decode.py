@@ -29,8 +29,11 @@ STREAM. ``fps=10`` does not necessarily emit native frame zero -- measured: a
 from __future__ import annotations
 
 import logging
+import shutil
 from collections import OrderedDict
 from pathlib import Path
+
+from emojikit.errors import UndecodableVideo
 
 log = logging.getLogger("emojikit.video")
 
@@ -45,11 +48,18 @@ SAMPLE_FPS = 10
 # decoders for these two drop the alpha layer silently; the libvpx ones do not.
 _ALPHA_CAPABLE = {"vp9": "libvpx-vp9", "vp8": "libvpx"}
 
-# (path, size, mtime_ns) -> decoder args. Keyed on the file's identity rather
-# than its name because `reencode_in_place` rewrites files where they stand,
-# and a stale decoder choice would outlive the bytes it was chosen for.
-_decoder_cache: dict[tuple[str, int, int], tuple[str, ...]] = {}
-_available: dict[str, bool] = {}
+# (path, size, mtime_ns, ffmpeg identity) -> decoder args. Keyed on the file's
+# identity rather than its name because `reencode_in_place` rewrites files where
+# they stand and a stale decoder choice would outlive the bytes it was chosen
+# for; keyed on the ffmpeg too because the answer is a fact about that binary.
+# Bounded for the same reason as the frame cache below: a working set, not a
+# record. Only determinations that passed every check in `decoder_args` land
+# here -- a failure is never cached, which is what made one transient probe
+# error permanent.
+_DECODER_CACHE_MAX = 512
+_decoder_cache: OrderedDict[tuple[str, int, int, tuple[str, int, int]],
+                            tuple[str, ...]] = OrderedDict()
+_available: dict[tuple[str, tuple[str, int, int]], bool] = {}
 
 # Decoding is the expensive step, and one question about a pair of videos asks
 # for it many times over: `same_image` alone wants two content keys, two
@@ -59,7 +69,7 @@ _available: dict[str, bool] = {}
 # entry. Bounded because a sample stream is ~0.5 MB and an ingest walks
 # thousands of files: this is a working set, not a store.
 _FRAME_CACHE_MAX = 8
-_frame_cache: OrderedDict[tuple[str, int, int], bytes] = OrderedDict()
+_frame_cache: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
 
 
 def _media():
@@ -69,65 +79,128 @@ def _media():
     return media
 
 
+def _ffmpeg_identity() -> tuple[str, int, int]:
+    """What a capability answer is true OF.
+
+    "This ffmpeg has no libvpx-vp9" is a fact about one binary, and it used to
+    be cached as a fact about the process. Keying on the executable itself is
+    what lets a rebuilt or swapped toolchain be noticed without a restart. A
+    binary that cannot be stat'd keys on its path alone -- weaker, and the
+    reason this returns a tuple rather than a bare string.
+    """
+    media = _media()
+    p = Path(media.ffmpeg_path())
+    if not p.is_absolute():
+        p = Path(shutil.which(str(p)) or p)
+    try:
+        st = p.stat()
+        return (str(p), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return (str(p), -1, -1)
+
+
 def decoder_available(name: str) -> bool:
     """Is this decoder compiled into the ffmpeg on PATH?
 
-    Asked once per name per process. A build without libvpx would otherwise
-    fail every single decode, which is a worse outcome than losing alpha -- but
-    losing alpha silently is exactly the defect above, so it is logged loudly.
+    Raises rather than answering False when the QUESTION could not be asked.
+    "ffmpeg says it has no libvpx-vp9" and "ffmpeg did not run" are different
+    facts and only the first is cacheable -- the second one used to be stored as
+    False, so a single transient failure made every later video in the process
+    decode without its alpha, silently and permanently.
     """
-    if name in _available:
-        return _available[name]
+    key = (name, _ffmpeg_identity())
+    if key in _available:
+        return _available[key]
     media = _media()
     try:
         out = media._run([media.ffmpeg_path(), "-v", "error", "-decoders"],
                          capture=True).stdout or b""
-        ok = name.encode() in out
-    except Exception as exc:  # noqa: BLE001 - unknown capability, assume absent
-        log.debug("could not list ffmpeg decoders: %s", exc)
-        ok = False
+    except Exception as exc:
+        raise UndecodableVideo(
+            f"could not ask ffmpeg which decoders it has, so alpha fidelity "
+            f"cannot be established: {exc}") from exc
+    ok = name.encode() in out
     if not ok:
         log.warning("ffmpeg has no %s decoder: alpha in VP8/VP9 video cannot be "
-                    "read, so two clips differing only in transparency may look "
-                    "identical to this run", name)
-    _available[name] = ok
+                    "read, so identity for those clips cannot be established "
+                    "here", name)
+    _available[key] = ok
     return ok
 
 
 def decoder_args(path: Path) -> list[str]:
-    """ffmpeg input flags that decode ``path`` WITH its alpha, if it has any.
+    """ffmpeg input flags that decode ``path`` WITH its alpha.
 
-    Empty for anything that is not a codec with a known alpha-dropping default
-    decoder, and empty when the right decoder is not available -- in which case
-    the caller gets the same answer it used to, and `decoder_available` has
-    already said so in the log.
+    Raises ``UndecodableVideo`` whenever that cannot be ESTABLISHED, and returns
+    ``[]`` only on positive evidence that no override applies -- the file is not
+    a video at all, or its container named a codec whose default decoder keeps
+    transparency.
+
+    It used to degrade instead: a failed probe, an unnamed codec or a missing
+    libvpx all produced ``[]``, which decodes a VP9 clip without its alpha
+    layer. Two clips differing only in opacity then share one content key, and
+    `Catalog.add` merges them and deletes the file it merged away. Guessing here
+    costs media; raising costs one skipped item that gets counted and reported.
     """
     path = Path(path)
+    media = _media()
+
+    # Magic bytes, not a probe: an image or a GIF has no alpha-dropping video
+    # decoder to choose, so the strictness below is confined to real videos and
+    # still-image conversion is untouched.
+    if media.detect_format(path) != "video":
+        return []
+
+    ffmpeg = _ffmpeg_identity()
     try:
         st = path.stat()
-        cache_key = (str(path), st.st_size, st.st_mtime_ns)
+        cache_key = (str(path), st.st_size, st.st_mtime_ns, ffmpeg)
     except OSError:
         cache_key = None
     if cache_key is not None and cache_key in _decoder_cache:
+        _decoder_cache.move_to_end(cache_key)
         return list(_decoder_cache[cache_key])
 
-    codec = ""
     try:
-        codec = (_media().probe_video(path).codec or "").lower()
-    except Exception as exc:  # noqa: BLE001 - unprobeable: let ffmpeg decide
-        log.debug("codec probe failed for %s: %s", path.name, exc)
+        codec = (media.probe_video(path).codec or "").lower()
+    except Exception as exc:
+        raise UndecodableVideo(
+            f"{path.name}: the codec could not be read, so the decoder that "
+            f"preserves its alpha cannot be chosen: {exc}") from exc
+    if not codec:
+        # Missing metadata is not evidence of a codec that needs no override.
+        raise UndecodableVideo(
+            f"{path.name}: the container named no video codec, so alpha "
+            f"fidelity cannot be established")
 
     name = _ALPHA_CAPABLE.get(codec, "")
-    args: tuple[str, ...] = ()
-    if name and decoder_available(name):
-        args = ("-c:v", name)
+    if name and not decoder_available(name):
+        raise UndecodableVideo(
+            f"{path.name}: {codec} keeps alpha in a separate layer and this "
+            f"ffmpeg has no {name} decoder, so a decode here cannot be trusted "
+            f"to carry transparency")
+
+    args = ("-c:v", name) if name else ()
     if cache_key is not None:
+        # Only a determination reached through the checks above is stored, and
+        # the store is bounded: an ingest walks thousands of files, and this is
+        # a working set rather than a record.
         _decoder_cache[cache_key] = args
+        _decoder_cache.move_to_end(cache_key)
+        while len(_decoder_cache) > _DECODER_CACHE_MAX:
+            _decoder_cache.popitem(last=False)
     return list(args)
 
 
-def frames_rgba(path: Path) -> bytes:
-    """The canonical RGBA sample stream: 10 fps, 64x64, alpha preserved.
+def frames_rgba(path: Path, fps: int = SAMPLE_FPS) -> bytes:
+    """RGBA frames at ``fps``, 64x64, alpha preserved.
+
+    ``SAMPLE_FPS`` is the IDENTITY stream and its rate is frozen: every stored
+    content key is a hash of it, so changing that default re-keys the whole
+    catalog. ``fps`` exists for the one caller that needs to look harder --
+    comparing two clips, where a change shorter than one sampling interval is
+    invisible. Measured: a single differing frame in a 30 fps clip is present at
+    30 fps and gone at 10 and at 15.
 
     Failure is NOT caught. A hung or timed-out ffmpeg means "I could not look",
     and turning that into an empty sample would turn it into a byte hash -- a
@@ -142,7 +215,7 @@ def frames_rgba(path: Path) -> bytes:
     path = Path(path)
     try:
         st = path.stat()
-        cache_key = (str(path), st.st_size, st.st_mtime_ns)
+        cache_key = (str(path), st.st_size, st.st_mtime_ns, fps)
     except OSError:
         cache_key = None
     if cache_key is not None and cache_key in _frame_cache:
@@ -160,7 +233,7 @@ def frames_rgba(path: Path) -> bytes:
                "-f", "rawvideo", "-"]
         return media._run(cmd, capture=True).stdout or b""
 
-    raw = sample(f"fps={SAMPLE_FPS},") or sample("")
+    raw = sample(f"fps={fps},") or sample("")
     # Only a successful decode is cached. An empty result from a file that
     # genuinely renders nothing is cheap to repeat, and a FAILED decode raises
     # before reaching here -- caching "I could not look" would turn one

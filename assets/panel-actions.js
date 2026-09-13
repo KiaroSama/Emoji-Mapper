@@ -7,7 +7,7 @@ let lastIdx = null;
 function setAll(fn){ remember();
   for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); }
   // relayout() too, not just the counter: unticking moves the pack splits.
-  relayout(); updateCount(); }
+  relayout(); updateCount(); markSelDirty(); }
 
 // Reduced motion is the one case where nothing plays by itself; hover is then
 // the only way to see a video move at all, so the old handlers survive for it.
@@ -116,7 +116,7 @@ grid.addEventListener('click',e=>{
   } else {
     ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
   }
-  lastIdx=i; relayout(); updateCount();
+  lastIdx=i; relayout(); updateCount(); markSelDirty();
 });
 
 // --- Undo / redo ---------------------------------------------------------
@@ -157,6 +157,7 @@ function applySnapshot(snap){
   // loaded thumbnail, preview and playing video survives an undo.
   relayout();
   updateCount();
+  markSelDirty();       // undo can land either side of what the server knows
   saveOrder();          // order is auto-saved; selection waits for Save, as always
   updateHistoryButtons();
 }
@@ -217,6 +218,47 @@ let selRev = 0, selFlight = 0, selWait = null, selBackoff = 0;
 
 const RETRY_MIN = 1000, RETRY_MAX = 30000;
 
+// One deadline per operation, covering the POST, the 403 token refresh and the
+// body read. Without it a fetch that never settles left `orderFlight` set for
+// the life of the page: `kickOrder` returns early while a flight is claimed, so
+// every newer revision queued behind it silently stopped going.
+const REQUEST_TIMEOUT = 15000;
+
+// The earliest time each queue may try again. The 5-second heartbeat used to
+// call flushOrder directly, which walked straight past the backoff -- eight
+// heartbeats produced eight more identical POSTs after the first refusal. One
+// scheduling authority means both the timer and the heartbeat ask this.
+let orderNextAt = 0, selNextAt = 0;
+
+// A refusal retrying cannot fix. 400 says the panel's catalog and this page
+// have drifted apart, 409 that the page is too old to state its scope: both
+// need reconciliation, and re-sending the same body just asks again. The work
+// STAYS queued -- beforeunload still guards it -- but nothing resubmits it
+// until the request itself changes.
+const PERMANENT = new Set([400, 409]);
+let orderStuck = false, selStuck = false;
+
+// What the SERVER has confirmed, as a comparable signature. Distinct from
+// `pendingSel`, which is only ever "a Save that has not landed yet": edits made
+// while a Save is in flight, or with no Save pressed at all, are unsaved work
+// that neither of those told anyone about. An acknowledgement may retire the
+// snapshot it carried and nothing newer.
+const selSig = (keys) => keys.slice().sort().join(' ');
+let ackedSel = selSig(ITEMS.filter(x => !x.isLogo && !x.included).map(x => x.key));
+
+function currentExcluded(){
+  return ITEMS.filter(x => !x.isLogo && !x.included).map(x => x.key);
+}
+
+/** Does the visible selection differ from what the server has acknowledged? */
+function selDirty(){ return selSig(currentExcluded()) !== ackedSel; }
+
+/** Show it on the control you would press to fix it. */
+function markSelDirty(){
+  const b = document.getElementById('save');
+  if(b) b.classList.toggle('dirty', selDirty());
+}
+
 function setAlert(html){
   if(html === lastAlert) return;
   lastAlert = html;
@@ -250,16 +292,45 @@ function clearAlertIfClean(){
  * your afternoon" into "restart the panel and it catches up".
  */
 async function apiPost(path, body){
-  const send = () => fetch(path, {method:'POST',
-    headers:{'Content-Type':'application/json','X-Panel-Token':TOK},
-    body:JSON.stringify(body)});
-  let r = await send();
-  if(r.status === 403){
-    const html = await (await fetch('/', {cache:'no-store'})).text();
-    const m = /const TOKEN = "([^"]+)"/.exec(html);
-    if(m){ TOK = m[1]; r = await send(); }
+  // ONE deadline for the whole operation. The body read is inside it because a
+  // response whose stream never finishes wedges the queue exactly as a request
+  // that never responds does, and only the caller's flight flag would ever
+  // have noticed -- by staying set forever.
+  const ac = new AbortController();
+  let timer = 0;
+  // RACED, not merely aborted. `AbortController` only helps if the transport
+  // honours the signal, and the release of the flight flag must not depend on
+  // that: a fetch that ignores it -- or resolves a body stream that never
+  // ends -- would leave the queue claimed exactly as before. The abort is
+  // still fired, so the real request is really cancelled; the rejection is
+  // what guarantees the await settles.
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try{ ac.abort(); }catch(_){}
+      reject(new Error('deadline'));
+    }, REQUEST_TIMEOUT);
+  });
+  const bounded = (p) => Promise.race([p, deadline]);
+  try{
+    const send = () => fetch(path, {method:'POST',
+      headers:{'Content-Type':'application/json','X-Panel-Token':TOK},
+      body:JSON.stringify(body), signal:ac.signal});
+    let r = await bounded(send());
+    if(r.status === 403){
+      // The token refresh is inside the same deadline: it is another network
+      // round trip, and one that hangs strands the save just as surely.
+      const res = await bounded(fetch('/', {cache:'no-store', signal:ac.signal}));
+      const html = await bounded(res.text());
+      const m = /const TOKEN = "([^"]+)"/.exec(html);
+      if(m){ TOK = m[1]; r = await bounded(send()); }
+    }
+    let json = {};
+    try{ json = await bounded(r.json()); }catch(_){ /* status says enough */ }
+    return {ok:r.ok, status:r.status, json};
+  } finally {
+    clearTimeout(timer);
+    deadline.catch(()=>{});     // nothing is listening once we are done
   }
-  return r;
 }
 
 /**
@@ -279,18 +350,16 @@ async function flushOrder(order){
   try{
     r = await apiPost('/api/order', {order});
   }catch(_){
-    return failOrder('The panel at this address is not responding.');
+    return failOrder('The panel at this address is not responding.', 0);
   }
   if(!r.ok){
-    // 400 is the one failure retrying cannot fix: the panel rejected this as
-    // not a permutation of what it holds, so its catalog and this page have
-    // drifted apart and only a reload reconciles them.
-    return failOrder(r.status === 400
+    return failOrder(PERMANENT.has(r.status)
       ? 'The panel rejected this arrangement — its catalog no longer matches '
-        + 'this page, so reload the panel.'
-      : 'The panel refused the save (HTTP ' + r.status + ').');
+        + 'this page. Your arrangement is still here and still guarded; open '
+        + 'this panel in a new tab to reconcile, then arrange again.'
+      : 'The panel refused the save (HTTP ' + r.status + ').', r.status);
   }
-  orderFlight = 0; orderBackoff = 0;
+  orderFlight = 0; orderBackoff = 0; orderStuck = false;
   // Only the acknowledged revision is saved. An arrangement made WHILE this was
   // in flight is still at risk and goes next, instead of being forgotten the
   // moment an older save came back ✓.
@@ -300,12 +369,20 @@ async function flushOrder(order){
   return true;
 }
 
-function failOrder(why){
+function failOrder(why, status){
   orderFlight = 0;
   // The failed snapshot is deliberately NOT written back to pendingOrder: that
   // already holds the newest arrangement, which is this one or something later,
   // and restoring the old one is how a retry overwrote work that came after it.
   offline(why);
+  if(PERMANENT.has(status)){
+    // Its own comment already said retrying cannot fix a 400 -- and then it
+    // scheduled a retry anyway, so a refusal repeated forever. The work stays
+    // queued and guarded; what stops is the resubmitting.
+    orderStuck = true;
+    clearTimeout(orderWait);
+    return false;
+  }
   orderBackoff = Math.min(RETRY_MAX, orderBackoff ? orderBackoff * 2 : RETRY_MIN);
   kickOrder(orderBackoff);
   return false;
@@ -313,7 +390,8 @@ function failOrder(why){
 
 function kickOrder(ms){
   clearTimeout(orderWait);
-  if(pendingOrder === null || orderFlight) return;
+  if(pendingOrder === null || orderFlight || orderStuck) return;
+  orderNextAt = Date.now() + ms;       // the heartbeat reads this too
   orderWait = setTimeout(()=>flushOrder(pendingOrder), ms);
 }
 
@@ -334,8 +412,16 @@ setInterval(async ()=>{
   try{
     const r = await fetch('/api/ping', {cache:'no-store'});
     if(!r.ok) throw new Error(r.status);
-    if(pendingOrder) await flushOrder(pendingOrder);
-    if(pendingSel) await flushSel(pendingSel);
+    // Through the SAME schedule the timers use. Calling flushOrder directly
+    // from here walked past the backoff entirely, so a refusal that had earned
+    // a 30-second wait was re-sent every five seconds instead.
+    const now = Date.now();
+    if(pendingOrder !== null && !orderStuck && !orderFlight && now >= orderNextAt){
+      await flushOrder(pendingOrder);
+    }
+    if(pendingSel !== null && !selStuck && !selFlight && now >= selNextAt){
+      await flushSel(pendingSel);
+    }
     clearAlertIfClean();
   }catch(_){
     offline('The panel process is not running.');
@@ -348,7 +434,12 @@ setInterval(async ()=>{
 // about.
 addEventListener('beforeunload', e=>{
   if(pendingOrder) return blockUnload(e);
-  if(pendingSel) blockUnload(e);
+  if(pendingSel) return blockUnload(e);
+  // And ordinary unsaved ticks, which neither queue knows about. `pendingSel`
+  // means "a Save is still trying"; it says nothing about edits made while one
+  // was in flight, or about edits where Save was never pressed. Both are work
+  // this tab would take with it.
+  if(selDirty()) blockUnload(e);
 });
 function blockUnload(e){ e.preventDefault(); e.returnValue = ''; }
 
@@ -537,10 +628,19 @@ async function flushSel(excluded){
   // then silently re-include emoji it has never heard of and be told "Saved".
   const known = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
   try{ r = await apiPost('/api/save', {excluded, known}); }
-  catch(_){ return failSel('The panel at this address is not responding.'); }
-  try{ j = await r.json(); }catch(_){ /* the status still says enough */ }
-  if(!r.ok) return failSel('The panel refused the save (' + (j.error || r.status) + ').');
-  selFlight = 0; selBackoff = 0;
+  catch(_){ return failSel('The panel at this address is not responding.', 0); }
+  j = r.json;
+  if(!r.ok){
+    return failSel('The panel refused the save (' + (j.error || r.status) + ').',
+                   r.status);
+  }
+  selFlight = 0; selBackoff = 0; selStuck = false;
+  // Acknowledge the snapshot that was SUBMITTED, not whatever the model holds
+  // now. Ticks made while this was in flight are newer unsaved work: recording
+  // them as saved is what cleared the dirty state, said "Saved ✓", and let the
+  // tab close on an exclusion the server had never been told about.
+  ackedSel = selSig(excluded);
+  markSelDirty();
   if(rev !== selRev){ kickSel(0); return false; }   // a newer Save is waiting
   pendingSel = null;
   clearAlertIfClean();
@@ -551,12 +651,21 @@ async function flushSel(excluded){
   return true;
 }
 
-function failSel(why){
+function failSel(why, status){
   selFlight = 0;
   // Not a toast: a failed save you did not see is how an afternoon of work
   // goes missing. The banner stays up until the save actually lands, and the
   // snapshot stays queued so it still can.
   offline(why);
+  if(PERMANENT.has(status)){
+    // A 409 means this page is too old to say what it was showing, and a 400
+    // that the body itself is wrong. Re-sending the same body gets the same
+    // answer; the selection stays queued and guarded until a reconciled tab
+    // saves it.
+    selStuck = true;
+    clearTimeout(selWait);
+    return false;
+  }
   selBackoff = Math.min(RETRY_MAX, selBackoff ? selBackoff * 2 : RETRY_MIN);
   kickSel(selBackoff);
   return false;
@@ -564,13 +673,17 @@ function failSel(why){
 
 function kickSel(ms){
   clearTimeout(selWait);
-  if(pendingSel === null || selFlight) return;
+  if(pendingSel === null || selFlight || selStuck) return;
+  selNextAt = Date.now() + ms;
   selWait = setTimeout(()=>flushSel(pendingSel), ms);
 }
 
 document.getElementById('save').onclick=()=>{
-  pendingSel = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
+  pendingSel = currentExcluded();
   selRev++;
+  // A fresh submission is a fresh request, so a permanent refusal of the last
+  // one no longer applies: this body differs from the one that was rejected.
+  selStuck = false;
   flushSel(pendingSel);
 };
 async function copyText(text){
@@ -607,4 +720,5 @@ loadZoom();
 measure();
 relayout();
 updateCount();
+markSelDirty();   // the page loads showing exactly what the server has
 applyAnim();

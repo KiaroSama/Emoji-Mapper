@@ -85,6 +85,11 @@ button:hover{border-color:var(--neon);box-shadow:0 0 0 1px #22d3ee55,0 0 14px #2
 button.primary{background:linear-gradient(180deg,#0ea5b7,#0b7c8b);border-color:#22d3ee;
   color:#021016;font-weight:700;text-shadow:none}
 button.primary:hover{box-shadow:0 0 18px #22d3ee88}
+/* Unsaved selection edits. The button is the honest place for it: selection
+   persists only when Save is pressed, so "there is something to press it for"
+   belongs on the control, not in the failure banner. */
+button.primary.dirty::after{content:" \2022";color:#ffd166}
+button.primary.dirty{box-shadow:0 0 0 2px #ffd16655}
 button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
 
 /* ---- The grid is VIRTUAL. -------------------------------------------------
