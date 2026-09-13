@@ -336,7 +336,7 @@ function Action-BuildGeneral ($py) {
           $st.title = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Associated standard emoji (default 😀)"; if ($v -eq '0') { return 'back' }
           if (-not [string]::IsNullOrWhiteSpace($v)) { $st.emoji = $v }; 'ok' }.GetNewClosure(),
-        { $yn = Ask-YesNo "Convert + dry-run + upload now?"; if ($yn -eq 'back') { return 'back' }
+        { $yn = Ask-YesNo "Convert + dry-run + upload now?"; if ($yn -is [string]) { return 'back' }
           if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
           $build = Join-Path 'build' $st.base
           Write-Step "Converting images -> $build ..."
@@ -377,7 +377,7 @@ function Action-CoinRebuild ($py) {
     $script = Join-Path $ScriptRoot 'coins\rebuild_dedup.py'
     if (-not (Test-Path -LiteralPath $script)) { Write-Err "coins\rebuild_dedup.py not found."; return }
     $yn = Ask-YesNo "Run coins/rebuild_dedup.py now? (duplicate-proof: build + map + links)"
-    if ($yn -eq 'back' -or -not $yn) { return }   # back or no -> return to menu
+    if ($yn -is [string] -or -not $yn) { return }   # back or no -> return to menu
     Invoke-PyReport $py @($script) "Coin pack rebuild"
 }
 
@@ -435,7 +435,7 @@ function Action-PublishCollection ($py) {
           $st.title = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Token env var (default GENERAL_BOT_TOKEN)"; if ($v -eq '0') { return 'back' }
           $st.tokenEnv = if ([string]::IsNullOrWhiteSpace($v)) { 'GENERAL_BOT_TOKEN' } else { $v }; 'ok' }.GetNewClosure(),
-        { $yn = Ask-YesNo "Dry-run then upload now?"; if ($yn -eq 'back') { return 'back' }
+        { $yn = Ask-YesNo "Dry-run then upload now?"; if ($yn -is [string]) { return 'back' }
           if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
           Write-Step "Dry-run preview ..."
           if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
@@ -474,7 +474,14 @@ function Action-Panel ($py) {
     $panelArgs = @('panel.py')
     if ($packs.Count -gt 0) {
         $answer = Ask-YesNo ("Also show the " + $packs.Count + " pack(s) already published, so they can be rearranged?")
-        if ($answer -eq 'back') { return }
+        # NOTE: compare by type, not -eq 'back' -- Ask-YesNo can return a bare
+        # [bool], and PowerShell's -eq coerces a string operand to match a bool
+        # LHS ('back' -> $true), so `$true -eq 'back'` is True. That made every
+        # "yes" answer here read as "back": the panel silently returned to the
+        # menu, and a "no" answer opened it without --with-pack (unexplained
+        # single-emoji view). Confirmed empirically; same fix applied to the
+        # three other Ask-YesNo call sites in this file.
+        if ($answer -is [string]) { return }
         if ($answer) { foreach ($n in $packs) { $panelArgs += @('--with-pack', "$n") } }
     }
     Write-Info "Opening the web panel in your browser... (Ctrl+C here to stop it)"
