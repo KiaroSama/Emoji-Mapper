@@ -251,8 +251,37 @@ a rule like "more than five means list" would silently change the look of a
 real post. The direct (no-Worker) path renders the same two shapes, so turning
 the Worker on cannot change how an announcement looks.
 
-`name` must match `[A-Za-z0-9_]{1,64}` — it goes into a public `t.me/addemoji/`
-link, so anything else is refused rather than published.
+**Every field is checked before anything happens** (`src/validate.ts`). The
+bearer proves *who* sent a body, never *what* is in it, and the TypeScript type
+is only a compile-time claim about JSON nobody parsed. Three real defects went
+through that gap: a `null` body threw `Cannot read properties of null` out of
+the handler instead of answering 400; a misspelt `"genreal"` fell through the
+`=== "general" ? … : "coin"` default and announced a general pack from the coin
+bot's identity; and a string `count` reached the HTML Telegram parses.
+
+Anything below is **400**, with a reason naming the field and the rule — and
+nothing else happens: no token lookup, no message built, not even a log line
+(which would itself be a `sendMessage` to the log channel).
+
+| Field | Rule |
+|---|---|
+| the body | must be a JSON object — `null`, an array and a bare string are not |
+| `packs` | a non-empty array, at most **500** entries |
+| `packs[i]` | must be an object |
+| `packs[i].name` | **required**, `[A-Za-z0-9_]{1,64}` — it becomes a public `t.me/addemoji/` link |
+| `packs[i].title` / `.format` | absent, or a string of at most 4096 characters |
+| `packs[i].count` | absent, or a non-negative safe integer — never a string |
+| `bot` | absent (→ coin, the documented default), `"general"` or `"coin"` |
+| `style` | absent (→ cards), `"cards"` or `"list"` |
+| `note` | absent, or a string of at most 4096 characters |
+
+`null` is refused rather than read as "unset": every caller sends real values, so
+a `null` is a bug upstream and a loud 400 finds it. The `note` cap matters
+because the note is one block and the renderer only splits *between* blocks — an
+over-long one used to leave as a single message Telegram rejects, so half the
+announcement landed and the rest was dropped mid-send. `packs` is bounded
+because it is caller-shaped input, and unbounded work inside a Worker is a
+request that never finishes. `test/publish-input.test.ts` covers each rule.
 
 ## Development
 

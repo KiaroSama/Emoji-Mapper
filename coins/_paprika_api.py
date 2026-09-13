@@ -25,7 +25,7 @@ from PIL import Image
 
 from coins import _http
 from coins._inventory import base_ticker, norm
-from make_emoji_pngs import _is_blank
+from make_emoji_pngs import _fit_100, _is_blank
 
 log = logging.getLogger("fetch_paprika")
 
@@ -68,13 +68,11 @@ def to_emoji_png(data: bytes, dest: Path) -> bool:
         return False
     if _is_blank(im):
         return False
-    im = im.crop(im.split()[3].getbbox())  # _is_blank guarantees a bbox
-    w, h = im.size
-    sc = min(SIZE / w, SIZE / h)
-    nw, nh = max(1, round(w * sc)), max(1, round(h * sc))
-    im = im.resize((nw, nh), Image.LANCZOS)
-    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    canvas.paste(im, ((SIZE - nw) // 2, (SIZE - nh) // 2), im)
+    # The shared fit, not a third copy of it: the copy here pasted the image
+    # as its own mask, which composited it against a transparent canvas and
+    # multiplied every pixel by its own alpha twice. Coin logos are mostly
+    # opaque, which is exactly why nobody saw it here.
+    canvas = _fit_100(im)
     dest.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(dest, format="PNG", optimize=True)
     return True
