@@ -22,7 +22,8 @@ import { parseAdmins, verifyBearer, verifyWebhook } from "./auth";
 import { announce, handleUpdate, LOG_ECHO } from "./handle";
 import { log } from "./logging";
 import { Telegram } from "./telegram";
-import type { BotName, Env, PublishRequest, TgUpdate } from "./types";
+import { validatePublishRequest } from "./validate";
+import type { BotName, Env, TgUpdate } from "./types";
 
 /** Telegram retries any non-2xx, so failures must be deliberate. */
 const OK = () => new Response("ok");
@@ -86,26 +87,23 @@ async function onPublish(request: Request, env: Env,
   if (!verifyBearer(request, env.PUBLISH_SECRET)) {
     return new Response("unauthorized", { status: 401 });
   }
-  let body: PublishRequest;
+  let raw: unknown;
   try {
-    body = await request.json();
+    raw = await request.json();
   } catch {
     return new Response("bad request", { status: 400 });
   }
-  if (!Array.isArray(body.packs) || body.packs.length === 0) {
-    return Response.json({ ok: false, error: "packs must be a non-empty array" },
-                         { status: 400 });
+  // Checked before a single property is READ: `null.packs` used to throw a
+  // TypeError straight out of this handler, and the bearer only ever proved
+  // who the caller was, never that the body was one.
+  const checked = validatePublishRequest(raw);
+  if (!checked.ok) {
+    return Response.json({ ok: false, error: checked.error }, { status: 400 });
   }
-  for (const p of body.packs) {
-    // The set name goes into a public t.me link. Telegram set names are
-    // [A-Za-z0-9_], so anything else is not one and must not be published.
-    if (typeof p?.name !== "string" || !/^[A-Za-z0-9_]{1,64}$/.test(p.name)) {
-      return Response.json({ ok: false, error: `bad pack name: ${String(p?.name)}` },
-                           { status: 400 });
-    }
-  }
+  const body = checked.value;
 
-  const bot: BotName = body.bot === "general" ? "general" : "coin";
+  // The documented default. An invalid value can no longer reach it.
+  const bot: BotName = body.bot ?? "coin";
   const { token } = botConfig(env, bot);
   if (!token) return Response.json({ ok: false, error: `${bot} bot not configured` },
                                    { status: 500 });

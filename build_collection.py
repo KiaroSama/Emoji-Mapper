@@ -32,10 +32,11 @@ import re
 import time
 from pathlib import Path
 
+import collection_preflight
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
 from announce import (announce_packs)
 from packstate import (LockBusy, exclusive_lock)
-from telegram_api import (AmbiguousUploadError, BotApiError, LiveStateUnknown, SetState, Telegram)
+from telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
 from emojikit import media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, redact, setup_logging
@@ -54,10 +55,6 @@ from collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
 log = logging.getLogger("build_collection")
 
 
-# One probe per file plus this pause; a 200-emoji queue takes about a minute.
-PREFLIGHT_DELAY = 0.15
-
-
 def pending_keys(cat: Catalog, plan: dict, fmt: str, base: str,
                  skipped: set[str]) -> list[str]:
     """The keys this run would actually upload for one format.
@@ -68,52 +65,6 @@ def pending_keys(cat: Catalog, plan: dict, fmt: str, base: str,
     return [k for k in plan.get(fmt, [])
             if (it := cat.get(k)) and it.included
             and not cat.is_published(base, k) and k not in skipped]
-
-
-def preflight(tg: Telegram, cat: Catalog, user_id: int, plan: dict,
-              formats: list[str], base: str, skipped: set[str]) -> int:
-    """Ask Telegram to validate every queued file before anything is published.
-
-    ``uploadStickerFile`` runs the same validator as ``addStickerToSet`` and
-    touches no set, so a file Telegram will refuse can be found in seconds
-    instead of at whatever minute of the publish it happens to reach. One `.tgs`
-    with a subtract mask was found 46 minutes into a run, after 99 uploads and
-    two flood waits, and it would have been the very first thing this reported.
-
-    A refusal here is the file's own problem, not the pack's: it is reported and
-    the run is NOT started, so nothing is half-published while you fix it.
-    """
-    refused: list[tuple[str, str, str]] = []
-    checked = 0
-    for fmt in formats:
-        for key in pending_keys(cat, plan, fmt, base, skipped):
-            it = cat.get(key)
-            path = Path(it.file_path)
-            if not path.is_file():
-                refused.append((key, path.name, "file is missing on disk"))
-                continue
-            checked += 1
-            try:
-                tg.check_uploadable(user_id, path, it.fmt)
-            except BotApiError as exc:
-                refused.append((key, path.name, redact(str(exc))))
-            except RuntimeError as exc:
-                # Transport, not a verdict. Saying "bad file" here would send
-                # someone editing artwork over a dropped connection.
-                log.warning("could not check %s: %s", key, redact(str(exc)))
-            time.sleep(PREFLIGHT_DELAY)
-
-    print(f"\nPREFLIGHT: {checked} file(s) checked, {len(refused)} refused.",
-          flush=True)
-    for key, name, why in refused:
-        print(f"  REFUSED {key}  ({name})\n          {why}", flush=True)
-        log.error("preflight: Telegram refuses %s (%s): %s", key, name, why)
-    if refused:
-        print("\nNothing was published. Fix or deselect these, then publish.\n",
-              flush=True)
-        return EXIT_FAILED
-    print("Every queued file is acceptable to Telegram.\n", flush=True)
-    return EXIT_OK
 
 
 def notify(tg: Telegram, user_id: int, state: dict, data_dir: Path, base: str,
@@ -324,7 +275,11 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         if not path.is_file() or path.stat().st_size == 0:
             skip(key, "missing/empty media")
             continue
-        if not _media_ok(path, fmt):
+        # item.fmt, NOT the family fmt. Under --mixed the loop variable is
+        # "mixed", which matches neither branch of _media_ok, so it returned
+        # True for everything and the blank-media guard was silently switched
+        # off for exactly the layout the owner publishes with.
+        if not _media_ok(path, item.fmt):
             skip(key, "blank media (no blank emoji)")
             continue
         emojis = item.emojis or [default_emoji]
@@ -334,6 +289,22 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
         before: dict[tuple[str, str], dict] = {}
         try:
             placed = False
+            # The invariant has to hold before EVERY add, not only at the
+            # moment a set is adopted. When adoption found unattributed
+            # stickers it logged, counted a failure and moved on -- leaving
+            # `in_set` at the reconciled count, so the NEXT pending item walked
+            # straight into this branch and appended to the very set just
+            # judged unsafe. One item was protected; the rest were not.
+            if in_set != 0 and target is not None and not _set_is_open(target):
+                if into_pack is not None:
+                    raise SetDrift(
+                        f"{set_name} holds live sticker(s) this publisher "
+                        f"cannot identify, so appending would hand a new key "
+                        f"someone else's custom_emoji_id. "
+                        f"Refusing --into-pack {into_pack}.")
+                log.warning("[%s] %s holds unattributed live sticker(s); "
+                            "continuing in a new set", fmt, set_name)
+                in_set = 0
             if in_set != 0:
                 before = _live_index(tg, set_name)
                 try:
@@ -766,8 +737,9 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
         if args.preflight:
             # After getMe (so the token is proven) but before the logo is
             # resolved or a single set is touched.
-            return preflight(tg, cat, args.user_id, plan, formats, base,
-                             set(state.get("skipped", [])))
+            return collection_preflight.preflight(
+                tg, cat, args.user_id, plan, formats, base,
+                set(state.get("skipped", [])), pending_keys)
 
         # The YourBrand logo is the mandatory first emoji of every set built by
         # the Emoji Mapper bot; the coin bot is excluded by design.

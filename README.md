@@ -305,12 +305,16 @@ Emoji Mapper/                  # the whole project
   build_collection.py          # collector: publish catalog -> new packs
   collection_state.py          # its plan/resume state + the brand logo
   collection_reconcile.py      # what is live in a set, and whose key it is
+  collection_preflight.py      # --preflight: ask Telegram to validate the queue
   sync_order.py                # reorder a LIVE pack to match the panel
-  panel.py                     # curate panel: pick & order what gets published
+  panel.py                     # curate panel: the server, the page, the APIs
+  panel_view.py                # the panel's view model (build_view, ordering)
   emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
   emojikit/                    # shared core toolkit
     logsetup.py                # UTC file logging
     media.py                   # format detect + static/video/tgs convert
+    video_decode.py            # the video decoder choice + a frame cache
+    repaint.py                 # bake a tint into a Lottie or a static
     identity.py                # content keys, perceptual hashes, same_image
     catalog.py                 # content-addressed SQLite catalog (dedup)
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
@@ -319,7 +323,9 @@ Emoji Mapper/                  # the whole project
   assets/                      # shipped images (incl. the brand logo) + the panel page and its two scripts
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
+  scripts/identity_repair.py   # report/migrate catalog keys after a decode fix
   requirements.txt
+  requirements-dev.txt         # test-only: ruff + playwright (never at runtime)
   .env.example                 # configuration template
   README.md  LICENSE                # CONTRIBUTING/SECURITY live in .github/
   tests/                       # unit tests + fixtures (see tests/README.md)
@@ -343,10 +349,17 @@ One command byte-compiles every source file, lints it, and runs the whole unit
 suite — the same one CI runs, so local and CI results cannot drift:
 
 ```powershell
-python -m pip install ruff   # once; ruff is not in the runtime manifests
+python -m pip install -r requirements-dev.txt   # once; never runtime deps
+python -m playwright install chromium           # once; the panel's browser suite
 .\scripts\check.ps1
 .\run.ps1 -Check      # separate: environment doctor (venv/deps/ffmpeg/.env)
 ```
+
+`tests/test_panel_browser.py` drives the real panel in headless Chromium and
+**raises** rather than skipping when playwright or Chromium is missing — a
+browser test that reports green on a machine with no browser is worse than
+none. `EMOJI_MAPPER_NO_BROWSER_TESTS=1` opts out deliberately; CI does that in
+the Python matrix and runs the module in its own job instead.
 
 Lint is `ruff check .` with **no** arguments: `ruff.toml` at the repo root owns
 the rule set, so nothing can diverge between CI and a local run. That set is

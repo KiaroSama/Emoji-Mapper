@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - identity, locking and validation defects found by an external audit
+
+Fifteen numbered findings and eight adjacent-path items, each reproduced against
+real artifacts before it was fixed. The ones that could corrupt data:
+
+- **Two publishers could hold one pack-family lock.** Ownership was decided by
+  reading a file, comparing a token and unlinking it — and an unlinked inode is
+  a lock nobody else can see, so the stale-lock recovery path could seat two
+  processes at once. Measured: two real processes inside one lock for 1.538 s.
+  The lock is now an OS-level byte-range lock (`msvcrt.locking` on Windows,
+  `flock` elsewhere) held for the whole critical section, and the file is never
+  unlinked. The recorded holder is still written, but only as a hint for the
+  "who has it" message.
+- **Recovery could give a stranger's picture our identity.** The nearest
+  candidate by perceptual hash was accepted outright, and dHash is a *grayscale
+  structure* hash: an opaque red square and an opaque blue square are zero
+  apart. A perceptual match may now only nominate; `same_image` decides, more
+  than one verified match is `AMBIGUOUS`, and a candidate that could not be
+  examined is `UNDECIDABLE`. Both refuse instead of guessing.
+- **Video identity discarded alpha, and the two fingerprint APIs disagreed.**
+  ffmpeg's default `vp9` decoder drops the separate alpha layer in silence, so
+  two clips identical but for opacity shared one content key; and `fingerprint`
+  and `perceptual_hash` sampled differently, so one 30 fps clip had two hashes.
+  The decoder is now chosen from the **probed codec** (never the extension) in
+  one new module, `emojikit/video_decode.py`, which both callers share — with a
+  bounded frame cache that also cut the identity suite from 163 s to 48 s.
+- **Fitting an image applied its alpha twice.** `fit_100` pasted the image using
+  itself as the mask, compositing against the transparent canvas underneath:
+  `(255, 0, 0, 128)` came out `(128, 0, 0, 64)`.
+- **Preflight reported acceptances it never obtained.** The counter counted
+  attempts, so a run in which every `check_uploadable` failed at the transport
+  printed "all accepted" and exited 0. Accepted, refused, missing and
+  *not checked* are now counted apart, with an exit code for each
+  (`collection_preflight.py`).
+- **A stale panel tab spoke for the whole catalog.** `/api/save` carries the
+  full selection, so a page opened before another change re-included rows it had
+  never seen — and answered `{"ok": true}`. The request now states the scope it
+  was showing; a page too old to say gets 409 and one reload.
+- **A Lottie timeline that was not a number passed validation**, because every
+  comparison against NaN is false. Repainting also silently skipped a keyframed
+  colour, and overwrote a gradient's opacity ramp with colour when the stop
+  count was inferred as `len // 4` instead of read from `g.p`.
+- **A set that closed mid-run was still appended to** on the next item, and the
+  blank-media check received the family's format rather than the item's, so
+  `--mixed` bypassed it.
+- **The Worker accepted an unvalidated publish body**, and a note over the
+  chunking limit escaped it.
+
+Existing catalogs are **not** migrated implicitly: the corrected video decoder
+changes what a content key IS, so `scripts/identity_repair.py` reports the
+affected rows and moves them only with `--apply`, refusing outright on a
+collision or an undecodable file. Ten new test modules cover the above, plus
+`tests/test_panel_browser.py`, which drives the real panel in headless Chromium
+(`requirements-dev.txt`). `panel.py` was over the 800-line ceiling after the
+save-scope fix; its view model moved to `panel_view.py`.
+
 ### Changed - the curate panel is a virtual grid, and it zooms
 
 The panel built every card up front. With six published packs open that was

@@ -82,6 +82,13 @@ export interface PublishedPack {
   count?: number;
 }
 
+/**
+ * A /publish body that has been CHECKED.
+ *
+ * An interface is a compile-time claim, and this one describes JSON a caller
+ * wrote. `validate.ts` is what makes it true at runtime; nothing should cast
+ * a raw body to this shape.
+ */
 export interface PublishRequest {
   /** Which bot posts the announcement. Defaults to "coin". */
   bot?: BotName;
