@@ -450,7 +450,7 @@ PAGE = (ASSET_DIR / "panel.html").read_text(encoding="utf-8")
 # The behaviour lives in two scripts served from /static/, which is
 # immutable-cached: without a version in the URL an edited script would keep
 # being served stale from the browser cache. The version IS the content.
-SCRIPT_FILES = ("panel-grid.js", "panel-actions.js")
+SCRIPT_FILES = ("panel-grid.js", "panel-actions.js", "panel-holding.js")
 SCRIPT = "\n".join((ASSET_DIR / f).read_text(encoding="utf-8") for f in SCRIPT_FILES)
 ASSET_VER = hashlib.sha1(SCRIPT.encode("utf-8")).hexdigest()[:12]
 

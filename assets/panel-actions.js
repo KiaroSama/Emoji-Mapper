@@ -586,9 +586,9 @@ document.addEventListener('drop',e=>{
 document.getElementById('top').onclick=()=>window.scrollTo({top:0});
 document.getElementById('bot').onclick=()=>
   window.scrollTo({top:document.documentElement.scrollHeight});
-document.getElementById('all').onclick=()=>setAll(()=>true);
-document.getElementById('none').onclick=()=>setAll(()=>false);
-document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
+document.getElementById('all').onclick=()=>selMode ? pickAll() : setAll(()=>true);
+document.getElementById('none').onclick=()=>selMode ? clearPicked() : setAll(()=>false);
+document.getElementById('inv').onclick=()=>selMode ? invertPicked() : setAll(x=>!x.included);
 document.getElementById('anim').onclick=()=>{
   ANIM_ON = !ANIM_ON;
   prefs.set('animOn', ANIM_ON ? '1' : '0');
