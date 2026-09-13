@@ -39,12 +39,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No `cache: npm`. The post-job cache upload goes to GitHub's Actions
+      # cache service, which this account's block gates the same way it gates
+      # hosted runners: every real step passed and the job then sat in
+      # "Post Set up Node" until the timeout, turning a green run into a red
+      # one that said nothing. It buys nothing here anyway -- the runner is
+      # persistent, so npm's own `~/.npm` survives between jobs on disk.
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
 
       # `npm ci`, never `npm install`: it installs exactly the committed
       # lockfile and fails if package.json and the lock disagree, so CI cannot
