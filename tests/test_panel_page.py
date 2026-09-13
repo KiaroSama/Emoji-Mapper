@@ -430,7 +430,11 @@ class ZoomFitsMoreOrLess(unittest.TestCase):
             self.assertIn(btn, PAGE)
         self.assertIn("document.getElementById('zoomIn').onclick = ()=>setZoom(zoom * ZOOM_STEP);", SCRIPT)
         self.assertIn("document.getElementById('zoomOut').onclick = ()=>setZoom(zoom / ZOOM_STEP);", SCRIPT)
-        self.assertIn("document.getElementById('zoomReset').onclick = ()=>setZoom(1);", SCRIPT)
+        # zoomReset is a typeable percentage (panel-holding.js), not a plain
+        # reset button any more -- Enter applies it, double-click still resets.
+        self.assertIn('<input id="zoomReset"', PAGE)
+        self.assertIn("if(e.key === 'Enter'){ e.preventDefault(); applyZoomInput(); }", SCRIPT)
+        self.assertIn("zoomInput.addEventListener('dblclick', ()=>setZoom(1));", SCRIPT)
 
     def test_ctrl_wheel_and_ctrl_keys_are_taken_over_from_the_browser(self):
         """Ctrl+wheel is the browser's own page zoom. Left alone, both would

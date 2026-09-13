@@ -1,4 +1,4 @@
-"""The panel's behaviour ships as two script files, versioned by their content.
+"""The panel's behaviour ships as several script files, versioned by their content.
 
 The page moved its JavaScript out of the HTML asset and into `/static/`, which
 is immutable-cached. Without a version in the URL an edited script would keep
@@ -35,14 +35,16 @@ class ThePanelScriptsShip(unittest.TestCase):
             self.assertTrue(asset.is_file(), f"missing script: {asset}")
             self.assertTrue(str(asset.resolve()).startswith(str(ROOT.resolve())))
 
-    def test_the_page_loads_both_scripts_in_order_and_versioned(self):
+    def test_the_page_loads_every_script_in_order_and_versioned(self):
         page = p.PAGE
         tags = [f'<script src="/static/{n}?v=__ASSET_VER__"></script>' for n in p.SCRIPT_FILES]
         for tag in tags:
             self.assertIn(tag, page, tag)
-        # The grid must exist before the gestures that act on it.
-        self.assertLess(page.index(tags[0]), page.index(tags[1]))
-        # Both come AFTER the inert data block they parse.
+        # The grid must exist before the gestures that act on it, whatever
+        # comes after -- each file only needs what loaded before it.
+        for a, b in zip(tags, tags[1:]):
+            self.assertLess(page.index(a), page.index(b))
+        # All of them come AFTER the inert data block they parse.
         self.assertLess(page.index('<script id="items-data"'), page.index(tags[0]))
 
     def test_the_version_is_the_scripts_content(self):

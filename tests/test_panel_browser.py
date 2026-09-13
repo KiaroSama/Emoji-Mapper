@@ -370,7 +370,8 @@ class F04ZoomKeepsItsAnchor(PanelInABrowser):
         self.assertGreater(zoomed, 1)
         page.reload(wait_until="load")
         self.assertEqual(page.evaluate("zoom"), zoomed)
-        self.assertEqual(page.evaluate("document.getElementById('zoomReset').textContent"),
+        # .value, not .textContent -- zoomReset is a typeable <input> now.
+        self.assertEqual(page.evaluate("document.getElementById('zoomReset').value"),
                          f"{round(zoomed * 100)}%")
 
     def test_F04_a_zoom_round_trip_comes_back_to_the_same_item(self):
@@ -379,7 +380,9 @@ class F04ZoomKeepsItsAnchor(PanelInABrowser):
         before = page.evaluate("__anchor()")
         for _ in range(3):
             page.click("#zoomIn")
-        page.click("#zoomReset")
+        # A single click now places the caret to type a value; double-click
+        # is the reset gesture (zoomReset is a typeable <input>).
+        page.dblclick("#zoomReset")
         self.assertEqual(page.evaluate("zoom"), 1)
         self._anchored(page, before)
 
@@ -519,7 +522,7 @@ class F07DeniedStorageStillBoots(PanelInABrowser):
     def test_F07_denied_site_data_does_not_abort_setup(self):
         page = self.open(init=DENY_STORAGE)
         self.assertNoPageErrors(page)
-        self.assertEqual(page.evaluate("document.getElementById('zoomReset').textContent"),
+        self.assertEqual(page.evaluate("document.getElementById('zoomReset').value"),
                          "100%")
         self.assertEqual(page.evaluate("document.getElementById('animLabel').textContent"),
                          "Animation: On")

@@ -215,12 +215,21 @@ function layoutRows(){
 
   const {starts, logo} = packStarts();
   const sepAt = new Map();           // item index -> the marker that precedes it
+  // The LAST pack's end used to be ITEMS.length -- the raw array size, which
+  // counts an excluded (held) tail as if it still occupied a slot. Moving 5
+  // emoji to the holding area left "Pack 1 #1-#200" claiming 200 when only
+  // 195 were actually included. The real end is the last INCLUDED, non-logo
+  // card, wherever it sits -- excluded items no longer inflate the count.
+  let lastIncluded = -1;
+  for(let i = ITEMS.length - 1; i >= 0; i--){
+    if(!ITEMS[i].isLogo && ITEMS[i].included){ lastIncluded = i; break; }
+  }
   // Only when there is more than one -- a single pack needs no divider.
   if(starts.length >= 2){
     for(let p = 0; p < starts.length; p++){
       // Pack 1 opens at the head logo, which already sits above its first item.
       const anchor = (p === 0 && logo) ? ITEMS.indexOf(logo) : starts[p].index;
-      const to = p + 1 < starts.length ? starts[p + 1].index : ITEMS.length;
+      const to = p + 1 < starts.length ? starts[p + 1].index : lastIncluded + 1;
       const pk = starts[p].pack;
       // `run` is the marker's identity, and the label is NOT: live membership
       // can revisit a pack, so 1, 2, 1 is three runs carrying two labels.
@@ -457,7 +466,10 @@ function setZoom(z){
   render();
 }
 function paintZoom(){
-  document.getElementById('zoomReset').textContent = Math.round(zoom * 100) + '%';
+  // .value, not .textContent -- zoomReset is a typeable <input> now (an exact
+  // percentage was the one thing the +/- buttons and Ctrl+wheel could not
+  // give), and .textContent on an <input> silently does nothing at all.
+  document.getElementById('zoomReset').value = Math.round(zoom * 100) + '%';
 }
 function loadZoom(){
   // `|| 1` covers a stored value that is not a number at all: NaN would clamp
@@ -468,7 +480,9 @@ function loadZoom(){
 }
 document.getElementById('zoomIn').onclick = ()=>setZoom(zoom * ZOOM_STEP);
 document.getElementById('zoomOut').onclick = ()=>setZoom(zoom / ZOOM_STEP);
-document.getElementById('zoomReset').onclick = ()=>setZoom(1);
+// Typing a value, Enter to reset (dblclick) and Ctrl+0 all live in
+// panel-holding.js -- a plain click has to leave the caret alone now that
+// this is a text field, not a button.
 // Ctrl+wheel is the browser's own page zoom; this takes it over for the grid,
 // which is what anyone rolling the wheel with Ctrl held over a grid means.
 // passive:false is what allows preventDefault to stop the browser zoom.
