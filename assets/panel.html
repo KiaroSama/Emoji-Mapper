@@ -91,6 +91,13 @@ button.primary:hover{box-shadow:0 0 18px #22d3ee88}
 button.primary.dirty::after{content:" \2022";color:#ffd166}
 button.primary.dirty{box-shadow:0 0 0 2px #ffd16655}
 button:focus-visible{outline:2px solid var(--neon2);outline-offset:2px}
+/* Sits between zoomOut/zoomIn and has to read as one of them, not as a form
+   field that wandered into a toolbar. */
+#zoomReset{font:inherit;line-height:1.25;text-align:center;width:4.4em;
+  border-radius:10px;border:1px solid var(--line);background:#0e1626;color:var(--txt);
+  padding:9px 6px;transition:all .18s ease}
+#zoomReset:hover{border-color:var(--neon)}
+#zoomReset:focus-visible{outline:2px solid var(--neon2);outline-offset:2px;border-color:var(--neon2)}
 
 /* ---- The grid is VIRTUAL. -------------------------------------------------
    Only the rows near the viewport exist as DOM; two spacers hold the height of
@@ -156,6 +163,22 @@ body.bg-light .thumb{background:#f4f6f9}
 body.bg-dark  .thumb{background:#0a0e16}
 body.bg-gray  .thumb{background:#808a96}
 .thumb img,.thumb video{width:8.67em;height:8.67em;object-fit:contain;display:block}
+/* The holding tray: a full-width row inside the sticky header (same trick as
+   .status below), so it is reachable while dragging from anywhere in a
+   1000-card scroll without any extra sticky/offset math of its own. */
+#holding{grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-top:2px;
+  padding:6px 10px;border:1.5px dashed #3a4a5c;border-radius:10px;
+  background:#0a0f1a;min-height:2.7em;overflow-x:auto}
+#holding.drop{border-color:var(--neon2);background:#0d1a26;box-shadow:0 0 0 1px #22d3ee33 inset}
+#holding .htitle{flex:none;color:var(--muted);font-size:12px;white-space:nowrap;
+  padding-right:10px;border-right:1px solid var(--line)}
+#holding .hcards{display:flex;gap:6px;flex-wrap:nowrap}
+#holding .hempty{color:var(--muted);font-size:12px;font-style:italic}
+.hcard{flex:none;width:2.6em;height:2.6em;border-radius:.5em;cursor:grab;
+  border:1px solid var(--line);background:var(--panel);overflow:hidden}
+.hcard:hover{border-color:var(--neon2)}
+.hcard img{width:100%;height:100%;object-fit:contain;display:block}
+body:not(.selmode) #toHold{display:none}
 /* Two centred rows above the emoji: the position first, then what it is.
    The tick keeps the corner so it never pushes either off centre. */
 .hdr{display:flex;flex-direction:column;align-items:center;gap:.25em;
@@ -197,8 +220,9 @@ body.bg-gray  .thumb{background:#808a96}
    would make arranging silently change what ships. */
 .pick{position:absolute;top:0;left:0;width:1.7em;height:1.7em;border-radius:.54em;
   display:none;align-items:center;justify-content:center;font-size:1.08em;font-weight:800;
-  border:1px solid var(--line);background:#0b1422;color:#5b6b80;cursor:pointer;
+  border:1.5px solid var(--muted);background:#0b1422;color:var(--muted);cursor:pointer;
   touch-action:none}
+.pick:hover{border-color:var(--neon2);color:var(--neon2)}
 body.selmode .pick{display:flex}
 body.selmode .card{cursor:default}
 .card.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
@@ -249,7 +273,8 @@ body.compact .glyph,body.compact .lbl,body.compact .sub{display:none}
     <button id="bot" title="Jump to the last card">&#8595; Bottom</button>
     <span class="sep"></span>
     <button id="zoomOut" title="Zoom out: smaller cards, more emoji per screen (Ctrl+wheel down, Ctrl+minus)">&#8722;</button>
-    <button id="zoomReset" title="Current zoom. Click to reset to 100% (Ctrl+0)">100%</button>
+    <input id="zoomReset" type="text" inputmode="numeric" value="100%" autocomplete="off"
+           title="Type a zoom percentage and press Enter. Double-click resets to 100% (Ctrl+0).">
     <button id="zoomIn" title="Zoom in: bigger cards (Ctrl+wheel up, Ctrl+plus)">+</button>
     <span class="sep"></span>
     <button id="all">Select all</button>
@@ -258,12 +283,17 @@ body.compact .glyph,body.compact .lbl,body.compact .sub{display:none}
     <button id="bg" title="Switch preview backdrop so black / hollow / faint emoji are visible">Backdrop: Checker</button>
     <button id="anim" class="switch" aria-pressed="true" title="Freeze every animation on their first frame. The lightest the panel gets -- nothing is decoding."><span class="knob"></span><span id="animLabel">Animation: On</span></button>
     <button id="selmode" class="switch" aria-pressed="false" title="Pick several emoji and move them together. Drag from a pick box to select a run; drag a picked card to carry the whole set."><span class="knob"></span><span id="selLabel">Selection: Off</span></button>
+    <button id="toHold" title="Move every picked emoji to the holding area (excluded from the next publish, kept for later)">&#8594; Hold</button>
   </div>
   <div class="hright"><button id="save" class="primary">Save selection</button></div>
   <div class="status count"><b id="selCount">0</b>&nbsp;/ <span id="totCount">0</span> selected
     <span class="hint">· click = toggle · drag = reorder · click the id = copy · Ctrl+wheel = zoom</span>
     <span id="hiddenNote" class="hint"></span>
     <span id="capWarn" class="warn" style="display:none"></span></div>
+  <div id="holding">
+    <span class="htitle">Holding (<b id="holdCount">0</b>) — drag an emoji here to park it; drag a parked one out to place it in a pack</span>
+    <div class="hcards" id="holdCards"></div>
+  </div>
 </header>
 <div id="alert" role="alert" aria-live="assertive"></div>
 <div class="grid" id="grid"><div class="spacer" id="padTop"></div><div class="spacer" id="padBot"></div></div>
@@ -284,4 +314,5 @@ const PER_SET = __PER_SET__;
 </script>
 <script src="/static/panel-grid.js?v=__ASSET_VER__"></script>
 <script src="/static/panel-actions.js?v=__ASSET_VER__"></script>
+<script src="/static/panel-holding.js?v=__ASSET_VER__"></script>
 </body></html>
