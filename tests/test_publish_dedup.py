@@ -293,7 +293,12 @@ class FakeTelegram:
             raise RuntimeError("getStickerSet failed: STICKERSET_INVALID")
         return {"stickers": list(self.sets[name])}
 
-    def send_message(self, user_id, text):
+    def send_message(self, chat_id, text, *, disable_preview=False):
+        # Signature matched to the REAL client, not to whichever call site was
+        # written first: `announce_packs` passes disable_preview, and a fake
+        # that rejects it turned every happy-path announcement into a swallowed
+        # "notify failed" while the test stayed green -- the suite was
+        # exercising the error path and reporting it as a pass.
         self.messages.append(text)
 
 

@@ -7,6 +7,8 @@
  * Worker only reads updates and sends messages, which are cheap to get right.
  */
 
+import { redact } from "./redact";
+
 const DEFAULT_API = "https://api.telegram.org";
 
 /**
@@ -41,11 +43,22 @@ export class Telegram {
    * silently diverge.
    */
   async call<T = unknown>(method: string, payload: Record<string, unknown>): Promise<T> {
-    const res = await fetch(`${this.apiBase}/bot${this.token}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiBase}/bot${this.token}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      // The URL embeds the token and a transport failure names the URL it was
+      // attempting, so this message reached the HTTP response body and every
+      // log sink with the credential still in it. The cause is dropped rather
+      // than attached: nothing downstream needs it, and an unsanitised cause
+      // is exactly what a thorough serialiser would surface again.
+      throw new BotApiError(method, `transport failure: ${redact(String(
+        err instanceof Error ? err.message : err))}`, 0);
+    }
     let body: { ok?: boolean; result?: T; description?: string; error_code?: number };
     try {
       body = await res.json();
@@ -53,7 +66,9 @@ export class Telegram {
       throw new BotApiError(method, `non-JSON response (HTTP ${res.status})`, res.status);
     }
     if (!res.ok || body.ok !== true) {
-      throw new BotApiError(method, body.description ?? `HTTP ${res.status}`,
+      // Telegram's own description is upstream text: redacted too, because it
+      // can quote back something we sent it.
+      throw new BotApiError(method, redact(body.description ?? `HTTP ${res.status}`),
                             body.error_code ?? res.status);
     }
     return body.result as T;

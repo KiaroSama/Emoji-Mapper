@@ -45,6 +45,7 @@ Emoji Mapper/
   build_collection.py      collector: publish the catalog into new packs
   collection_state.py      publisher plan/resume state + brand logo
   collection_reconcile.py  what is live in a set, and whose key each sticker is
+  collection_migrate.py    a content-key migration as ONE versioned change
   collection_preflight.py  --preflight only: ask Telegram to validate the queue
   sync_order.py            reorder an already published pack (no re-upload)
   panel.py                 web "Curate" panel: the server, the page, the APIs
@@ -54,6 +55,7 @@ Emoji Mapper/
     logsetup.py            UTC file logging (logs/)
     media.py               format detect + conversions (static/video/tgs)
     video_decode.py        the video decoder choice + a bounded frame cache
+    errors.py              shared exception types (no import cycle)
     repaint.py             baking Telegram's tint into a Lottie or a static
     identity.py            content keys, perceptual hashes, same_image
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
@@ -1357,42 +1359,70 @@ print(d.execute('SELECT format,COUNT(*),SUM(uploaded),SUM(included) FROM items G
 
 ### 13.6 When a decode fix changes what a key IS (`scripts/identity_repair.py`)
 
-The content key is this project's primary identity: it names the row in `items`,
-it is the foreign key in `publications` and `seen_files`, and its first twelve
-characters are baked into every archived filename. So correcting how a file is
-*decoded* is not a local change — it changes what the key of every affected row
-should be, and the rows have to be moved with it, deliberately.
+The content key is this project's primary identity, and it is written down in
+more places than the table it names. Correcting how a file is *decoded* is
+therefore a versioned migration, not a few SQL updates:
+
+| where | what holds a key |
+|---|---|
+| `items` | the row id, a derived `phash`, and a `file_path` whose NAME embeds `key[:12]` |
+| `publications` | the foreign key carrying each `custom_emoji_id` |
+| `seen_files` | the foreign key mapping a Telegram `file_unique_id` to an item |
+| `publish_<base>.json` | `sets[].keys[]` and `skipped[]` — what `reconcile_set` attributes live stickers by |
+| `publish_plan_<base>.json` | the frozen plan, `{format: [keys]}` |
 
 ```powershell
 .venv\Scripts\python.exe scripts\identity_repair.py report                        # writes nothing
 .venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply    # writes
 ```
 
-`report` is the default and is read-only: it decodes every video row, prints how
-many keys would move, lists collisions, and exits **3** when there is work to do
-(0 when the catalog already matches the current decoder). `migrate-video-keys`
-copies the database to `catalog.before-video-identity-<ts>.db` first, moves every
-reference in one `BEGIN IMMEDIATE` transaction, and **refuses** rather than
-guessing:
+**Exit codes.** `0` clean, `2` usage, `3` work is pending and the picture is
+complete enough to act on, `4` INCOMPLETE or refused — something could not be
+inspected, or two rows would collide, and nothing was changed. A row whose file
+is missing used to be counted as *unchanged*, so a catalog nobody could read
+reported "Every video key already matches" and exited 0.
 
-- **a collision** — two rows landing on one key — exits 4 and changes nothing.
-  Merging them would delete one row's media, which is the exact defect a decoder
-  fix exists to prevent.
-- **an undecodable file** exits 4 too. Half a conversion is a catalog where some
-  keys describe their file and some do not, with nothing recording which.
-- **a row whose media is gone** keeps the key it has: it cannot be recomputed,
-  so it is neither invented nor dropped.
+**What `--apply` does, in order.** Takes the pack-family lock (the same writer
+exclusion ingest, publishing and the archive all honour); snapshots the database
+through SQLite's **online backup API** and verifies that snapshot before
+changing anything; moves every key reference and refreshes every derived hash in
+one transaction; rewrites the state and plan files; renames the archived media.
+Each stage is idempotent and a journal records how far it got, so an interrupted
+run is repaired by running it again and a second run is a verified no-op.
 
-`custom_emoji_id`s are carried across untouched — every bot inventory already
-holds them, and a migration that moved a key and dropped the id would be a
-silent republish of the whole pack. Afterwards run `pack_archive.py --sync`,
-because archived filenames embed the old key.
+`shutil.copy2` is not a backup here: this catalog runs in WAL, where committed
+rows live in `-wal` until a checkpoint, so a copy of the `.db` alone opened as a
+database with `no such table: items` while the original held the row.
 
-The report also prints **SUSPECT MAPPINGS**: rows that have a recorded Telegram
-`file_unique_id` *and* a look-alike in the catalog. Those are the rows the old
-recovery rule — nearest perceptual hash, grayscale, no content check — could
-have attributed to the wrong item. It is a list for a human to eyeball in the
-roster gallery, not evidence of a mistake, and nothing remaps automatically.
+**It refuses rather than guessing:**
+
+- **a collision** — two rows landing on one key — changes nothing. Merging them
+  would delete one row's media, the exact defect a decoder fix exists to prevent.
+- **an unreadable row** stops it. Half a conversion is a catalog where some keys
+  describe their file and some do not, with nothing recording which.
+- **a row whose media is gone** keeps the key it has.
+
+**Repairing a migration that ran before journals existed.** Such a run moved the
+table rows and kept no record of its map, so the state files it left behind
+cannot be fixed by surveying — the catalog already holds the new keys, so a
+fresh survey reports nothing pending while the state still names the old ones.
+The backup that run *did* write is the missing half:
+
+```powershell
+.venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply `
+    --from-backup catalog.before-video-identity-<stamp>.db
+```
+
+Pairing is content-based — the same file path, or the same path once each side's
+own key prefix is blanked — never positional. A key absent from that backup
+predates it and is left alone.
+
+**SUSPECT MAPPINGS** in the report is a heuristic and nothing more: rows with a
+recorded Telegram id *and* a look-alike of the same format, which the old
+grayscale-only recovery rule could have confused. It does not validate
+historical id mappings, and zero would not prove none was ever wrong — the
+handle a past download was attributed by is not stored, so it cannot be
+re-checked at all.
 
 ---
 
@@ -1447,8 +1477,8 @@ answered in two places and they disagreed — `fingerprint()` and
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `decoder_available(name)` | bool | Is this ffmpeg decoder built in? Cached per name. |
-| `decoder_args(path)` | `["-c:v", …]` or `[]` | The decoder for this file's **probed** codec, `[]` when nothing alpha-capable applies. |
-| `frames_rgba(path)` | `list[bytes]` \| None | Up to `SAMPLE_FPS` 64×64 RGBA frames a second, alpha intact. |
+| `decoder_args(path)` | `["-c:v", …]` or `[]` | The decoder for this file's **probed** codec. Raises `UndecodableVideo` when alpha fidelity cannot be ESTABLISHED; `[]` only on positive evidence that no override applies. |
+| `frames_rgba(path, fps=SAMPLE_FPS)` | bytes | 64×64 RGBA frames at `fps`, alpha intact. `SAMPLE_FPS` (10) is the IDENTITY stream and is frozen — every stored content key hashes it. |
 | `first_frame_bytes(path)` | bytes \| None | The first of those frames. |
 
 `frames_rgba` is memoised on `(path, size, mtime_ns)` with a small bounded LRU.
@@ -1457,7 +1487,30 @@ cache cut the video identity suite from 163 s to 48 s, and shortens real ingest
 by the same mechanism. Keying on mtime and size — not the path alone — is what
 keeps a re-encoded file from answering with its old frames.
 
-### 14.3 `emojikit.repaint`
+### 14.3 Comparing two videos
+
+`same_image(a, b, "video")` walks the timeline. It used to read frame zero and
+nothing else — both halves of its two-agreement rule went through
+`_first_video_frame` — so two real clips sharing ten opening frames compared
+equal, and reconciliation bound the foreign clip's ids to our catalog item.
+
+Two rules make it sound:
+
+* **Every sampled frame pair must agree**, under the same structure-and-colour
+  rule a static image gets. There is no averaging across frames: an average is
+  exactly what lets one differing segment hide. A length difference beyond one
+  frame of slack is a different clip, however well the opening matches.
+* **Content-key equality is not proof, for video.** The key hashes the 10 fps
+  identity stream, and a change shorter than one sampling interval falls between
+  its frames — two clips differing in exactly ONE frame (flat blue against flat
+  green, premultiplied mean delta 100.5) hash to the same key. The comparison
+  therefore samples at `VIDEO_COMPARE_FPS` (30, the rate this project's own
+  encoder produces) and never short-circuits on the key.
+
+Failing closed stays the contract: a clip that cannot be read is `None`
+(undecidable), never `False`.
+
+### 14.4 `emojikit.repaint`
 
 Baking Telegram's `--tint` into artwork, rather than publishing a set that asks
 the client to flatten it. Split out of `media.py` (a different job, and that
@@ -1476,7 +1529,7 @@ rather than a flat `[r,g,b,a]`, and a **gradient** packs its colour stops
 array — so `len // 4` as the stop count overwrites the opacity ramp with colour.
 `g.p` is the stop count and is honoured when present.
 
-### 14.4 `emojikit.catalog.Catalog`
+### 14.5 `emojikit.catalog.Catalog`
 
 ```python
 from emojikit.catalog import Catalog
@@ -1497,7 +1550,7 @@ with Catalog("collection/catalog.db", phash_threshold=-1) as cat:
 merges perceptual near-duplicates; with `-1` (default) only exact content +
 `file_unique_id` dedup happens.
 
-### 14.5 `emojikit.logsetup` (advanced logging)
+### 14.6 `emojikit.logsetup` (advanced logging)
 
 `setup_logging(name, *, console_level=INFO, file_level=DEBUG, color=None)`
 configures a console handler plus a fresh UTC file log under `logs/`, named
@@ -1530,7 +1583,7 @@ print(redact(some_text))        # mask before any manual print
 Secret handling is covered by `tests/test_logsetup.py`, which also fails the
 build if any value from `.env` appears in a git-tracked file.
 
-### 14.6 `build_pack.Telegram`
+### 14.7 `build_pack.Telegram`
 
 Thin Bot API client (used everywhere). Key methods: `get_me`, `send_message`,
 `get_sticker_set`, `download_file`, `create_emoji_set`/`add_emoji` (format-aware,
@@ -2130,6 +2183,37 @@ These were found with real data; the guards must not regress.
 16. **A Lottie timeline that was not a number** — `fr = NaN` passed
     `validate_tgs`, because every comparison against NaN is False. Fix: an
     explicit `math.isfinite` check on `fr`/`ip`/`op`. (§14.3)
+17. **Video identity degraded open, and cached the degradation** — a missing
+    `libvpx-vp9`, a failed codec probe and a container naming no codec all
+    answered "no decoder needed", which drops VP9's separate alpha layer; one
+    transient probe error was then cached, so every later decode of that file
+    in the process lost its alpha silently. Two clips differing only in opacity
+    share one key, and `Catalog.add` merges them and deletes the file it merged
+    away. Fix: `UndecodableVideo` — establish fidelity or refuse. (§14.2)
+18. **A video was compared at one frame** — two clips sharing ten opening frames
+    compared equal, and so did two differing in exactly one frame. Fix: walk the
+    timeline at 30 fps, and stop treating content-key equality as proof for
+    video. (§14.3)
+19. **A migration moved three tables and stopped** — the owner's state file was
+    left naming 51 keys the catalog no longer had, which `reconcile_set` reads
+    as a reordered pack; the derived hashes stayed stale; the archived filenames
+    kept the old key. Fix: one versioned migration over every durable reference,
+    with a journal. (§13.6)
+20. **The migration backup was not WAL-safe** — `copy2` of the `.db` alone
+    opened as a database with `no such table: items`. Fix: SQLite's online
+    backup API, verified before anything is changed. (§13.6)
+21. **One verified candidate beat an unreadable rival** — with two candidates
+    matching, deleting one candidate's FILE made the resolver answer "unique"
+    with the survivor. Removing evidence must not promote a guess. (§13.6)
+22. **The panel confused "a save is in flight" with "there is unsaved work"** —
+    an acknowledgement of an older snapshot cleared the dirty state, said
+    "Saved" and let the tab close on newer ticks. (§20)
+23. **A refusal retrying could not fix was retried forever** — and the
+    five-second heartbeat walked past the backoff, while a fetch that never
+    resolved claimed the queue for the life of the page. (§20)
+24. **A Worker error could echo a bot token** — every Bot API URL embeds it and
+    a transport failure names the URL, which reached the HTTP 502 body and every
+    log sink. (§12.9)
 
 ---
 

@@ -86,8 +86,10 @@ _GIF_MAGIC = (b"GIF87a", b"GIF89a")
 RASTER_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".apng"}
 
 
-class MediaError(RuntimeError):
-    """Raised when conversion or validation of a media file fails."""
+# Re-exported, not defined here: `video_decode` raises them and this module
+# imports it, so they live in a leaf module that cycles through nothing. Every
+# existing `media.MediaError` caller keeps working unchanged.
+from emojikit.errors import MediaError, UndecodableVideo  # noqa: E402,F401
 
 
 # --------------------------------------------------------------------------- #
