@@ -198,9 +198,24 @@ addEventListener('keydown', e=>{
 // change is remembered and flushed when the server comes back, and the browser
 // asks before you close the tab on work that never landed.
 let TOK = TOKEN;              // reissued per run; a restart invalidates ours
-let pendingOrder = null;      // an order we tried to save and could not
 let lastAlert = '';
 let orderTimer = null;
+
+// Two queues, one for the order and one for the selection, each holding ONE
+// outstanding state stamped with the revision that produced it. That stamp is
+// the whole point: an acknowledgement may clear only the revision it
+// acknowledges. Without it, an old reply spoke for work it had never carried
+// -- a success cleared a newer arrangement outright, and a failure put its own
+// stale snapshot back over one -- and the tab was then free to close on both.
+let pendingOrder = null;      // newest arrangement not yet acknowledged
+let orderRev = 0;             // the revision pendingOrder carries
+let orderFlight = 0;          // revision in flight; 0 when idle (single flight)
+let orderWait = null, orderBackoff = 0;
+
+let pendingSel = null;        // the excluded set a Save asked for and lost
+let selRev = 0, selFlight = 0, selWait = null, selBackoff = 0;
+
+const RETRY_MIN = 1000, RETRY_MAX = 30000;
 
 function setAlert(html){
   if(html === lastAlert) return;
@@ -213,8 +228,17 @@ function setAlert(html){
 
 function offline(why){
   setAlert('<b>Not saving.</b> ' + why +
-           ' Your arrangement is only in this page — <b>do not close this tab.</b>' +
+           ' Your work is only in this page — <b>do not close this tab.</b>' +
            ' It saves itself as soon as the panel is reachable again.');
+}
+
+/** Take the warning down only when there is nothing left to write.
+ *
+ *  A ping proves the process is alive, never that anything was stored, and a
+ *  saved ORDER says nothing about a SELECTION that never landed. Both used to
+ *  clear the banner, which is how a refused Save became invisible. */
+function clearAlertIfClean(){
+  if(pendingOrder === null && pendingSel === null) setAlert('');
 }
 
 /**
@@ -238,26 +262,69 @@ async function apiPost(path, body){
   return r;
 }
 
+/**
+ * Send the pending arrangement, once.
+ *
+ * `order` is always `pendingOrder` -- the debounce and the heartbeat both
+ * flush, and passing it explicitly is what lets an older snapshot handed in by
+ * mistake be refused rather than written. A second caller while one is in
+ * flight is a no-op: the reply re-arms the queue with whatever is newest by
+ * then, so two saves can never race for the same catalog rows.
+ */
 async function flushOrder(order){
+  if(orderFlight || pendingOrder === null || order !== pendingOrder) return false;
+  const rev = orderRev;
+  orderFlight = rev;
+  let r;
   try{
-    const r = await apiPost('/api/order', {order});
-    if(!r.ok){ pendingOrder = order; offline('The panel refused the save (HTTP ' + r.status + ').'); return false; }
-    pendingOrder = null;
-    setAlert('');
-    return true;
+    r = await apiPost('/api/order', {order});
   }catch(_){
-    pendingOrder = order;
-    offline('The panel at this address is not responding.');
-    return false;
+    return failOrder('The panel at this address is not responding.');
   }
+  if(!r.ok){
+    // 400 is the one failure retrying cannot fix: the panel rejected this as
+    // not a permutation of what it holds, so its catalog and this page have
+    // drifted apart and only a reload reconciles them.
+    return failOrder(r.status === 400
+      ? 'The panel rejected this arrangement — its catalog no longer matches '
+        + 'this page, so reload the panel.'
+      : 'The panel refused the save (HTTP ' + r.status + ').');
+  }
+  orderFlight = 0; orderBackoff = 0;
+  // Only the acknowledged revision is saved. An arrangement made WHILE this was
+  // in flight is still at risk and goes next, instead of being forgotten the
+  // moment an older save came back ✓.
+  if(rev !== orderRev){ kickOrder(0); return false; }
+  pendingOrder = null;
+  clearAlertIfClean();
+  return true;
+}
+
+function failOrder(why){
+  orderFlight = 0;
+  // The failed snapshot is deliberately NOT written back to pendingOrder: that
+  // already holds the newest arrangement, which is this one or something later,
+  // and restoring the old one is how a retry overwrote work that came after it.
+  offline(why);
+  orderBackoff = Math.min(RETRY_MAX, orderBackoff ? orderBackoff * 2 : RETRY_MIN);
+  kickOrder(orderBackoff);
+  return false;
+}
+
+function kickOrder(ms){
+  clearTimeout(orderWait);
+  if(pendingOrder === null || orderFlight) return;
+  orderWait = setTimeout(()=>flushOrder(pendingOrder), ms);
 }
 
 function saveOrder(){
   clearTimeout(orderTimer);
-  const order = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
-  pendingOrder = order;                 // at risk from this moment on
+  pendingOrder = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
+  orderRev++;                           // at risk from this moment on
+  // Reads pendingOrder when it FIRES, not when it was armed: whatever the
+  // grid holds 400 ms from now is what is worth sending.
   orderTimer = setTimeout(async ()=>{
-    if(await flushOrder(order)) toast('Order saved ✓');
+    if(await flushOrder(pendingOrder)) toast('Order saved ✓');
   }, 400);
 }
 
@@ -268,16 +335,22 @@ setInterval(async ()=>{
     const r = await fetch('/api/ping', {cache:'no-store'});
     if(!r.ok) throw new Error(r.status);
     if(pendingOrder) await flushOrder(pendingOrder);
-    else setAlert('');
+    if(pendingSel) await flushSel(pendingSel);
+    clearAlertIfClean();
   }catch(_){
     offline('The panel process is not running.');
   }
 }, 5000);
 
 // Last line of defence: the browser asks before the tab takes the work with it.
+// Either queue counts -- a Save that never landed loses exactly as much as an
+// arrangement that never landed, and only the arrangement used to be asked
+// about.
 addEventListener('beforeunload', e=>{
-  if(pendingOrder){ e.preventDefault(); e.returnValue = ''; }
+  if(pendingOrder) return blockUnload(e);
+  if(pendingSel) blockUnload(e);
 });
+function blockUnload(e){ e.preventDefault(); e.returnValue = ''; }
 
 // --- Drag & drop reordering (sets the publish order) --------------------
 // The MODEL is edited as you drag: every dragover that changes the target
@@ -427,40 +500,78 @@ document.getElementById('none').onclick=()=>setAll(()=>false);
 document.getElementById('inv').onclick=()=>setAll(x=>!x.included);
 document.getElementById('anim').onclick=()=>{
   ANIM_ON = !ANIM_ON;
-  try{ localStorage.setItem('animOn', ANIM_ON ? '1' : '0'); }catch(_){}
+  prefs.set('animOn', ANIM_ON ? '1' : '0');
   applyAnim();
 };
 // Preview backdrop switcher: makes black / hollow / faint emoji visible.
 const BGS=['checker','light','dark','gray'];
 const BGLABEL={checker:'Checker',light:'Light',dark:'Dark',gray:'Gray'};
 function applyBg(b){
+  // A stored value can be anything -- an older build's name, or a profile that
+  // hands back a string nobody here wrote. Unknown means the default, not a
+  // backdrop class that matches no rule and a label reading "undefined".
+  if(!BGS.includes(b)) b = 'checker';
   BGS.forEach(x=>document.body.classList.remove('bg-'+x));
   document.body.classList.add('bg-'+b);
   document.getElementById('bg').textContent='Backdrop: '+BGLABEL[b];
-  try{localStorage.setItem('emojiBg',b);}catch(_){}
+  prefs.set('emojiBg', b);
 }
 document.getElementById('bg').onclick=()=>{
   const cur=BGS.find(x=>document.body.classList.contains('bg-'+x))||'checker';
   applyBg(BGS[(BGS.indexOf(cur)+1)%BGS.length]);
 };
-document.getElementById('save').onclick=async()=>{
-  const excluded = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
-  try{
-    const r = await apiPost('/api/save', {excluded});
-    const j = await r.json();
-    if(r.ok){
-      setAlert('');
-      // Say WHOSE numbers these are. They come from the catalog, not the
-      // grid, and reading "213 included" under 15 visible cards is
-      // alarming until you know that.
-      const scope = HIDDEN ? ' in the catalog' : '';
-      toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
-    }else{
-      // Not a toast: a failed save you did not see is how an afternoon of
-      // work goes missing.
-      offline('The panel refused the save (' + (j.error || r.status) + ').');
-    }
-  }catch(_){ offline('The panel at this address is not responding.'); }
+// Selection persists only when Save is pressed. That is the contract, and a
+// retry must not quietly widen it: a refused Save keeps the snapshot it was
+// GIVEN and retries exactly that, so ticks made afterwards stay unsaved until
+// the owner presses Save again -- the same as if the failure had never
+// happened. What did change is that the refusal is no longer forgotten.
+async function flushSel(excluded){
+  if(selFlight || pendingSel === null || excluded !== pendingSel) return false;
+  const rev = selRev;
+  selFlight = rev;
+  let r, j = {};
+  // `known` is WHAT THIS PAGE CAN SEE. `excluded` is full-state -- every key
+  // it does not name becomes included -- so without it the server has to
+  // assume this tab speaks for the whole catalog. A page opened before an
+  // ingest, or before the owner deselected something in another tab, would
+  // then silently re-include emoji it has never heard of and be told "Saved".
+  const known = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
+  try{ r = await apiPost('/api/save', {excluded, known}); }
+  catch(_){ return failSel('The panel at this address is not responding.'); }
+  try{ j = await r.json(); }catch(_){ /* the status still says enough */ }
+  if(!r.ok) return failSel('The panel refused the save (' + (j.error || r.status) + ').');
+  selFlight = 0; selBackoff = 0;
+  if(rev !== selRev){ kickSel(0); return false; }   // a newer Save is waiting
+  pendingSel = null;
+  clearAlertIfClean();
+  // Say WHOSE numbers these are. They come from the catalog, not the grid, and
+  // reading "213 included" under 15 visible cards is alarming until you know.
+  const scope = HIDDEN ? ' in the catalog' : '';
+  toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
+  return true;
+}
+
+function failSel(why){
+  selFlight = 0;
+  // Not a toast: a failed save you did not see is how an afternoon of work
+  // goes missing. The banner stays up until the save actually lands, and the
+  // snapshot stays queued so it still can.
+  offline(why);
+  selBackoff = Math.min(RETRY_MAX, selBackoff ? selBackoff * 2 : RETRY_MIN);
+  kickSel(selBackoff);
+  return false;
+}
+
+function kickSel(ms){
+  clearTimeout(selWait);
+  if(pendingSel === null || selFlight) return;
+  selWait = setTimeout(()=>flushSel(pendingSel), ms);
+}
+
+document.getElementById('save').onclick=()=>{
+  pendingSel = ITEMS.filter(x=>!x.isLogo && !x.included).map(x=>x.key);
+  selRev++;
+  flushSel(pendingSel);
 };
 async function copyText(text){
   if(!text) return;
@@ -491,7 +602,7 @@ function toast(msg){const t=document.getElementById('toast');t.textContent=msg;
   t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
 
 // --- boot ----------------------------------------------------------------
-applyBg((()=>{try{return localStorage.getItem('emojiBg')||'checker';}catch(_){return 'checker';}})());
+applyBg(prefs.get('emojiBg', 'checker'));
 loadZoom();
 measure();
 relayout();

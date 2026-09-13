@@ -118,24 +118,11 @@ def _output_ok(out: Path, src: Path) -> bool:
         return False
 
 
-def _trim(img: Image.Image) -> Image.Image:
-    if img.mode != "RGBA":
-        img = img.convert("RGBA")
-    bbox = img.split()[3].getbbox()
-    return img.crop(bbox) if bbox else img
-
-
-def _fit_100(img: Image.Image) -> Image.Image:
-    img = _trim(img)
-    w, h = img.size
-    if w == 0 or h == 0:
-        return Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    scale = min(SIZE / w, SIZE / h)
-    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-    img = img.resize((nw, nh), Image.LANCZOS)
-    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    canvas.paste(img, ((SIZE - nw) // 2, (SIZE - nh) // 2), img)
-    return canvas
+# Both of these were byte-identical copies of the emojikit versions, and the
+# double-alpha bug in the copied paste had to be found separately in each. One
+# implementation now, so a fit can only be wrong in one place.
+_trim = media._trim
+_fit_100 = media.fit_100
 
 
 def _render_svg(path: Path) -> Image.Image | None:

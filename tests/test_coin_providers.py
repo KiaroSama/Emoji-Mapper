@@ -178,10 +178,17 @@ class VerifiedPublish(unittest.TestCase):
                          tg.sets["cryptoemoji2_by_bot"][0]["custom_emoji_id"])
 
     def test_a_second_publisher_is_refused_instead_of_appending_too(self):
-        self.lock.write_text("pid=1 started=now\n", encoding="utf-8")
+        """A REAL hold, not a lock file with someone else's pid in it.
+
+        Writing the file used to be enough, because the lock WAS the file. It
+        is now an OS lock on that file, so a leftover file blocks nobody --
+        which is the point: a crashed run's file is not a lock, and the kernel
+        drops a real one when its process dies.
+        """
         tg = FakeTelegram(existing=2)
         mapping: dict[str, str] = {}
-        self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
+        with ps.exclusive_lock(self.lock):
+            self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (0, 1))
         self.assertEqual(tg.adds, [], "the lock must stop the second run")
 
     def test_a_rebuild_holding_the_family_lock_blocks_a_top_up(self):
@@ -271,8 +278,11 @@ class TheCanonicalMapIsRereadUnderTheLock(VerifiedPublish):
         with ps.canonical_map_lock():
             self.assertEqual(fp.publish_logos(tg, ["aaa"], {}), (0, 1))
         self.assertEqual(tg.adds, [], "no sticker may be added without it")
-        self.assertFalse(self.lock.exists(),
-                         "the pack lock must be released, not stranded")
+        # Not stranded means the next run can TAKE it. The lock file is never
+        # unlinked -- an unlinked inode is a lock nobody else can see, and
+        # reclaiming one by deleting it is how two publishers once ran at once.
+        with ps.exclusive_lock(self.lock):
+            pass
 
 
 class OnePackFamilyOneLock(unittest.TestCase):

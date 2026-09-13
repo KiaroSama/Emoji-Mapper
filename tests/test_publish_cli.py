@@ -49,9 +49,17 @@ class CliContract(_CatalogFixture):
         self.assertEqual(rc, EXIT_FAILED)
 
     def test_the_lock_is_released_again(self):
+        """Released means AVAILABLE, which is not the same as gone.
+
+        The lock file is deliberately never unlinked: an unlinked inode is a
+        lock nobody else can see, and reclaiming one by deleting it is how two
+        publishers once ran at the same time. So the question is whether the
+        next run can take it, and taking it is the only honest way to ask.
+        """
         self.assertEqual(self._dry_run()[0], EXIT_OK)
         self.assertEqual(self._dry_run()[0], EXIT_OK)
-        self.assertFalse(cs._lock_path(self.data, "pk").exists())
+        with exclusive_lock(cs._lock_path(self.data, "pk")):
+            pass
 
     def test_unknown_format_is_a_usage_error(self):
         self.assertEqual(self._dry_run("--formats", "garbage")[0], EXIT_USAGE)
@@ -455,7 +463,10 @@ class PublishThroughMain(_CatalogFixture):
 
         tg.check_uploadable = boom
         with redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(self._run(tg, "--preflight"), EXIT_OK)
+            # PARTIAL, not OK: nothing was validated, so a clean exit would
+            # claim a check that never happened. Not FAILED either -- that is
+            # the code a refusal returns, and this is the assertion below.
+            self.assertEqual(self._run(tg, "--preflight"), EXIT_PARTIAL)
         self.assertNotIn("REFUSED", out.getvalue())
 
     def test_a_run_that_lost_an_emoji_does_not_announce_the_pack(self):

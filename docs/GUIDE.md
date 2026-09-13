@@ -45,20 +45,26 @@ Emoji Mapper/
   build_collection.py      collector: publish the catalog into new packs
   collection_state.py      publisher plan/resume state + brand logo
   collection_reconcile.py  what is live in a set, and whose key each sticker is
+  collection_preflight.py  --preflight only: ask Telegram to validate the queue
   sync_order.py            reorder an already published pack (no re-upload)
-  panel.py                 web "Curate" panel: pick which emoji to publish
+  panel.py                 web "Curate" panel: the server, the page, the APIs
+  panel_view.py            the same panel's view model (build_view, ordering)
   emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
   emojikit/                shared core library
     logsetup.py            UTC file logging (logs/)
     media.py               format detect + conversions (static/video/tgs)
+    video_decode.py        the video decoder choice + a bounded frame cache
+    repaint.py             baking Telegram's tint into a Lottie or a static
     identity.py            content keys, perceptual hashes, same_image
     catalog.py             content-addressed SQLite catalog (dedup + inclusion)
   coins/                   the crypto-coin component (see §7)
     _paprika_api.py        CoinPaprika HTTP + candidate search + logo decode
   scripts/check.ps1        byte-compile + full unit suite (CI runs this too)
+  scripts/identity_repair.py  report/migrate catalog keys after a decode fix
   tests/                   unit tests + fixtures (see tests/README.md and §10)
   docs/GUIDE.md            this file
   .env.example             config template
+  requirements-dev.txt     test-only deps (playwright, for the browser suite)
   collection/              (gitignored) catalog.db + media/ + manifests/ + state
   logs/  build/  input/  logos/   (gitignored) generated/working data
 ```
@@ -81,6 +87,10 @@ py -3.11 -m venv .venv
 # Coin extra: numpy, imported only by coins/remap_ids.py (~20 MB wheel + BLAS,
 # so it is not in the core set). Skip it unless you work on coins/.
 .venv\Scripts\python.exe -m pip install -r requirements-coins.txt
+# Test extra: ruff + playwright, for scripts\check.ps1 and the panel's browser
+# suite. Nothing in the runtime imports either. Skip it unless you run tests.
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m playwright install chromium
 
 # 2. Configure secrets
 copy .env.example .env
@@ -395,11 +405,21 @@ split across multiple messages (each under 4096 chars).
 ## 10. Testing, CI, and Git
 
 ```powershell
-.venv\Scripts\python.exe -m pip install ruff                       # once: linter, not a runtime dep
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt    # once: ruff + playwright, not runtime deps
+.venv\Scripts\python.exe -m playwright install chromium            # once: the panel's browser suite
 .\scripts\check.ps1                                                # compile + lint + full suite
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -p "test_*.py"   # the suite alone
 .\run.ps1 -Check                                                   # env doctor (venv/deps/ffmpeg/.env)
 ```
+
+**The panel's browser suite needs a browser.** `tests/test_panel_browser.py`
+drives the real page in headless Chromium, because that is the only level at
+which the client-side behaviour exists — a save pipeline that drops the newest
+edit is perfectly well-formed JavaScript, and a source-text assertion cannot
+tell it from a correct one. A missing playwright or Chromium is a **hard error,
+never a skip**: a browser test that reports green on a machine with no browser
+is worse than no browser test at all. Set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to
+opt out deliberately, and know that you did.
 
 `scripts\check.ps1` is the single command CI and a developer both run, so the two
 cannot drift into different invocations. Three stages, in order: `compileall`,
@@ -434,6 +454,12 @@ its own vitest suite. It is a separate `worker:` job rather than a step in
 `build:` because it shares nothing with the Python matrix — it needs Node, not
 Python and ffmpeg — and running it once per Python version would be pure waste.
 A separate job also makes a Worker failure legible as a Worker failure.
+
+**So does the panel's browser suite**, in `panel-browser:`, for the same reason:
+it exercises JavaScript, so running it in the matrix would download Chromium
+once per Python version to prove the same thing. The matrix sets
+`EMOJI_MAPPER_NO_BROWSER_TESTS=1` explicitly — an opt-out that is written down
+is the only kind this module accepts.
 
 `check.ps1` stays Python-only: it is the command a developer runs constantly,
 and requiring a Node toolchain for it would tax everyone who never touches
@@ -558,8 +584,6 @@ Examples:
 | `--limit` / `--start` | `0` / `0` | Process a slice of the source. |
 | `--state` | `state_<base>.json` | Resume file (per pack, never clobbered). |
 | `--dry-run` | off | Validate inputs without calling Telegram. |
-| `--preflight` | off | Ask Telegram to validate every queued file, then stop. Publishes nothing; non-zero exit if any file is refused. |
-| `--repaint` | off | Create NEW sets with `needs_repainting`, so the client paints every emoji in them the text/accent colour. Whole-set and creation-only: it cannot be added later and it flattens colour art. |
 
 Resumable: progress is saved to `state_<base>.json`; an interrupted/flood-limited
 run continues without recreating existing sets. Use `--dry-run` first.
@@ -685,7 +709,27 @@ remain the identity, and only the human title moved.
 | `--data-dir` | `collection` | Catalog/media directory. |
 | `--brand-logo` | `assets/yourbrand-emoji-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
+| `--mixed` | off | Publish every format into ONE family (see above). |
 | `--dry-run` | off | Show the plan without uploading. |
+| `--preflight` | off | Ask Telegram to validate every queued file, then stop. Publishes nothing. |
+| `--repaint` | off | Create NEW sets with `needs_repainting`, so the client paints every emoji in them the text/accent colour. Whole-set and creation-only: it cannot be added later and it flattens colour art. |
+
+**What `--preflight` reports, and what each exit code means.** Four outcomes,
+counted apart, because collapsing them is how a run once claimed a validation
+it never performed:
+
+| Outcome | Meaning | Effect on the exit code |
+|---------|---------|-------------------------|
+| accepted | Telegram said the file is uploadable. | — |
+| refused | Telegram rejected it (`BotApiError`); the message is printed. | exit 1 |
+| missing | The catalog row points at a file that is not on disk. | exit 1 |
+| not checked | The request never reached Telegram (transport). | exit 3 if anything was accepted, otherwise exit 1 |
+
+The last row is the one that matters. A dropped connection is **not** a verdict
+on the artwork, so it is never reported as a refusal — and it is never reported
+as an acceptance either. The old counter counted attempts, so a run in which
+every single check failed at the transport printed "all accepted" and exited 0.
+`tests/test_preflight_outcomes.py` pins each of the four.
 
 **Leaving a pack unfinished (`--new-set`).** Normally set *N+1* opens only when
 set *N* reaches `--per-set`, so a pack you want to stop early has no way
@@ -1308,6 +1352,45 @@ values. (Regression test: `tests/test_catalog.py::test_large_phash_64bit`.)
 print(d.execute('SELECT format,COUNT(*),SUM(uploaded),SUM(included) FROM items GROUP BY format').fetchall())"
 ```
 
+### 13.6 When a decode fix changes what a key IS (`scripts/identity_repair.py`)
+
+The content key is this project's primary identity: it names the row in `items`,
+it is the foreign key in `publications` and `seen_files`, and its first twelve
+characters are baked into every archived filename. So correcting how a file is
+*decoded* is not a local change — it changes what the key of every affected row
+should be, and the rows have to be moved with it, deliberately.
+
+```powershell
+.venv\Scripts\python.exe scripts\identity_repair.py report                        # writes nothing
+.venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply    # writes
+```
+
+`report` is the default and is read-only: it decodes every video row, prints how
+many keys would move, lists collisions, and exits **3** when there is work to do
+(0 when the catalog already matches the current decoder). `migrate-video-keys`
+copies the database to `catalog.before-video-identity-<ts>.db` first, moves every
+reference in one `BEGIN IMMEDIATE` transaction, and **refuses** rather than
+guessing:
+
+- **a collision** — two rows landing on one key — exits 4 and changes nothing.
+  Merging them would delete one row's media, which is the exact defect a decoder
+  fix exists to prevent.
+- **an undecodable file** exits 4 too. Half a conversion is a catalog where some
+  keys describe their file and some do not, with nothing recording which.
+- **a row whose media is gone** keeps the key it has: it cannot be recomputed,
+  so it is neither invented nor dropped.
+
+`custom_emoji_id`s are carried across untouched — every bot inventory already
+holds them, and a migration that moved a key and dropped the id would be a
+silent republish of the whole pack. Afterwards run `pack_archive.py --sync`,
+because archived filenames embed the old key.
+
+The report also prints **SUSPECT MAPPINGS**: rows that have a recorded Telegram
+`file_unique_id` *and* a look-alike in the catalog. Those are the rows the old
+recovery rule — nearest perceptual hash, grayscale, no content check — could
+have attributed to the wrong item. It is a list for a human to eyeball in the
+roster gallery, not evidence of a mistake, and nothing remaps automatically.
+
 ---
 
 ## 14. `emojikit` library API
@@ -1339,15 +1422,58 @@ The ffmpeg filter used for video:
 `fps=30,scale=100:100:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=100:100:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=yuva420p`,
 encoded with `libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0`.
 
-A **`.webm` input is decoded with `-c:v libvpx-vp9`**, named explicitly before
-`-i`. VP9 keeps alpha in a separate WebM layer that ffmpeg's default vp9 decoder
-drops without a word, so the filter chain would see no alpha and the transparent
-pad would land on an opaque frame — a re-encoded transparent emoji came out a
-black square. GIF/PNG inputs are unaffected and get no decoder override. The
-same flag is needed to *inspect* one: probing a VP9 emoji with the default
-decoder reports every one of them as opaque, correct ones included.
+A **video input is decoded with an explicitly named alpha-capable decoder**,
+placed before `-i`: `libvpx-vp9` for VP9, `libvpx` for VP8. Both of those
+formats keep alpha in a separate WebM layer that ffmpeg's *default* `vp9`/`vp8`
+decoders drop without a word, so the filter chain would see no alpha and the
+transparent pad would land on an opaque frame — a re-encoded transparent emoji
+came out a black square. The decoder is chosen from the codec `probe_video`
+reports, never from the file extension: `.webm` is a container and says nothing
+about what is inside it. GIF/PNG inputs get no override. The same choice is
+needed to *inspect* a clip — probing a VP9 emoji with the default decoder
+reports every one of them as opaque, correct ones included — which is why the
+decision lives in one module (§14.2) that both the converter and the identity
+layer call.
 
-### 14.2 `emojikit.catalog.Catalog`
+### 14.2 `emojikit.video_decode`
+
+One module, because "which decoder reads this file's alpha" was previously
+answered in two places and they disagreed — `fingerprint()` and
+`perceptual_hash()` returned different keys for the same clip.
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `decoder_available(name)` | bool | Is this ffmpeg decoder built in? Cached per name. |
+| `decoder_args(path)` | `["-c:v", …]` or `[]` | The decoder for this file's **probed** codec, `[]` when nothing alpha-capable applies. |
+| `frames_rgba(path)` | `list[bytes]` \| None | Up to `SAMPLE_FPS` 64×64 RGBA frames a second, alpha intact. |
+| `first_frame_bytes(path)` | bytes \| None | The first of those frames. |
+
+`frames_rgba` is memoised on `(path, size, mtime_ns)` with a small bounded LRU.
+`same_image` used to decode the same file up to six times per comparison; the
+cache cut the video identity suite from 163 s to 48 s, and shortens real ingest
+by the same mechanism. Keying on mtime and size — not the path alone — is what
+keeps a re-encoded file from answering with its old frames.
+
+### 14.3 `emojikit.repaint`
+
+Baking Telegram's `--tint` into artwork, rather than publishing a set that asks
+the client to flatten it. Split out of `media.py` (a different job, and that
+file had reached the size ceiling), and re-exported from it so existing callers
+are unchanged.
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `parse_tint(text)` | `(r, g, b)` | `#rrggbb`, `#rgb`, or `r,g,b`. |
+| `repaint_in_place(path, fmt, rgb)` | bool | Recolour a Lottie or a static in place; video is refused. |
+
+Two shapes it must not skip, both of which used to return `True` having changed
+nothing: an **animated colour** is a list of keyframe objects with `s`/`e`
+rather than a flat `[r,g,b,a]`, and a **gradient** packs its colour stops
+`[offset,r,g,b] × p` followed by its opacity stops `[offset,alpha]` in one flat
+array — so `len // 4` as the stop count overwrites the opacity ramp with colour.
+`g.p` is the stop count and is honoured when present.
+
+### 14.4 `emojikit.catalog.Catalog`
 
 ```python
 from emojikit.catalog import Catalog
@@ -1368,7 +1494,7 @@ with Catalog("collection/catalog.db", phash_threshold=-1) as cat:
 merges perceptual near-duplicates; with `-1` (default) only exact content +
 `file_unique_id` dedup happens.
 
-### 14.3 `emojikit.logsetup` (advanced logging)
+### 14.5 `emojikit.logsetup` (advanced logging)
 
 `setup_logging(name, *, console_level=INFO, file_level=DEBUG, color=None)`
 configures a console handler plus a fresh UTC file log under `logs/`, named
@@ -1401,7 +1527,7 @@ print(redact(some_text))        # mask before any manual print
 Secret handling is covered by `tests/test_logsetup.py`, which also fails the
 build if any value from `.env` appears in a git-tracked file.
 
-### 14.4 `build_pack.Telegram`
+### 14.6 `build_pack.Telegram`
 
 Thin Bot API client (used everywhere). Key methods: `get_me`, `send_message`,
 `get_sticker_set`, `download_file`, `create_emoji_set`/`add_emoji` (format-aware,
@@ -1694,17 +1820,32 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
 | `GET /preview/<key>?fps=N` | A `.tgs` rendered to an **animated WebP**, cached on disk. The rate is in the URL because the response is immutable-cached. |
 | `GET /static/<file>` | Static assets (logo, favicon, and the two panel scripts), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
-| `POST /api/save` | Body `{"excluded":[keys]}` → `catalog.set_inclusion(...)`. |
+| `POST /api/save` | Body `{"excluded":[keys], "known":[keys]}` → `catalog.set_inclusion(...)`, **restricted to `known`**. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 
 Both POST routes are mutation endpoints and are guarded: loopback-only `Host`/
 `Origin`, a per-run token sent as `X-Panel-Token`, an exact-permutation check on
 the order, a content-type check and a body cap (`tests/test_panel.py`).
 
-Ordering: `order_by_similarity` groups items by format (static, then video, then
-animated) and within each runs a greedy nearest-neighbour walk on the perceptual
-hash so look-alikes are adjacent. Items without a hash (animated) keep content
-order.
+**`known` is the save's scope, and it is mandatory.** A save carries the FULL
+selection — every key it does not name becomes *included* — so a request with no
+notion of scope speaks for the whole catalog. The panel re-reads the catalog on
+every page load, so a tab opened before `fetch_emoji_ids.py` added an emoji, or
+before the owner deselected one in a second tab, held a stale snapshot; saving
+from it silently re-included rows it had never seen and answered `{"ok": true}`.
+The request now states which keys it was showing, and the decision is applied
+only inside that scope (intersected with what the catalog currently holds, so a
+key that has since vanished is harmless). A page too old to say gets **409** and
+a "reload the page and save again" message: one reload costs a second, while a
+silent re-inclusion is invisible until a publish ships the wrong pack.
+`tests/test_panel_save_scope.py` drives all of it through the real handler.
+
+Ordering: `panel_view.order_by_similarity` groups items by format (static, then
+video, then animated) and within each runs a greedy nearest-neighbour walk on
+the perceptual hash so look-alikes are adjacent. Items without a hash (animated)
+keep content order. The view model lives in `panel_view.py` — `build_view`,
+`order_by_similarity`, `packs_named`, `copy_id_for` — with `panel.py` left
+holding the server. Pure functions on one side, sockets on the other.
 
 Front-end:
 
@@ -1952,6 +2093,40 @@ These were found with real data; the guards must not regress.
 8. **Panel image 404** — `/img/<key>` wasn't URL-decoded. Fix: `unquote`. (§20)
 9. **Resume duplicate** — positional resume could re-upload after a skip. Fix:
    dedup by the per-item committed `uploaded` flag + persisted `skipped`. (§6.4)
+10. **Two publishers, one lock** — the pack-family lock decided ownership by
+    reading a file, comparing a token and *unlinking* it, so its own stale-lock
+    recovery could seat two processes at once; two real processes held one lock
+    for 1.54 s. Fix: an OS-level lock (`msvcrt.locking` / `flock`) held for the
+    whole critical section, and the lock file is never unlinked. (§12.5)
+11. **A stranger's picture given our identity** — recovery accepted the single
+    nearest candidate by perceptual hash, and dHash is a *grayscale structure*
+    hash: an opaque red square and an opaque blue one are zero apart. Fix: a
+    perceptual match may only NOMINATE; content verification decides, and
+    "more than one" and "could not examine" stay distinct from "no match".
+    (§13.6)
+12. **Preflight claimed an acceptance it never got** — the counter counted
+    attempts, so a run in which every check failed at the transport printed
+    "all accepted" and exited 0. Fix: four counters, and an unreachable
+    Telegram is its own outcome. (§12.5)
+13. **Alpha applied twice** — `fit_100` pasted the image using itself as the
+    mask, which composites against the transparent canvas beneath: colour came
+    back multiplied by alpha and alpha squared. `(255,0,0,128)` fitted to
+    `(128,0,0,64)`. Fix: an unmasked copy onto a fully transparent
+    destination. (§14.1)
+14. **Video identity ignored alpha, and disagreed with itself** — the default
+    `vp9` decoder drops the alpha layer in silence, so two clips differing only
+    in opacity shared one content key; and the two fingerprint APIs sampled
+    differently, so one clip had two hashes. Fix: one `video_decode` module
+    that picks the decoder from the probed codec. Existing rows are migrated
+    deliberately by `scripts/identity_repair.py`, never implicitly. (§14.2,
+    §13.6)
+15. **A stale tab spoke for the whole catalog** — `/api/save` carries the full
+    selection, so a page opened before another change silently re-included rows
+    it had never seen, and answered `{"ok": true}`. Fix: the request states its
+    scope; a page too old to say gets 409. (§20)
+16. **A Lottie timeline that was not a number** — `fr = NaN` passed
+    `validate_tgs`, because every comparison against NaN is False. Fix: an
+    explicit `math.isfinite` check on `fr`/`ip`/`op`. (§14.3)
 
 ---
 
