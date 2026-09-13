@@ -639,12 +639,8 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         self.assertEqual(tg.mutations, 0)
 
     def test_the_lock_is_released_after_a_run(self):
-        """Released means AVAILABLE, not deleted.
-
-        The lock file outlives the run on purpose -- an unlinked inode is a
-        lock nobody else can see, which is how two publishers once ran at
-        once. Taking it is the only honest way to ask whether it is free.
-        """
+        """Released means AVAILABLE, not deleted: the file outlives the run on
+        purpose, because an unlinked inode is a lock nobody else can see."""
         self.write_plan(["aaa"])
         self.write_state()
         tg = _LockWatchingTelegram()
