@@ -80,6 +80,22 @@ describe("errText", () => {
   });
 });
 
+/**
+ * The error a call threw, typed as an Error.
+ *
+ * `promise.catch((e) => e as T)` widens the result to `T | <resolved type>`,
+ * which typechecks locally only until something reads `.message` on it -- the
+ * shape of the CI failure that caught this file.
+ */
+async function thrownBy(run: () => Promise<unknown>): Promise<Error> {
+  try {
+    await run();
+  } catch (err) {
+    return err as Error;
+  }
+  throw new Error("expected the call to throw, and it resolved");
+}
+
 describe("Telegram.call", () => {
   beforeEach(() => vi.unstubAllGlobals());
 
@@ -87,9 +103,8 @@ describe("Telegram.call", () => {
     vi.stubGlobal("fetch", async (url: string) => {
       throw new TypeError(`fetch failed: ${url}`);
     });
-    const tg = new Telegram(TOKEN);
-    await expect(tg.sendMessage(1, "hi")).rejects.toThrow(BotApiError);
-    const err = await tg.sendMessage(1, "hi").catch((e) => e as BotApiError);
+    const err = await thrownBy(() => new Telegram(TOKEN).sendMessage(1, "hi"));
+    expect(err).toBeInstanceOf(BotApiError);
     expect(err.message).not.toContain(TOKEN);
     expect(err.message).toContain("sendMessage");
   });
@@ -98,17 +113,15 @@ describe("Telegram.call", () => {
     vi.stubGlobal("fetch", async () => new Response(
       JSON.stringify({ ok: false, description: `bad token ${TOKEN}`, error_code: 401 }),
       { status: 401, headers: { "Content-Type": "application/json" } }));
-    const err = await new Telegram(TOKEN).sendMessage(1, "hi")
-      .catch((e) => e as BotApiError);
+    const err = await thrownBy(() => new Telegram(TOKEN).sendMessage(1, "hi"));
     expect(err.message).not.toContain(TOKEN);
-    expect(err.code).toBe(401);
+    expect((err as BotApiError).code).toBe(401);
   });
 
   it("still reports a non-JSON reply usefully", async () => {
     vi.stubGlobal("fetch", async () => new Response("<html>502</html>",
                                                     { status: 502 }));
-    const err = await new Telegram(TOKEN).sendMessage(1, "hi")
-      .catch((e) => e as BotApiError);
+    const err = await thrownBy(() => new Telegram(TOKEN).sendMessage(1, "hi"));
     expect(err.message).toContain("non-JSON");
     expect(err.message).not.toContain(TOKEN);
   });
