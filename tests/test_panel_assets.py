@@ -42,7 +42,7 @@ class ThePanelScriptsShip(unittest.TestCase):
             self.assertIn(tag, page, tag)
         # The grid must exist before the gestures that act on it, whatever
         # comes after -- each file only needs what loaded before it.
-        for a, b in zip(tags, tags[1:]):
+        for a, b in zip(tags, tags[1:], strict=False):  # deliberately different lengths
             self.assertLess(page.index(a), page.index(b))
         # All of them come AFTER the inert data block they parse.
         self.assertLess(page.index('<script id="items-data"'), page.index(tags[0]))
