@@ -9,6 +9,14 @@
 
 const DEFAULT_API = "https://api.telegram.org";
 
+/**
+ * Telegram rejects a sendMessage over this many characters -- counted AFTER
+ * entity parsing, so `&amp;` is one character and `<b>x</b>` is one, not five
+ * and eight. It lives here with the rest of the Bot API's facts because both
+ * the renderer and the /publish validator have to agree on it.
+ */
+export const TEXT_LIMIT = 4096;
+
 export class BotApiError extends Error {
   constructor(readonly method: string, readonly description: string,
               readonly code?: number) {

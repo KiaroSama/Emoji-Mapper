@@ -41,6 +41,26 @@ let gridTop = 0;              // document y of the first row
 let headerH = 0;              // what the sticky header hides at the top
 let win = {first: -1, last: -1};
 
+// ---- preferences ---------------------------------------------------------
+// A browser that blocks site data does not hand back null, it THROWS -- and an
+// unguarded read at module scope threw before `ANIM_ON` was initialised, took
+// the rest of this file with it and left a page of mounted cards with no
+// working control on it. A remembered zoom is worth nothing next to that, so
+// every read and every write goes through here and falls back to memory for
+// the rest of the session.
+const memPrefs = new Map();
+const prefs = {
+  get(key, dflt){
+    try{ const v = localStorage.getItem(key); if(v !== null) return v; }
+    catch(_){ if(memPrefs.has(key)) return memPrefs.get(key); }
+    return dflt;
+  },
+  set(key, val){
+    memPrefs.set(key, val);
+    try{ localStorage.setItem(key, val); }catch(_){}
+  },
+};
+
 function el(tag, cls, text){
   const n = document.createElement(tag);
   if(cls) n.className = cls;
@@ -202,10 +222,13 @@ function layoutRows(){
       const anchor = (p === 0 && logo) ? ITEMS.indexOf(logo) : starts[p].index;
       const to = p + 1 < starts.length ? starts[p + 1].index : ITEMS.length;
       const pk = starts[p].pack;
-      sepAt.set(anchor, {title: pk != null ? 'Pack ' + pk : 'Pack ' + (p + 1),
+      // `run` is the marker's identity, and the label is NOT: live membership
+      // can revisit a pack, so 1, 2, 1 is three runs carrying two labels.
+      sepAt.set(anchor, {run: p, title: pk != null ? 'Pack ' + pk : 'Pack ' + (p + 1),
                          from: starts[p].index + 1, to});
     }
   }
+  seps.length = sepAt.size;          // runs that are gone drop their markers
   const sepIdx = [...sepAt.keys()].sort((a,b)=>a-b);
   rows = []; rowOfItem = new Array(ITEMS.length);
   let y = 0, i = 0, s = 0;
@@ -254,9 +277,13 @@ function rowBefore(y){
   return lo;
 }
 
-const seps = new Map();       // title -> marker element, reused across renders
+const seps = [];              // marker element per RUN, reused across renders
 function sepNode(row){
-  let box = seps.get(row.sep.title);
+  // Indexed by the run, never by the label. Keyed by label, both of the runs a
+  // pack opens twice were handed the SAME element -- and one element cannot be
+  // in two rows, so the model counted three boundaries and the grid drew two,
+  // leaving every row below the collision a marker's height out of place.
+  let box = seps[row.sep.run];
   if(!box){
     box = el('div','packsep');
     const logo = ITEMS.find(x=>x.isLogo);
@@ -266,10 +293,13 @@ function sepNode(row){
       img.alt = '';
       box.appendChild(img);
     }
-    box.appendChild(el('span','', row.sep.title));
+    box.appendChild(el('span','',''));
     box.appendChild(el('span','n',''));
-    seps.set(row.sep.title, box);
+    seps[row.sep.run] = box;
   }
+  // Both written every render: a run keeps its element while the label and the
+  // range it spans move with the arrangement.
+  box.querySelector('span').textContent = row.sep.title;
   box.lastChild.textContent = `#${row.sep.from}–#${row.sep.to}`;
   return box;
 }
@@ -392,20 +422,37 @@ function relayout(){ layoutRows(); render(); }
 // ---- zoom ----------------------------------------------------------------
 // The item at the top of the screen stays at the top of the screen: zooming
 // is for seeing more or less of the same place, not for losing it.
+let zoomAnchor = -1;          // the item a run of zooms is holding at the top
 function firstVisibleIndex(){
   if(!rows.length) return -1;
   let r = rowAt(scrollY + headerH - gridTop);
   while(r < rows.length && rows[r].sep) r++;
-  return r < rows.length ? rows[r].start : -1;
+  if(r >= rows.length) return -1;
+  const row = rows[r];
+  // Consecutive zooms hold the SAME item. Reading the top of the screen hands
+  // back its ROW's first item, and a changed column count can only move that
+  // backwards -- so zooming in and back out ratcheted the grid down one row per
+  // step. Scrolling moves the top row off the held item, which drops it.
+  if(zoomAnchor >= row.start && zoomAnchor < row.end) return zoomAnchor;
+  return row.start;
 }
 function setZoom(z){
   z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   if(z === zoom) return;
   const anchor = firstVisibleIndex();
+  zoomAnchor = anchor;
   zoom = z;
-  try{ localStorage.setItem('panelZoom', String(z)); }catch(_){}
+  prefs.set('panelZoom', String(z));
   paintZoom();
   layoutRows();
+  // render() BEFORE the scroll: the spacers are what give the document its
+  // height, and a browser clamps a scroll against the height it HAS. Scrolling
+  // first meant zooming in at the bottom of a thousand cards was clamped
+  // against the old, shorter document and landed two hundred cards early.
+  // measure() after it, because the header and the banner decide how much of
+  // the top the anchor has to clear.
+  render();
+  measure();
   if(anchor >= 0) scrollTo(0, gridTop + rows[rowOfItem[anchor]].top - headerH);
   render();
 }
@@ -413,8 +460,9 @@ function paintZoom(){
   document.getElementById('zoomReset').textContent = Math.round(zoom * 100) + '%';
 }
 function loadZoom(){
-  let z = 1;
-  try{ z = parseFloat(localStorage.getItem('panelZoom')) || 1; }catch(_){}
+  // `|| 1` covers a stored value that is not a number at all: NaN would clamp
+  // to ZOOM_MIN and the panel would open at 40 % for good.
+  const z = parseFloat(prefs.get('panelZoom', '1')) || 1;
   zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   paintZoom();
 }
@@ -448,13 +496,30 @@ addEventListener('resize', ()=>{ measure(); relayout(); });
 // ---- animation gating ----------------------------------------------------
 // Only the cards you can actually see animate. Everything else holds frame 0,
 // so the number of live animations is bounded by the viewport rather than by
-// the catalog. Swapping an <img> src is cheap -- both URLs are immutable-cached,
-// so this never refetches -- which is what makes this affordable where
+// the catalog.
+/** May this node animate right now? The ONE answer, asked by every play,
+ *  source swap, observer callback, thaw and hover path.
+ *
+ *  Eligibility used to be intersection plus the master switch, so a callback
+ *  delivered after a freeze restarted exactly what the freeze had stopped: the
+ *  observer knew nothing about a hidden tab or a scroll in progress, and those
+ *  are the two moments the freeze exists for.
+ *
+ *  `hover` is the reduced-motion exception. Nothing plays by itself there, so
+ *  hover is the only way to see a video move at all -- but it is still no way
+ *  round the switch, a hidden tab or a scroll. */
+function mayAnimate(inView, hover){
+  if(!ANIM_ON || document.hidden || scrollThaw !== null) return false;
+  return hover ? true : (inView && !RM);
+}
+
+// Swapping an <img> src is cheap -- both URLs are immutable-cached, so this
+// never refetches -- which is what makes this affordable where
 // mounting/destroying a player was not.
 const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
   for (const e of es) {
     const t = e.target;
-    const live = e.isIntersecting && ANIM_ON && !RM;
+    const live = mayAnimate(e.isIntersecting);
     if (t.dataset.play) { setPlaying(t, live); continue; }
     const want = live ? t.dataset.anim : t.dataset.still;
     if (want && t.getAttribute('src') !== want) t.src = want;
@@ -466,6 +531,9 @@ const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
 // not an error worth surfacing, but it MUST be caught or it becomes an
 // unhandled rejection on every scroll.
 function setPlaying(v, on){
+  // The guard sits HERE, where every caller already routes, rather than at each
+  // of them: one path that forgot to ask was all it took to undo a freeze.
+  if (on) on = mayAnimate(true, true);
   if (on) attachVideo(v, true);      // playing implies a source, whichever observer spoke first
   try { if (on) { const q = v.play(); if (q) q.catch(()=>{}); } else { v.pause(); } }
   catch(_){}
@@ -499,7 +567,9 @@ document.addEventListener('visibilitychange', ()=>{
 let scrollThaw = null;
 addEventListener('scroll', ()=>{
   scheduleRender();
-  if(!ANIM_ON || RM) return;
+  // Not `|| RM`: under reduced motion a hovered video is the one thing that
+  // can be playing, and `scrollThaw` is how mayAnimate() knows to hold it.
+  if(!ANIM_ON) return;
   if(scrollThaw === null) freezeAll();
   else clearTimeout(scrollThaw);
   scrollThaw = setTimeout(()=>{ scrollThaw = null; applyAnim(); }, 180);
@@ -508,14 +578,17 @@ addEventListener('scroll', ()=>{
 // Master switch. Off = every card holds frame 0 and nothing decodes at all,
 // which is the lightest the grid can be; the observer stops swapping so it
 // cannot undo the freeze behind your back.
-let ANIM_ON = localStorage.getItem('animOn') !== '0';
+let ANIM_ON = prefs.get('animOn', '1') !== '0';
 function applyAnim(){
   const btn = document.getElementById('anim');
   btn.setAttribute('aria-pressed', ANIM_ON ? 'true' : 'false');
   document.getElementById('animLabel').textContent =
     'Animation: ' + (ANIM_ON ? 'On' : 'Off');
+  // Same predicate as the observer, so a thaw that arrives while the tab is
+  // hidden cannot reach a different answer from the callback beside it.
+  const may = mayAnimate(true);
   animatedNodes().forEach(n => {
-    if (!ANIM_ON) {
+    if (!may) {
       if (n.dataset.play) setPlaying(n, false);
       else if (n.getAttribute('src') !== n.dataset.still) n.src = n.dataset.still;
     } else if (animIO) { animIO.unobserve(n); animIO.observe(n); }  // re-evaluate
@@ -540,14 +613,27 @@ function updateCount(){
   }
   document.getElementById('selCount').textContent = included;
   document.getElementById('totCount').textContent = real.length + logo;
-  // Telegram's hard cap is 200 stickers per set and the logo takes one of them,
-  // so 200 chosen emoji plus the logo is 201 and CANNOT be one pack. Say so
-  // here rather than let it be discovered as a surprise second set.
+  // The number of packs is the number of runs the GRID draws, read from the
+  // same function that draws them. Dividing the total by PER_SET counted the
+  // logo ONCE for the whole selection, but every pack is led by one and so
+  // holds one emoji fewer: 399 emoji plus a logo was reported as two packs
+  // while the grid beneath it was already drawing three.
+  const packs = Math.max(1, packStarts().starts.length);
+  const perPack = PER_SET - (logo ? 1 : 0);
+  const chosen = included - logo;
   const warn = document.getElementById('capWarn');
-  if(included > PER_SET){
-    const sets = Math.ceil(included / PER_SET);
-    warn.textContent = `· ${included} > ${PER_SET} per set, so this publishes as `
-                     + `${sets} packs (each led by the logo)`;
+  if(packs > 1){
+    // Membership is not capacity: this page cannot see how full a published
+    // pack already is, and build_collection can be asked for mixed or
+    // per-format packs. Call it an estimate rather than print a number that
+    // is only sometimes right.
+    warn.textContent = ITEMS.some(x => x.pack != null && x.included)
+      ? `· spans ${packs} packs (estimate: this grid cannot see how full the `
+        + `live packs already are)`
+      : `· ${chosen} emoji, ${perPack} per set`
+        + (logo ? ' beside the logo' : '')
+        + `, so this publishes as ${packs} packs`
+        + (logo ? ' (each led by the logo)' : '');
     warn.style.display = '';
   } else {
     warn.style.display = 'none';

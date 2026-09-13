@@ -132,9 +132,19 @@ class DragAndDropOrdering(unittest.TestCase):
         """200 chosen emoji plus the logo is 201, over Telegram's per-set cap.
 
         Surfaced in the header rather than discovered as a surprise second set.
+
+        The count is the number of runs ``packStarts()`` produces -- the same
+        function that draws the boundaries -- and NOT a division of the total.
+        ``Math.ceil(included / PER_SET)`` counted the logo once for the whole
+        selection when every pack is led by one, so 399 emoji plus a logo was
+        reported as two packs over a grid already drawing three. That the two
+        agree at every boundary is asserted in ``tests/test_panel_browser.py``.
         """
-        self.assertIn("included > PER_SET", SCRIPT)
-        self.assertIn("Math.ceil(included / PER_SET)", SCRIPT)
+        count = block(SCRIPT, "function updateCount(){", chr(10) + "}")
+        self.assertIn("packStarts().starts.length", count)
+        self.assertNotIn("Math.ceil(included / PER_SET)", SCRIPT,
+                         "a second, wrong copy of the pack planner")
+        self.assertIn("PER_SET - (logo ? 1 : 0)", count, "every pack is led by the logo")
         # The limit comes from build_collection, not a second copy that drifts.
         self.assertIn("__PER_SET__", PAGE)
         self.assertEqual(p.PER_SET, 200)
@@ -433,10 +443,19 @@ class ZoomFitsMoreOrLess(unittest.TestCase):
             self.assertIn(key, keys)
 
     def test_the_level_is_clamped_and_remembered(self):
+        """Persistence goes through the guarded adapter, never straight at
+        localStorage: a browser that blocks site data THROWS on the property,
+        and the unguarded read this replaced took the rest of the file with it.
+        That the level really does survive a reload is asserted against a real
+        browser in ``tests/test_panel_browser.py``."""
         z = block(SCRIPT, "function setZoom(z){", "function paintZoom")
         self.assertIn("Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))", z)
-        self.assertIn("localStorage.setItem('panelZoom'", z)
-        self.assertIn("localStorage.getItem('panelZoom')", block(SCRIPT, "function loadZoom(){", "}"))
+        self.assertIn("prefs.set('panelZoom'", z)
+        self.assertIn("prefs.get('panelZoom'", block(SCRIPT, "function loadZoom(){", "}"))
+        # Every preference, not just this one -- one raw call is the whole bug.
+        raw = re.findall(r"localStorage\.(?:get|set)Item", SCRIPT)
+        self.assertEqual(len(raw), 2, f"unguarded localStorage access: {raw}")
+        self.assertIn("const prefs = {", SCRIPT)
 
     def test_zooming_keeps_the_top_item_on_screen(self):
         """Zooming is for seeing more or less of the same place, not for losing
