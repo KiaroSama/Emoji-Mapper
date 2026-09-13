@@ -306,6 +306,7 @@ Emoji Mapper/                  # the whole project
   collection_state.py          # its plan/resume state + the brand logo
   collection_reconcile.py      # what is live in a set, and whose key it is
   collection_preflight.py      # --preflight: ask Telegram to validate the queue
+  collection_migrate.py        # move EVERY reference to a content key, as one change
   sync_order.py                # reorder a LIVE pack to match the panel
   panel.py                     # curate panel: the server, the page, the APIs
   panel_view.py                # the panel's view model (build_view, ordering)
@@ -317,6 +318,7 @@ Emoji Mapper/                  # the whole project
     repaint.py                 # bake a tint into a Lottie or a static
     identity.py                # content keys, perceptual hashes, same_image
     catalog.py                 # content-addressed SQLite catalog (dedup)
+    errors.py                  # the media exception types (a leaf: no cycle)
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
     test/                      # vitest, fetch stubbed (never reaches Telegram)
