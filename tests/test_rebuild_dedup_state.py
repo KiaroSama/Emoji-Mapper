@@ -639,13 +639,20 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
         self.assertEqual(tg.mutations, 0)
 
     def test_the_lock_is_released_after_a_run(self):
+        """Released means AVAILABLE, not deleted.
+
+        The lock file outlives the run on purpose -- an unlinked inode is a
+        lock nobody else can see, which is how two publishers once ran at
+        once. Taking it is the only honest way to ask whether it is free.
+        """
         self.write_plan(["aaa"])
         self.write_state()
         tg = _LockWatchingTelegram()
         rd.build(tg, "bot")
         self.assertTrue(tg.held_at_mutation,
                         "the lock must be HELD while the packs are mutated")
-        self.assertFalse(cfg.LOCK.exists())
+        with ps.exclusive_lock(cfg.LOCK):
+            pass
 
     def test_the_lock_is_released_after_a_stop(self):
         self.write_plan(["aaa"])
@@ -656,8 +663,8 @@ class ConcurrentRunsAreLockedOut(RebuildCase):
             rd.build(tg, "bot")
         self.assertTrue(tg.held_at_mutation,
                         "the lock must be HELD while the packs are mutated")
-        self.assertFalse(cfg.LOCK.exists(),
-                         "a stopped run must not block the retry")
+        with ps.exclusive_lock(cfg.LOCK):   # a stopped run must not block the retry
+            pass
 
 
 class StateSchemaIsValidatedBeforeAnyMutation(RebuildCase):

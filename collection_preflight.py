@@ -97,12 +97,16 @@ def _report(accepted: int, refused: list, missing: list, unknown: list) -> int:
               flush=True)
         return EXIT_FAILED
     if unknown:
-        # Preflight publishes nothing either way; what must not happen is an
-        # exit code that claims a validation which never took place.
+        # PARTIAL even when nothing at all was checked. Both neighbouring codes
+        # are a lie here: 0 claims a validation that never took place, and
+        # FAILED is what a Telegram refusal returns -- reporting a dropped
+        # connection with it sends someone editing artwork that was never the
+        # problem. "I could not finish asking" is its own answer, and it is
+        # this one, whether it happened to one file or to all of them.
         print(f"\nNothing was published. Telegram could not be reached for "
               f"{len(unknown)} file(s), so this run proves nothing about them. "
               f"Re-run the preflight once the connection is back.\n", flush=True)
-        return EXIT_PARTIAL if accepted else EXIT_FAILED
+        return EXIT_PARTIAL
     if not accepted:
         print("Nothing was queued, so nothing was validated.\n", flush=True)
         return EXIT_OK
