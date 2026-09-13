@@ -39,8 +39,11 @@ real artifacts before it was fixed. The ones that could corrupt data:
 - **Preflight reported acceptances it never obtained.** The counter counted
   attempts, so a run in which every `check_uploadable` failed at the transport
   printed "all accepted" and exited 0. Accepted, refused, missing and
-  *not checked* are now counted apart, with an exit code for each
-  (`collection_preflight.py`).
+  *not checked* are now counted apart (`collection_preflight.py`). A refusal or
+  a missing file exits 1; an unreachable Telegram exits 3, whether it happened
+  to one file or to all of them — exit 1 is what "Telegram said no" means, and
+  answering a dropped connection with it sends someone editing artwork that was
+  never the problem.
 - **A stale panel tab spoke for the whole catalog.** `/api/save` carries the
   full selection, so a page opened before another change re-included rows it had
   never seen — and answered `{"ok": true}`. The request now states the scope it
