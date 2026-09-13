@@ -59,6 +59,7 @@ rather than adding an opt-out.
 | File | Covers |
 |------|--------|
 | `test_media.py` | format detection (`emojikit/media.py`) and identity (`emojikit/identity.py`): content/perceptual hashing, `same_image`, static→PNG, GIF→WEBM, Lottie→TGS, and the animated contract (512×512 canvas, frame rate, duration, gzip packaging, bounded decompression) |
+| `test_media_reencode.py` | owner rule 1 — never republish another pack's file byte-for-byte — and the requirement pulling against it: the result must be pixel-identical, because the content key is computed from decoded pixels and a lossy re-compress would split one catalog row into two. Also `same_image` across a re-encode |
 | `test_media_bounds.py` | the bounds around ingest: decompression limits, the perceptual-hash threshold range, and the signed storage conversion |
 | `test_media_fitting.py` | `fit_100` must not touch opacity. It pasted the image using ITSELF as the mask — a composite against the transparent canvas, so colour came back multiplied by alpha and alpha squared |
 | `test_identity_video.py` | video identity: alpha is part of the picture, and the two fingerprint APIs sample the same way. ffmpeg's default `vp9` decoder drops the alpha layer in silence, so the decoder is chosen from the PROBED codec, never the extension. Real VP9/VP8 encodes |
@@ -109,7 +110,8 @@ rather than adding an opt-out.
 | `test_logsetup.py` | secret redaction, plus a guard that fails if any `.env` secret value appears in a git-tracked file |
 
 `_pack_fixtures.py`, `_rebuild_fixtures.py`, `_cli_fixtures.py`,
-`_bc_fixtures.py`, `_panel_fixtures.py` and `_coin_fixtures.py` hold the
+`_bc_fixtures.py`, `_panel_fixtures.py`, `_media_fixtures.py` and
+`_coin_fixtures.py` hold the
 fakes shared by the modules above them (the PNG builders, `FakeTelegram`,
 `RebuildCase`, and the standalone-script loader every entry-point contract
 module imports). One copy each, because a duplicated fake drifts away from the
