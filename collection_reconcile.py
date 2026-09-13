@@ -10,7 +10,10 @@ stays its own outcome rather than collapsing into a no.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -166,37 +169,103 @@ def _same_image(tg, st: dict, source: Path, tmp_dir: Path) -> bool | None:
     Fetching is this layer's job; deciding is ``identity.same_image``'s, which the
     Bot API client asks the same question of.
     """
+    with _private_download(tmp_dir, "verify_") as tmp:
+        try:
+            tg.download_file(st["file_id"], tmp)
+            return identity.same_image(tmp, source,
+                                       media.telegram_sticker_format(st))
+        except Exception as exc:  # noqa: BLE001 - a failed probe is not a "no"
+            log.warning("upload verify failed for %s: %s", source.name,
+                        redact(str(exc)))
+            return None
+
+
+@contextlib.contextmanager
+def _private_download(tmp_dir: Path, prefix: str):
+    """A scratch path we PROVABLY created, removed however the block ends.
+
+    The names here used to be derived from the sticker's file_unique_id, which
+    makes them predictable and shared. Three things follow from that: two runs
+    verifying the same sticker fight over one file; a pre-existing file or
+    symlink at that path is written THROUGH, which on a multi-user machine
+    means writing wherever the link points; and the cleanup deletes whatever
+    happens to be there, including something we never created.
+
+    `mkstemp` answers all three: it creates the file itself with O_EXCL and
+    owner-only permissions, so the name is unique and the file is ours. The
+    caller overwrites it; the contextmanager removes it on every path out,
+    including the ambiguous and error paths that used to leak it.
+    """
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / f"verify_{st.get('file_unique_id') or 'x'}.dl"
+    fd, name = tempfile.mkstemp(dir=tmp_dir, prefix=prefix, suffix=".dl")
+    os.close(fd)
+    path = Path(name)
     try:
-        tg.download_file(st["file_id"], tmp)
-        return identity.same_image(tmp, source, media.telegram_sticker_format(st))
-    except Exception as exc:  # noqa: BLE001 - a failed probe is not a "no"
-        log.warning("upload verify failed for %s: %s", source.name, redact(str(exc)))
-        return None
+        yield path
     finally:
-        tmp.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+
+
+# Three answers that are NOT a content key, kept apart on purpose. Collapsing
+# any of them into "no match" is how a foreign sticker gets adopted, and
+# collapsing any into a key is how it gets our item's identity.
+AMBIGUOUS = "ambiguous"        # more than one catalog item is genuinely this
+UNDECIDABLE = "undecidable"    # could not look; NOT evidence of anything
 
 
 def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
-    """The one catalog item this image is, within the re-encode tolerance.
+    """The one catalog item this image IS, within the re-encode tolerance.
 
-    Returns the content_key, None for "no catalog item looks like this", or
-    the string "ambiguous" when more than one does -- which the caller must
-    treat as "I could not tell", never as a pick.
+    Returns a content_key, ``None`` for a proven miss (nothing in the catalog
+    holds this picture), ``AMBIGUOUS`` when more than one item does, or
+    ``UNDECIDABLE`` when the question could not be answered.
 
-    Animated is vector and has no raster hash, so there is nothing to compare:
-    its content key survives a re-gzip exactly, and a miss there is a real miss.
+    The perceptual hash only NOMINATES candidates; it never decides. dHash is a
+    GRAYSCALE structure hash, so an opaque red square and an opaque blue square
+    are distance 0 from each other -- and this function used to accept the
+    single closest candidate outright. With only the red one in the catalog, a
+    live blue sticker resolved to the red item's key, and the caller then wrote
+    that foreign sticker's file_unique_id and custom_emoji_id against our item
+    and marked it published. The wrong mapping survived a reopen.
+
+    `identity.same_image` is the check that would have caught it -- it demands
+    structure AND colour agreement, and it is already what guards a fresh
+    upload. The two paths asked different questions about the same thing; now
+    they ask the same one, and only a VERIFIED candidate is returned.
     """
     probe = identity.perceptual_hash(path, fmt)
     if probe is None:
-        return None
-    close = [it.content_key for it in cat.all_items()
+        # Animated is vector: there is no raster hash to search with and its
+        # content key survives a re-gzip exactly, so a miss really is a miss.
+        # For a raster format a missing hash means the decode failed, which is
+        # "I could not look" -- a very different answer.
+        return None if fmt == "animated" else UNDECIDABLE
+
+    close = [it for it in cat.all_items()
              if it.fmt == fmt and it.phash is not None
              and identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
-    if len(close) > 1:
-        return "ambiguous"
-    return close[0] if close else None
+    if not close:
+        return None
+
+    verified: list[str] = []
+    unknown = 0
+    for it in close:
+        src = Path(it.file_path)
+        if not src.is_file():
+            unknown += 1            # the item is ours, we just cannot compare
+            continue
+        same = identity.same_image(src, path, fmt)
+        if same is True:
+            verified.append(it.content_key)
+        elif same is None:
+            unknown += 1
+    if len(verified) > 1:
+        return AMBIGUOUS
+    if verified:
+        return verified[0]
+    # Nothing verified. If any candidate could not be examined, the honest
+    # answer is that we do not know -- not that this sticker is a stranger.
+    return UNDECIDABLE if unknown else None
 
 
 def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | None:
@@ -220,35 +289,41 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
             f"sticker {fuid or '<no id>'} carries no file_id to fetch"
             if not file_id else
             f"this Telegram client cannot download {fuid or file_id}")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / f"reconcile_{fuid or 'unknown'}.dl"
-    tmp_kept = tmp
-    try:
-        tg.download_file(file_id, tmp)
-        key = identity.content_key(tmp, media.telegram_sticker_format(st))
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        log.warning("reconcile download failed (%s): %s", fuid or file_id,
-                    redact(str(exc)))
-        raise Unresolvable(
-            f"could not fetch or hash {fuid or file_id}: {redact(str(exc))}"
-        ) from exc
-    if cat.get(key) is None:
-        # Exact miss. Telegram re-encoded it, so for a raster format the key
-        # cannot match -- fall back to the perceptual hash, but ONLY when the
-        # answer is unambiguous. Two catalog items within tolerance means we
-        # cannot tell which one this is, and guessing is what put a foreign
-        # llama on `sol`; that is Unresolvable, not a negative.
-        near = _near_catalog_match(cat, tmp_kept, media.telegram_sticker_format(st))
-        if near == "ambiguous":
+    # One scratch file, ours, removed on EVERY path out -- including the two
+    # refusals below, which used to leak it, and an exception from the
+    # near-match search, which used to leak it too.
+    with _private_download(tmp_dir, "reconcile_") as tmp:
+        try:
+            tg.download_file(file_id, tmp)
+            key = identity.content_key(tmp, media.telegram_sticker_format(st))
+        except Exception as exc:
+            log.warning("reconcile download failed (%s): %s", fuid or file_id,
+                        redact(str(exc)))
             raise Unresolvable(
-                f"{fuid or file_id} is within the re-encode tolerance of more "
-                f"than one catalog item; refusing to attribute it by guess")
-        if near is None:
-            tmp_kept.unlink(missing_ok=True)
-            return None
-        key = near
-    tmp_kept.unlink(missing_ok=True)
+                f"could not fetch or hash {fuid or file_id}: {redact(str(exc))}"
+            ) from exc
+        if cat.get(key) is None:
+            # Exact miss. Telegram re-encoded it, so for a raster format the
+            # key cannot match -- fall back to the perceptual hash, but only
+            # for a VERIFIED match. Guessing is what put a foreign llama on
+            # `sol`; anything short of proof is Unresolvable, not a negative.
+            near = _near_catalog_match(cat, tmp,
+                                       media.telegram_sticker_format(st))
+            if near == AMBIGUOUS:
+                raise Unresolvable(
+                    f"{fuid or file_id} is within the re-encode tolerance of "
+                    f"more than one catalog item; refusing to attribute it by "
+                    f"guess")
+            if near == UNDECIDABLE:
+                # A candidate existed but could not be compared -- a missing
+                # file, a decoder that failed. Returning None here would call
+                # this sticker foreign on the strength of a look we never got.
+                raise Unresolvable(
+                    f"{fuid or file_id} resembles a catalog item that could "
+                    f"not be examined; refusing to decide either way")
+            if near is None:
+                return None
+            key = near
     if fuid:
         cat.record_file_unique_id(fuid, key)
     return key

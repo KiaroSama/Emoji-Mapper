@@ -90,20 +90,20 @@ class MutationGuard(unittest.TestCase):
         return [v["key"] for v in self.view if not v.get("isLogo")]
 
     def test_missing_token_is_rejected(self):
-        code, _ = self._post("/api/save", {"excluded": []}, token=None)
+        code, _ = self._post("/api/save", {"excluded": [], "known": []}, token=None)
         self.assertEqual(code, 403)
 
     def test_wrong_token_is_rejected(self):
-        code, _ = self._post("/api/save", {"excluded": []}, token="nope")
+        code, _ = self._post("/api/save", {"excluded": [], "known": []}, token="nope")
         self.assertEqual(code, 403)
 
     def test_non_json_content_type_is_rejected(self):
         # The exact shape a cross-origin no-cors POST can send.
-        code, _ = self._post("/api/save", {"excluded": []}, ctype="text/plain")
+        code, _ = self._post("/api/save", {"excluded": [], "known": []}, ctype="text/plain")
         self.assertEqual(code, 403)
 
     def test_foreign_origin_is_rejected(self):
-        code, _ = self._post("/api/save", {"excluded": []}, origin="http://evil.com")
+        code, _ = self._post("/api/save", {"excluded": [], "known": []}, origin="http://evil.com")
         self.assertEqual(code, 403)
 
     def test_malformed_json_is_400(self):
@@ -111,7 +111,7 @@ class MutationGuard(unittest.TestCase):
         self.assertEqual(code, 400)
 
     def test_unknown_keys_rejected(self):
-        code, _ = self._post("/api/save", {"excluded": [], "wat": 1})
+        code, _ = self._post("/api/save", {"excluded": [], "known": [], "wat": 1})
         self.assertEqual(code, 400)
 
     def test_order_must_be_a_permutation(self):
@@ -125,7 +125,7 @@ class MutationGuard(unittest.TestCase):
         keys = self._keys()
         code, body = self._post("/api/order", {"order": list(reversed(keys))})
         self.assertEqual((code, body["ok"]), (200, True))
-        code, body = self._post("/api/save", {"excluded": [keys[0]]})
+        code, body = self._post("/api/save", {"excluded": [keys[0]], "known": keys})
         self.assertEqual(code, 200)
         self.assertEqual(body["excluded"], 1)
 

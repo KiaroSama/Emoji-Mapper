@@ -44,15 +44,27 @@ class PublisherLock(unittest.TestCase):
                     self.fail("a second publisher acquired the lock")
 
     def test_lock_is_released_on_exit(self):
+        """Released means the NEXT run can take it, which is the only property
+        any caller depends on.
+
+        This used to assert the file was deleted. Deleting it is now forbidden:
+        the lock lives in the OS, attached to an open handle on this exact
+        path, and unlinking would let a second process create a different file
+        at the same name and hold a lock nobody else can see. The file staying
+        put IS the fix, so the assertion moved to the behaviour.
+        """
         with ps.exclusive_lock(self.lock):
             self.assertTrue(self.lock.exists())
-        self.assertFalse(self.lock.exists())
+        self.assertTrue(self.lock.exists(), "the lock target must be stable")
+        with ps.exclusive_lock(self.lock):
+            pass
 
     def test_lock_is_released_even_on_error(self):
         with self.assertRaises(ZeroDivisionError):
             with ps.exclusive_lock(self.lock):
                 1 / 0  # noqa: B018 - the point is to leave the block by raising
-        self.assertFalse(self.lock.exists())
+        with ps.exclusive_lock(self.lock):
+            pass
 
     def test_stale_lock_is_reclaimed(self):
         self.lock.write_text("pid=999 (crashed)", encoding="utf-8")
@@ -68,100 +80,46 @@ class PublisherLock(unittest.TestCase):
         old = time.time() - 10_000
         os.utime(self.lock, (old, old))
 
-    def test_a_reclaiming_run_never_deletes_a_fresh_claim(self):
-        """Two runs judge the SAME dead record stale; only one may end up holding it.
+    def test_a_record_rewritten_underneath_a_holder_grants_nothing(self):
+        """The file's CONTENTS are a diagnostic, never a title deed.
 
-        The window is between deciding "the holder is gone" and acting on that
-        decision. An unconditional unlink there deletes whatever is on disk NOW,
-        including the lock a faster run has just claimed -- so the recovery path
-        itself hands the pack family to two live writers.
-
-        The other run's claim is planted inside the liveness check, which is the
-        last thing that happens before the old code would have unlinked.
+        This replaces three tests that drove the old claim protocol through
+        mocked `os.open`/`os.close` and planted records: compare-then-delete,
+        the O_EXCL loser, and reading your own token back. That protocol is
+        gone -- it was the defect. Every one of those guards was a
+        compare-then-act on a file another process could change in between, and
+        two real processes held one lock for 1.5s through the gap. The
+        invariant they were all reaching for is asserted directly here, and
+        proved across process boundaries in `test_pack_locks_exclusion.py`.
         """
-        self._make_stale()
-        real_alive = ps._lock_owner_is_alive
-        planted = {"done": False}
-
-        def alive(pid):
-            gone = real_alive(pid)              # the recorded pid really is gone
-            if not planted["done"]:
-                planted["done"] = True
-                self.lock.write_text('{"token": "other", "pid": 1}',
-                                     encoding="utf-8")
-            return gone
-
-        with mock.patch.object(ps, "_lock_owner_is_alive", alive):
+        with ps.exclusive_lock(self.lock):
+            # Someone scribbles a convincing claim over our record.
+            self.lock.write_text(json.dumps(
+                {"token": "someone-else", "pid": 1, "started": "now"}),
+                encoding="utf-8")
             with self.assertRaises(ps.LockBusy):
-                with ps.exclusive_lock(self.lock, stale_after=3600):
-                    self.fail("took a lock another run was already holding")
-        self.assertIn("other", self.lock.read_text(encoding="utf-8"),
-                      "the other run's claim was deleted")
+                with ps.exclusive_lock(self.lock):
+                    self.fail("a rewritten record handed over ownership")
 
-    def test_a_claim_overwritten_the_instant_it_lands_is_not_ours(self):
-        """The last reclaim guard: read your own token back.
-
-        The compare-and-delete and the O_EXCL loser check each close one
-        ordering, but neither is atomic with respect to the OTHER process's
-        whole sequence — a run can create the lock and have it replaced before
-        it ever uses it. Reading the token back is what catches that, and a
-        mutation test showed nothing covered it: deleting the check left the
-        entire suite green.
-        """
-        self._make_stale()
-        real_open, real_close = bp.os.open, bp.os.close
-        state = {"opens": 0, "claim_fd": None}
-
-        def counting_open(path, flags, *a, **kw):
-            state["opens"] += 1
-            fd = real_open(path, flags, *a, **kw)
-            # Open 1 is the initial attempt (fails: the stale lock is there);
-            # open 2 is the reclaim's successful create.
-            if state["opens"] == 2 and Path(path) == self.lock:
-                state["claim_fd"] = fd
-            return fd
-
-        def replace_once_our_claim_is_written(fd):
-            real_close(fd)
-            # Only now is our record on disk and the handle gone: the other run
-            # replaces it before we ever look at it again.
-            if fd == state["claim_fd"]:
-                state["claim_fd"] = None
-                self.lock.write_text('{"token": "someone-else", "pid": 1}',
-                                     encoding="utf-8")
-
-        with mock.patch.object(bp.os, "open", counting_open), \
-                mock.patch.object(bp.os, "close", replace_once_our_claim_is_written):
+    def test_a_record_that_names_nobody_grants_nothing_either(self):
+        """A holder that died between taking the lock and writing its record
+        leaves an empty file. Empty must not read as free."""
+        with ps.exclusive_lock(self.lock):
+            self.lock.write_text("", encoding="utf-8")
             with self.assertRaises(ps.LockBusy):
-                with ps.exclusive_lock(self.lock, stale_after=3600):
-                    self.fail("proceeded holding a lock another run had taken")
-        self.assertIn("someone-else", self.lock.read_text(encoding="utf-8"),
-                      "the other run's record was clobbered on the way out")
+                with ps.exclusive_lock(self.lock):
+                    self.fail("an empty record handed over ownership")
 
-    def test_the_loser_of_a_reclaim_race_gets_the_ordinary_busy_answer(self):
-        """Both delete before either creates: O_EXCL decides, the loser backs off.
-
-        The loser used to take an uncaught FileExistsError out of the reclaim's
-        second _claim(), so callers that handle LockBusy saw a bare OSError from
-        a path that is simply "someone else got there first".
-        """
-        self._make_stale()
-        real_open = bp.os.open
-        calls = {"n": 0}
-
-        def racing_open(path, flags, *a, **kw):
-            calls["n"] += 1
-            # Call 1 is the opening claim (fails: the stale lock is still there).
-            # Call 2 is the reclaim's claim -- the other run wins it by a hair.
-            if calls["n"] == 2 and Path(path) == self.lock:
-                self.lock.write_text('{"token": "other", "pid": 1}',
-                                     encoding="utf-8")
-            return real_open(path, flags, *a, **kw)
-
-        with mock.patch.object(bp.os, "open", racing_open):
-            with self.assertRaises(ps.LockBusy):
-                with ps.exclusive_lock(self.lock, stale_after=3600):
-                    self.fail("claimed a lock another run had just taken")
+    def test_a_refusal_is_always_LockBusy_never_a_bare_oserror(self):
+        """Callers catch LockBusy. A refusal arriving as a raw OSError escapes
+        every one of them -- which is how the old reclaim path could abort a
+        publish with an unhandled FileExistsError."""
+        with ps.exclusive_lock(self.lock):
+            with self.assertRaises(ps.LockBusy) as caught:
+                with ps.exclusive_lock(self.lock):
+                    pass
+        self.assertIsInstance(caught.exception, RuntimeError)
+        self.assertNotIsInstance(caught.exception, OSError)
 
 
 class LockOwnership(unittest.TestCase):
@@ -207,17 +165,21 @@ class LockOwnership(unittest.TestCase):
         with ps.exclusive_lock(self.lock):         # no stale_after override
             pass                                   # must not raise
 
-    def test_a_lock_still_being_written_is_not_stolen(self):
-        """Why a grace exists at all, and why it may not be zero.
+    def test_an_unwritten_record_never_reads_as_a_free_lock(self):
+        """The old code claimed with O_CREAT|O_EXCL and wrote the record as a
+        SECOND step, so for an instant the record was empty and parsed as
+        "pid 0, i.e. dead". A timing grace existed only to paper over that gap.
 
-        Claiming is O_CREAT|O_EXCL and THEN a write, so for a moment the record
-        is empty and its pid parses as 0 -- which reads as 'dead'. A fresh lock
-        must survive that even though nothing in it says who owns it yet.
+        Taking the lock and owning it are now one OS call, so the gap is gone --
+        but a leftover empty file must still never be mistaken for permission
+        while somebody holds it.
         """
-        self.lock.write_text("", encoding="utf-8")   # claimed, not yet written
-        with self.assertRaises(ps.LockBusy):
-            with ps.exclusive_lock(self.lock):
-                self.fail("stole a lock that was still being claimed")
+        self.lock.write_text("", encoding="utf-8")
+        with ps.exclusive_lock(self.lock):          # nobody holds it: fine
+            self.lock.write_text("", encoding="utf-8")
+            with self.assertRaises(ps.LockBusy):
+                with ps.exclusive_lock(self.lock):
+                    self.fail("stole a lock whose record said nothing")
 
     def test_a_reclaimed_lock_is_not_deleted_by_the_old_holder(self):
         """The bug: the original holder unlinked the REPLACEMENT holder's lock."""

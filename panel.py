@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import sqlite3
 import subprocess
@@ -29,12 +28,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
-                              PER_SET)
-from emojikit.catalog import PHASH_BITS, Catalog
+from collection_state import PER_SET
+from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.media import (PREVIEW_FPS, lottie_preview_webp,
                             lottie_still_webp)
+from panel_view import build_view, packs_named
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -42,9 +41,7 @@ log = logging.getLogger("panel")
 
 _MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif",
          ".webm": "video/webm", ".tgs": "application/gzip"}
-FMT_ORDER = {"static": 0, "video": 1, "animated": 2}
 DEFAULT_PORT = 9450   # the panel's home port; panel_sandbox imports it
-LOGO_KEY = "__brand_logo__"  # pseudo content_key: preview-only, never saved/counted
 
 MAX_BODY = 4 * 1024 * 1024  # generous for an order list, small enough to bound
 
@@ -64,198 +61,6 @@ def _json_for_script(value) -> str:
     return (json.dumps(value)
             .replace("<", "\\u003c").replace(">", "\\u003e")
             .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
-
-
-def order_by_similarity(items: list) -> list:
-    """Greedy nearest-neighbour ordering by perceptual hash, grouped by format.
-
-    Items without a perceptual hash (e.g. animated .tgs) keep content order and
-    follow the hashed ones within their format group.
-    """
-    out: list = []
-    for fmt in sorted({it.fmt for it in items}, key=lambda f: FMT_ORDER.get(f, 9)):
-        group = [it for it in items if it.fmt == fmt]
-        hashed = [it for it in group if it.phash is not None]
-        plain = [it for it in group if it.phash is None]
-        if hashed:
-            # The walk stays quadratic on purpose: the greedy nearest-neighbour
-            # chain IS the look-alike grouping the panel is for, and every index
-            # that would make it sub-quadratic (LSH buckets, BK-tree pruning)
-            # changes which near-twin ends up next to which. Only the constant
-            # is negotiable, so the distance is inlined rather than called:
-            # ``(a ^ b).bit_count()`` is identity.hamming's exact result, and at
-            # n=3 600 dropping the per-pair call costs 0.48 s instead of 0.92 s
-            # for a byte-identical order. (Against the older string-building
-            # hamming it was 3.7 s.)
-            # ponytail: O(n^2) scan; revisit only if a catalog grows past ~10k
-            # items AND a different grouping is acceptable.
-            remaining = hashed[:]
-            ordered = [remaining.pop(0)]
-            hashes = [it.phash for it in remaining]
-            last = ordered[0].phash
-            while remaining:
-                best, best_d = 0, PHASH_BITS + 1
-                for i, h in enumerate(hashes):
-                    d = (h ^ last).bit_count()
-                    if d < best_d:
-                        best, best_d = i, d
-                        if d == 0:
-                            break   # nothing beats 0, and min() takes the first
-                ordered.append(remaining.pop(best))
-                last = hashes.pop(best)
-            out.extend(ordered)
-        out.extend(plain)
-    return out
-
-
-# The collector labels an ingested emoji "premium-id:<id>", and that id is the
-# one thing anyone wants off this page. Decided here rather than by a regex
-# inside the page's JavaScript, so it can actually be tested.
-_PREMIUM_ID = re.compile(r"^premium-id:(\d+)$")
-
-
-def copy_id_for(label: str) -> str:
-    """The id a label offers for copying, or "" when it offers none.
-
-    Anchored on purpose: "xpremium-id:12" and "premium-id:12x" are not ids, and
-    a label that merely CONTAINS digits is not one either.
-    """
-    m = _PREMIUM_ID.match(label or "")
-    return m.group(1) if m else ""
-
-
-def packs_named(data_dir: Path, wanted: set[int]) -> dict[str, int]:
-    """``{set name: pack index}`` for the given indices, across every family.
-
-    Read from the publishers' own state files: the index is theirs, and
-    deriving a name from the base plus a number would guess at a convention
-    the state file already records exactly.
-
-    The index travels WITH the name because the grid has to draw the boundary
-    between two already-published packs, and their real sizes (95 and 96, say)
-    have nothing to do with the per-set capacity the splits are otherwise
-    computed from. A dict is still a container of names, so every membership
-    test on it reads the same as before.
-    """
-    names: dict[str, int] = {}
-    for state in sorted(data_dir.glob("publish_*.json")):
-        try:
-            data = json.loads(state.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            log.debug("could not read %s: %s", state.name, exc)
-            continue
-        for rec in data.get("sets") or []:
-            if rec.get("index") in wanted and rec.get("name"):
-                names[rec["name"]] = int(rec["index"])
-    return names
-
-
-def build_view(cat: Catalog, bot_username: str = "",
-               show_published: bool = False,
-               keep_sets: dict[str, int] | None = None) -> tuple[list[dict], dict, int]:
-    """The cards to render, and where each one's file lives.
-
-    An emoji already live in a pack is hidden by default: the grid is what the
-    NEXT pack gets made of, and `is_published` skips those items at publish
-    time however they are ticked here, so showing them only invites pruning
-    work that changes nothing.
-
-    This was "hide only a FULL set" for one round, on the theory that a set
-    still being filled is still the pack being built. `--new-set` ended that --
-    a pack can now be left half-empty on purpose, so "full" stopped meaning
-    "finished" and the owner kept meeting an abandoned pack's emoji in the grid
-    for the next one. Being published is the property that actually settles it,
-    and it needs no state file and no capacity arithmetic.
-
-    Hidden, never deleted -- those rows are what dedup recognises a re-download
-    by, what maps a source premium id to ours, and what `sync_order` reads to
-    re-sort a live set. ``show_published`` (``panel.py --all``) brings them
-    back, which is how you reorder a pack that is already published.
-
-    ``keep_sets`` (``panel.py --with-pack N``) is the narrow version of that:
-    it un-hides ONE published set so its emoji can be arranged beside the new
-    candidates going into it. `--all` is the wrong tool for that -- it also
-    brings back every finished pack, which here is hundreds of cards you cannot
-    act on.
-    """
-    # First time only: seed the manual order with the look-alike-grouped
-    # similarity order (a nice starting point). After that, always use the saved
-    # position order so the user's drag-drop arrangement is what shows/publishes.
-    if cat.get_meta("order_seeded") != "1":
-        seeded = order_by_similarity(cat.all_items())
-        cat.set_order([it.content_key for it in seeded])
-        cat.set_meta("order_seeded", "1")
-    items = cat.all_items()  # saved manual/seeded order (by position)
-    hidden = 0
-    pack_of: dict[str, int] = {}
-    if not show_published:
-        live = cat.published_keys()
-        if keep_sets:
-            # published_set_names() is the right lookup HERE and not in the
-            # plain filter above: this asks "which set", where a row with no
-            # recorded set name is genuinely unanswerable, so it stays hidden.
-            where = cat.published_set_names()
-            live = {k for k in live if where.get(k) not in keep_sets}
-            pack_of = {k: keep_sets[n] for k, n in where.items() if n in keep_sets}
-        keep = [it for it in items if it.content_key not in live]
-        hidden = len(items) - len(keep)
-        items = keep
-
-    view = []
-    by_key: dict[str, Path] = {}
-
-    logo_path = Path(BRAND_LOGO_DEFAULT)
-    branded = bot_username.lower() in BRAND_LOGO_BOTS and logo_path.is_file()
-    if branded and not keep_sets:
-        # Preview-only: shows where the brand logo will be inserted on publish.
-        # It is NOT part of the catalog, is never counted in the totals, is not
-        # clickable/toggleable, and is never sent to /api/save.
-        view.append({
-            "key": LOGO_KEY, "fmt": "static", "label": "Brand logo (auto-added on publish)",
-            "emoji": "", "included": True, "isLogo": True,
-        })
-        by_key[LOGO_KEY] = logo_path
-
-    for it in items:
-        label = (it.keywords[0] if it.keywords else
-                 (it.emojis[0] if it.emojis else it.content_key[2:10]))
-        card = {
-            "key": it.content_key,
-            "fmt": it.fmt,
-            "label": label,
-            "copyId": copy_id_for(label),
-            "emoji": it.emojis[0] if it.emojis else "",
-            "included": it.included,
-        }
-        # Only for an emoji that is ALREADY live somewhere: the grid then draws
-        # its boundaries from real membership instead of capacity arithmetic,
-        # which cannot find the seam between two packs of unequal size.
-        if (n := pack_of.get(it.content_key)) is not None:
-            card["pack"] = n
-        view.append(card)
-        by_key[it.content_key] = Path(it.file_path)
-
-    if branded and keep_sets:
-        # Every one of these packs ALREADY carries the brand logo as its
-        # emoji 0 -- it went up when the pack was created. The single card
-        # above sits at the top of the GRID, so with more than one pack on
-        # screen it lands on whichever is shown first and leaves the others
-        # looking like they never got one; pack 5 was accused of exactly
-        # that. One card at the head of each pack's run is what is live.
-        out, seen = [], set()
-        for card in view:
-            n = card.get("pack")
-            if n is not None and n not in seen:
-                seen.add(n)
-                key = f"__logo_pack_{n}__"
-                out.append({"key": key, "fmt": "static",
-                            "label": f"Brand logo (live in pack {n})",
-                            "emoji": "", "included": True, "isLogo": True,
-                            "pack": n})
-                by_key[key] = logo_path
-            out.append(card)
-        view = out
-    return view, by_key, hidden
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
@@ -533,12 +338,29 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 return
 
             if self.path == "/api/save":
-                if set(payload) - {"excluded"}:
+                if set(payload) - {"excluded", "known"}:
                     self._send(400, b'{"error":"unknown keys"}')
                     return
                 raw = payload.get("excluded", [])
                 if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
                     self._send(400, b'{"error":"excluded must be a list of keys"}')
+                    return
+                # WHAT THE TAB COULD SEE. `excluded` is full-state -- every key
+                # it does not name becomes included -- so without a scope a tab
+                # speaks for emoji it has never heard of. A page opened before
+                # `fetch_emoji_ids.py` added an item, or before the owner
+                # deselected one in another tab, would silently re-include it
+                # and answer {"ok": true}.
+                scope_raw = payload.get("known")
+                if not isinstance(scope_raw, list) or not all(
+                        isinstance(k, str) for k in scope_raw):
+                    # An old page cannot tell us what it was showing, and there
+                    # is no safe way to guess. Refusing is recoverable with one
+                    # reload; guessing loses a selection nobody sees go.
+                    self._send(409, json.dumps({
+                        "error": "this page is from an older panel run and "
+                                 "cannot say which emoji it was showing; "
+                                 "reload the page and save again"}).encode())
                     return
                 # ``known`` MUST be read under the lock: /api/order sorts
                 # ``view`` in place and CPython empties a list for the duration
@@ -547,23 +369,30 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # set_inclusion(set()) re-included every row -- discarding the
                 # whole de-selection while still answering {"ok": true}.
                 with lock:
-                    known = {v["key"] for v in view if not v.get("isLogo")}
-                    excluded = set(raw) & known
+                    # Two narrowings, for two different reasons. The view is
+                    # what the server currently has; the tab's `known` is what
+                    # this particular page was actually looking at. Only their
+                    # intersection is a decision this request is entitled to
+                    # make -- everything else keeps whatever the catalog says.
+                    live = {v["key"] for v in view if not v.get("isLogo")}
+                    scope = set(scope_raw) & live
+                    excluded = set(raw) & scope
                     cat = Catalog(db_path)
                     try:
-                        # A FILTERED view can only speak for what it shows.
+                        # Outside the scope, carry the CURRENT state through.
                         # set_inclusion re-includes every key it is not given,
-                        # so saving from a grid that hides finished packs would
-                        # silently re-include every hidden item that had been
-                        # deselected. Carry their current state through.
-                        hidden_excluded = {
+                        # so a grid that hides finished packs -- or a tab that
+                        # predates an ingest -- would otherwise re-include
+                        # every deselected item it cannot see.
+                        outside_excluded = {
                             it.content_key for it in cat.all_items()
-                            if not it.included and it.content_key not in known}
-                        inc, exc = cat.set_inclusion(excluded | hidden_excluded)
+                            if not it.included and it.content_key not in scope}
+                        inc, exc = cat.set_inclusion(excluded | outside_excluded)
                     finally:
                         cat.close()
                     for v in view:
-                        v["included"] = v["key"] not in excluded
+                        if v["key"] in scope:
+                            v["included"] = v["key"] not in excluded
                 self._send(200, json.dumps({"ok": True, "included": inc, "excluded": exc}).encode())
                 return
 
