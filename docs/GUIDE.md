@@ -723,13 +723,16 @@ it never performed:
 | accepted | Telegram said the file is uploadable. | — |
 | refused | Telegram rejected it (`BotApiError`); the message is printed. | exit 1 |
 | missing | The catalog row points at a file that is not on disk. | exit 1 |
-| not checked | The request never reached Telegram (transport). | exit 3 if anything was accepted, otherwise exit 1 |
+| not checked | The request never reached Telegram (transport). | exit 3 |
 
-The last row is the one that matters. A dropped connection is **not** a verdict
-on the artwork, so it is never reported as a refusal — and it is never reported
-as an acceptance either. The old counter counted attempts, so a run in which
-every single check failed at the transport printed "all accepted" and exited 0.
-`tests/test_preflight_outcomes.py` pins each of the four.
+The last row is the one that matters, and the count of unreachable files does
+not change it. A dropped connection is **not** a verdict on the artwork, so it
+is never reported as a refusal — exit 1 is what a refusal returns, and
+answering a lost connection with it sends someone editing artwork that was
+never the problem. It is not reported as an acceptance either: the old counter
+counted attempts, so a run in which every single check failed at the transport
+printed "all accepted" and exited 0. Exit 3 says the one true thing — the run
+did not finish asking. `tests/test_preflight_outcomes.py` pins each of the four.
 
 **Leaving a pack unfinished (`--new-set`).** Normally set *N+1* opens only when
 set *N* reaches `--per-set`, so a pack you want to stop early has no way
