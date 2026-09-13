@@ -8,6 +8,22 @@ on:
 permissions:
   contents: read
 
+# Every job runs on the self-hosted runner, not on `ubuntu-latest`: this
+# account's GitHub-hosted minutes are blocked, and a hosted job fails in two
+# seconds with no runner, no steps and no log -- a red X that says nothing
+# about the code. A self-hosted runner is not subject to that block.
+#
+# The runner is a WSL Ubuntu box. Its system packages (ffmpeg, the Chromium
+# libraries) are installed ONCE, globally, and shared with every other runner
+# on the machine; `AGENT_TOOLSDIRECTORY` points the setup-python/setup-node
+# downloads at one shared tool cache for the same reason. Only the runner's
+# own working directory is per-repository.
+#
+# Consequence to respect: a self-hosted runner is NOT a fresh machine. It has
+# no passwordless sudo, so no step here may install a system package -- add it
+# to the runner's global setup instead. State also survives between jobs, so
+# nothing may depend on starting from an empty disk.
+
 jobs:
   # The Worker is TypeScript with its own vitest suite. Its own job rather than
   # a step in `build`: it shares nothing with the Python matrix, needs Node
@@ -15,7 +31,7 @@ jobs:
   # would be pure waste. A separate job also means a Worker failure is legible
   # as a Worker failure.
   worker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 10
     defaults:
       run:
@@ -23,12 +39,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No `cache: npm`. The post-job cache upload goes to GitHub's Actions
+      # cache service, which this account's block gates the same way it gates
+      # hosted runners: every real step passed and the job then sat in
+      # "Post Set up Node" until the timeout, turning a green run into a red
+      # one that said nothing. It buys nothing here anyway -- the runner is
+      # persistent, so npm's own `~/.npm` survives between jobs on disk.
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
 
       # `npm ci`, never `npm install`: it installs exactly the committed
       # lockfile and fails if package.json and the lock disagree, so CI cannot
@@ -47,8 +67,50 @@ jobs:
       - name: Unit tests (vitest)
         run: npx vitest run
 
+  # The panel's browser suite drives the real page in headless Chromium. Its own
+  # job for the same reason as the Worker's: it tests JavaScript, so running it
+  # once per Python version would download Chromium twice to prove the same
+  # thing. The `build` matrix therefore opts out of it explicitly -- the module
+  # is a hard error, never a silent skip, when the browser is missing, so the
+  # opt-out has to be stated somewhere rather than left to chance.
+  panel-browser:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # No --with-deps: that flag runs apt-get under sudo, and this runner has
+      # no passwordless sudo, so it would sit on a password prompt until the
+      # job timeout. Chromium's system libraries are part of the runner's
+      # global setup; only the browser build is fetched here, into the shared
+      # tool cache, and only when that version is not already there.
+      - name: Install Chromium
+        run: python -m playwright install chromium
+
+      # -t . for the same reason as everywhere else: it is what makes
+      # tests/__init__.py run, and that file is the credential scrub and the
+      # non-loopback socket block.
+      - name: Panel browser tests
+        run: python -m unittest discover -s tests -t . -p "test_panel_browser.py" -v
+
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
+    # The panel's browser suite has its own job above. Opting out here is
+    # deliberate and must stay explicit: test_panel_browser.py raises rather
+    # than skipping when playwright or Chromium is missing, because a browser
+    # test that reports green on a machine with no browser is worse than none.
+    env:
+      EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
     strategy:
       matrix:
         # 3.11 is the runtime run.ps1 / .venv target; 3.12 guards against the
@@ -72,8 +134,19 @@ jobs:
           pip install -r requirements.txt -r requirements-coins.txt
           pip install ruff
 
-      - name: Install ffmpeg (for video emoji tests)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # CHECKED, not installed. The runner has no passwordless sudo, so an
+      # apt-get here would sit on a password prompt until the job timeout --
+      # twenty minutes of nothing, reported as a hang. ffmpeg is part of the
+      # runner's global setup, shared with every other runner on the machine;
+      # this step's job is to say so out loud when it is missing, in seconds.
+      - name: Check ffmpeg is on the runner
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            echo "::error::ffmpeg/ffprobe missing on this runner."
+            echo "Install it once, globally: sudo apt-get install -y ffmpeg"
+            exit 1
+          fi
+          ffmpeg -version | head -1
 
       # Before the suite: a syntax-level finding should fail in seconds, not
       # after 70 s of tests. No arguments -- ruff.toml owns the rule set, and a

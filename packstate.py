@@ -104,18 +104,28 @@ class LockBusy(RuntimeError):
 
 
 LOCK_DIR = ROOT / ".locks"
-# How old a lock must be before a run whose holder is PROVABLY GONE may take it.
-# Both conditions are required, and the liveness check is the one carrying the
-# safety: a live holder is never stolen from at any age. This grace exists only
-# to cover claiming being two steps -- O_CREAT|O_EXCL, then a separate write --
-# because during that window the record is empty and its pid parses as 0, which
-# reads as "dead". Seconds cover a window measured in microseconds.
-#
-# It was six hours, which had nothing left to protect once the liveness check
-# was added, and which locked the owner out of resuming a publish they had just
-# stopped themselves: the holder was dead, the work was half done, and the only
-# way forward was to wait or to delete a lock file by hand.
+# Kept only so callers and tests that pass it keep working. Ownership is no
+# longer decided by age or by a liveness probe -- see exclusive_lock -- so this
+# number governs nothing. It survives as the documented default for the one
+# thing age is still good for: telling a user how long the holder has been there.
 LOCK_STALE_AFTER = 120
+
+# The lock is taken on a byte far past any metadata this file will ever hold.
+# Windows byte-range locks are MANDATORY: locking byte 0 would make the record
+# unreadable to the very process that needs to name the holder in its error
+# message. Locking beyond the written region leaves the record readable to
+# everyone and still gives us a unique byte to contend for. Locking a range
+# past EOF is legal and is the standard way to do this.
+_LOCK_BYTE = 4096
+# Fixed width, space padded, always written at offset 0. A short record written
+# over a longer one would otherwise leave the tail of the old one behind and
+# the JSON would not parse.
+_RECORD_WIDTH = 512
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 def pack_family_lock_path(base: str) -> Path:
@@ -179,17 +189,42 @@ def _lock_owner_is_alive(pid: int) -> bool:
 def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
     """Exclusive lock so two runs cannot mutate one pack family at once.
 
-    Ownership is explicit. The file records a unique token, and the holder
-    removes the lock only if that token is still the one on disk -- previously a
-    long but healthy run could have its lock "reclaimed" as stale by a second
-    process, and would then delete the *replacement* holder's lock on the way
-    out, leaving both free to mutate. A stale lock is only taken over when its
-    recorded process is genuinely gone: age alone never condemns a lock, however
-    long its holder has been running.
+    THE OPERATING SYSTEM owns the exclusion, for the whole critical section:
+    ``flock`` on POSIX, a byte-range lock through ``msvcrt`` on Windows. The
+    lock file itself is only a stable target to contend for, plus a place to
+    record who is holding it; its CONTENTS confer nothing.
 
-    Yields a ``heartbeat`` callable that refreshes the mtime. No caller uses it
-    -- liveness, not age, is what protects a long run -- so do not build on it
-    without checking that it is actually being called.
+    That is a deliberate replacement of a check-read-unlink protocol, which
+    could admit two publishers at once through its own recovery path. The
+    interleaving, proved with two real processes: A reads the dead holder's
+    record, judges it stale and pauses just before the unlink; B reads the same
+    record, reclaims, verifies its own token and enters; A resumes, unlinks
+    B's LIVE claim, creates its own, reads its own token back -- and enters
+    too. Every guard there was a compare-then-act on a file two processes can
+    change between the compare and the act, so adding a fourth token check
+    could never have closed it. An OS lock has no such window.
+
+    Consequences worth knowing:
+
+    * **The file is never deleted.** Unlinking is what would reintroduce the
+      hole: two processes can each hold a lock on a different inode at the same
+      path and both believe they are alone. A leftover lock file is not a held
+      lock, and costs nothing.
+    * **A crash releases the lock**, because the OS drops it when the process
+      exits and its handle closes. There is nothing to reclaim and no age to
+      judge, which is why ``stale_after`` no longer decides anything.
+    * **Not reentrant.** A second acquisition in the same process opens a second
+      handle and the OS refuses it, exactly as it refuses another process. The
+      project-wide lock ORDER (pack family first, then the canonical map)
+      therefore still matters; see `tests/test_lock_order.py`.
+    * **Unknown failure refuses.** If the lock cannot be taken for a reason
+      that is not "someone holds it" -- a filesystem with no locking, a
+      permission error -- this raises ``LockBusy`` rather than proceeding.
+      Never granting ownership is the conservative answer.
+
+    Yields a ``heartbeat`` callable that refreshes the mtime. No caller uses it;
+    it exists so a human reading the file can see how long the holder has been
+    there, and it no longer has any bearing on ownership.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,94 +232,98 @@ def exclusive_lock(path: Path, *, stale_after: float = LOCK_STALE_AFTER):
     record = json.dumps({"token": token, "pid": os.getpid(),
                          "started": _utc_now()})
 
-    def _claim() -> None:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    # O_CREAT without O_EXCL, and never O_TRUNC: the file may already exist,
+    # possibly held by someone else, and truncating it would destroy the record
+    # naming the holder we are about to report.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    try:
+        _take_os_lock(fd, path)
+    except BaseException:
+        os.close(fd)
+        raise
+
+    try:
+        # Only now, holding the lock, does the record become ours to write.
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, record.ljust(_RECORD_WIDTH).encode("utf-8"))
+
+        def heartbeat() -> None:
+            """Refresh the mtime, for a human reading `ls -l` on .locks/."""
+            try:
+                os.utime(path, None)
+            except OSError:
+                pass
+
+        yield heartbeat
+    finally:
+        # Release explicitly rather than relying on close: on Windows the two
+        # are not the same call, and an unreleased range on a reused handle is
+        # a hang waiting to happen.
         try:
-            os.write(fd, record.encode("utf-8"))
+            _drop_os_lock(fd)
         finally:
             os.close(fd)
 
-    try:
-        _claim()
-    except FileExistsError:
-        held = {}
-        stale_record = None       # the EXACT bytes judged stale, for the CAS below
-        try:
-            stale_record = path.read_text(encoding="utf-8")
-            held = json.loads(stale_record)
-        except (OSError, ValueError):
-            pass
-        age = 0.0
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            pass
-        holder_pid = int(held.get("pid") or 0)
-        if age < stale_after or _lock_owner_is_alive(holder_pid):
-            # from None: the FileExistsError above is not a failure, it IS the
-            # expected finding ("someone holds this"). Chaining it prints
-            # "During handling of the above exception..." over a routine
-            # outcome, which reads like a bug in the handler.
-            raise LockBusy(
-                f"{path.name} is held by pid {holder_pid or '?'} "
-                f"(started {held.get('started', 'unknown')}, {age:.0f}s ago). "
-                f"Refusing to mutate the same pack family concurrently.") from None
-        print(f"  reclaiming lock {path.name}: pid {holder_pid} is gone "
-              f"({age:.0f}s old)", flush=True)
-        # Reclaiming is the one path where two processes can both decide to act:
-        # they read the SAME stale record, and an unconditional unlink + create
-        # let the second one delete the first one's freshly claimed lock and
-        # take the family for itself -- two live holders, which is precisely
-        # what this lock exists to prevent, arrived at through its recovery path.
-        #
-        # Three guards, because each closes a different order of events:
-        #   1. delete only while the stale record we judged is still the one on
-        #      disk, so a process that read the OLD record cannot remove a NEW
-        #      holder's claim;
-        #   2. O_EXCL still decides the winner if both delete before either
-        #      creates -- the loser must back off, not claim on top;
-        #   3. read our own token back, because neither check above is atomic
-        #      with respect to the other process's whole sequence.
-        try:
-            if path.read_text(encoding="utf-8") == stale_record:
-                path.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            pass
-        try:
-            _claim()
-        except FileExistsError:
-            raise LockBusy(
-                f"{path.name} was reclaimed by another run while this one was "
-                f"reclaiming it too. Refusing to mutate the same pack family "
-                f"concurrently.") from None
-        try:
-            mine = path.read_text(encoding="utf-8") == record
-        except OSError:
-            mine = False
-        if not mine:
-            raise LockBusy(
-                f"{path.name} was taken by another run immediately after this "
-                f"one claimed it. Refusing to mutate the same pack family "
-                f"concurrently.") from None
 
-    def heartbeat() -> None:
-        """Refresh the mtime so a healthy long run is never judged stale."""
-        try:
-            if path.read_text(encoding="utf-8") == record:
-                os.utime(path, None)
-        except OSError:
-            pass
-
+def _take_os_lock(fd: int, path: Path) -> None:
+    """Take the OS lock, or raise LockBusy naming whoever has it."""
     try:
-        yield heartbeat
-    finally:
-        # Remove the lock ONLY if we still own it. If another process reclaimed
-        # it, deleting would hand a third process a free pass.
-        try:
-            if path.read_text(encoding="utf-8") == record:
-                path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if os.name == "nt":
+            os.lseek(fd, _LOCK_BYTE, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise LockBusy(_busy_message(path, exc)) from None
+
+
+def _drop_os_lock(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            os.lseek(fd, _LOCK_BYTE, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass          # closing the handle releases it anyway
+
+
+def _busy_message(path: Path, exc: OSError) -> str:
+    """Name the holder from the record, which is a HINT and not the authority.
+
+    The OS says someone holds the lock; the record only says who wrote it last.
+    Those can disagree two ways -- a holder that crashed between taking the lock
+    and writing its record leaves the PREVIOUS run's text behind, and a holder
+    that finishes while this message is being built was real a moment ago -- so
+    the liveness probe is reported as the observation it is and never turned
+    into a claim about which of those happened.
+    """
+    held: dict = {}
+    try:
+        held = json.loads(path.read_text(encoding="utf-8").strip() or "{}")
+    except (OSError, ValueError):
+        pass
+    pid = 0
+    try:
+        pid = int(held.get("pid") or 0)
+    except (TypeError, ValueError):
+        pass
+    age = ""
+    try:
+        age = f", {time.time() - path.stat().st_mtime:.0f}s ago"
+    except OSError:
+        pass
+
+    if pid and _lock_owner_is_alive(pid):
+        who = f"pid {pid} (started {held.get('started', 'unknown')}{age})"
+    elif pid:
+        who = (f"another run (the lock file names pid {pid}, which was not "
+               f"running when this was checked -- it either finished just now "
+               f"or never wrote its own record)")
+    else:
+        who = "another run"
+    return (f"{path.name} is held by {who}. "
+            f"Refusing to mutate the same pack family concurrently. [{exc.strerror or exc}]")
 
 
 def _utc_now() -> str:

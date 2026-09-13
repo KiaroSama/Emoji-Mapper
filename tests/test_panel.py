@@ -29,6 +29,7 @@ from tests._panel_fixtures import ROOT, _make_png
 sys.path.insert(0, str(ROOT))
 
 import panel as p
+import panel_view as pv
 from emojikit.catalog import Catalog
 from emojikit.identity import hamming
 
@@ -49,8 +50,8 @@ class BrandLogoPreview(unittest.TestCase):
         self.tmp.cleanup()
 
     def _view(self, bot_username: str, logo_file: Path | None):
-        target = str(logo_file) if logo_file else p.BRAND_LOGO_DEFAULT
-        with mock.patch.object(p, "BRAND_LOGO_DEFAULT", target):
+        target = str(logo_file) if logo_file else pv.BRAND_LOGO_DEFAULT
+        with mock.patch.object(pv, "BRAND_LOGO_DEFAULT", target):
             with Catalog(self.cat_path) as cat:
                 view, by_key, _hidden = p.build_view(cat, bot_username)
                 return view, by_key
@@ -60,8 +61,8 @@ class BrandLogoPreview(unittest.TestCase):
         _make_png(logo)
         view, by_key = self._view("GodVerifyEmojiMapperbot", logo)
         self.assertTrue(view[0]["isLogo"])
-        self.assertEqual(view[0]["key"], p.LOGO_KEY)
-        self.assertEqual(by_key[p.LOGO_KEY], logo)
+        self.assertEqual(view[0]["key"], pv.LOGO_KEY)
+        self.assertEqual(by_key[pv.LOGO_KEY], logo)
         # The 3 real catalog items still follow, none marked as logo.
         self.assertEqual(len(view), 4)
         self.assertTrue(all(not v.get("isLogo") for v in view[1:]))
@@ -214,7 +215,7 @@ class SaveDuringReorder(unittest.TestCase):
         reorder = threading.Thread(target=run, args=(
             "order", "/api/order", {"order": list(reversed(keys))}), daemon=True)
         save = threading.Thread(target=run, args=(
-            "save", "/api/save", {"excluded": excluded}), daemon=True)
+            "save", "/api/save", {"excluded": excluded, "known": keys}), daemon=True)
 
         reorder.start()
         self.assertTrue(self.sorting.wait(timeout=30), "reorder never reached sort")
@@ -320,7 +321,8 @@ class CatalogUnavailable(unittest.TestCase):
             return e.code, json.loads(e.read() or b"{}")
 
     def test_save_answers_503(self):
-        code, body = self._post("/api/save", {"excluded": ["s:item0"]})
+        code, body = self._post("/api/save", {"excluded": ["s:item0"],
+                                              "known": ["s:item0"]})
         self.assertEqual(code, 503)
         self.assertIn("catalog unavailable", body["error"])
 
@@ -341,7 +343,7 @@ class _Fake:
 def _reference_order(items: list) -> list:
     """The original greedy walk, written against ``identity.hamming``."""
     out: list = []
-    for fmt in sorted({it.fmt for it in items}, key=lambda f: p.FMT_ORDER.get(f, 9)):
+    for fmt in sorted({it.fmt for it in items}, key=lambda f: pv.FMT_ORDER.get(f, 9)):
         group = [it for it in items if it.fmt == fmt]
         hashed = [it for it in group if it.phash is not None]
         plain = [it for it in group if it.phash is None]
@@ -382,12 +384,12 @@ class SimilarityOrder(unittest.TestCase):
             with self.subTest(seed=seed):
                 items = self._items(seed)
                 self.assertEqual(
-                    [id(x) for x in p.order_by_similarity(items)],
+                    [id(x) for x in pv.order_by_similarity(items)],
                     [id(x) for x in _reference_order(items)])
 
     def test_unhashed_items_follow_their_format_group(self):
         items = [_Fake("animated", None), _Fake("static", 1), _Fake("static", 2)]
-        out = p.order_by_similarity(items)
+        out = pv.order_by_similarity(items)
         self.assertEqual([it.fmt for it in out], ["static", "static", "animated"])
 
 
@@ -395,13 +397,13 @@ class CopyTheEmojiId(unittest.TestCase):
     """Clicking the id under a card copies it, and does not toggle the card."""
 
     def test_only_a_whole_premium_id_label_is_copyable(self):
-        self.assertEqual(p.copy_id_for("premium-id:5406926593698312391"),
+        self.assertEqual(pv.copy_id_for("premium-id:5406926593698312391"),
                          "5406926593698312391")
         # Anchored: a label that merely contains the prefix or trails junk is
         # not an id, and offering it would put the wrong thing on the clipboard.
         for junk in ("xpremium-id:12", "premium-id:12x", "premium-id:",
                      "premium-id:12 34", "", "coin logo", "premium-id:abc"):
-            self.assertEqual(p.copy_id_for(junk), "", junk)
+            self.assertEqual(pv.copy_id_for(junk), "", junk)
 
     def test_the_view_carries_the_id_for_the_page(self):
         tmp = tempfile.TemporaryDirectory()
@@ -640,7 +642,7 @@ class OnePackCanBeUnhidden(unittest.TestCase):
                                             p.packs_named(self.data, {1, 2}))
         logos = [v for v in view if v.get("isLogo")]
         self.assertEqual([v["pack"] for v in logos], [1, 2])
-        self.assertNotIn(p.LOGO_KEY, {v["key"] for v in logos},
+        self.assertNotIn(pv.LOGO_KEY, {v["key"] for v in logos},
                          "the 'auto-added on publish' card is for a NEW pack")
         for v in logos:
             self.assertIn(v["key"], by_key, "the card needs art to show")
@@ -655,8 +657,8 @@ class OnePackCanBeUnhidden(unittest.TestCase):
         with Catalog(self.db) as cat:
             view, _bk, _h = p.build_view(cat, "GodVerifyEmojiMapperbot", False, None)
         logos = [v for v in view if v.get("isLogo")]
-        self.assertEqual([v["key"] for v in logos], [p.LOGO_KEY])
-        self.assertEqual(view[0]["key"], p.LOGO_KEY, "always first")
+        self.assertEqual([v["key"] for v in logos], [pv.LOGO_KEY])
+        self.assertEqual(view[0]["key"], pv.LOGO_KEY, "always first")
 
     def test_an_unnamed_pack_tags_nothing(self):
         """Without --with-pack there is no membership to draw, by design."""

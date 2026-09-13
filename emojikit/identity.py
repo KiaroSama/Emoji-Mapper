@@ -26,7 +26,7 @@ from PIL import Image, ImageChops, ImageStat
 # time, so a test patching media._run to count ffmpeg launches would no
 # longer be seen from here -- and counting those launches is exactly what
 # fingerprint()'s one-pass guarantee is pinned by.
-from emojikit import media
+from emojikit import media, video_decode
 
 log = logging.getLogger("emojikit.identity")
 
@@ -58,7 +58,7 @@ UPLOAD_PHASH_TOLERANCE = 6
 UPLOAD_MEAN_DELTA = 8.0
 
 
-def _premultiplied(path: Path, n: int = 64) -> Image.Image:
+def _premultiplied(path: Path, n: int = 64, *, fmt: str = "static") -> Image.Image | None:
     """A 64x64 RGBA render with each colour scaled by its own alpha.
 
     RGB underneath a fully transparent pixel is undefined and encoders rewrite
@@ -68,7 +68,17 @@ def _premultiplied(path: Path, n: int = 64) -> Image.Image:
     collapses every transparent pixel to the same value, so only what can
     actually be seen is compared.
     """
-    img = Image.open(path).convert("RGBA").resize((n, n), Image.LANCZOS)
+    if fmt == "video":
+        # Pillow cannot open a .webm at all. This used to be an unconditional
+        # `Image.open`, so the colour half of same_image() raised for EVERY
+        # video pair and the result was permanently "undecidable" -- a
+        # re-encoded video could never be confirmed to be our own sticker.
+        img = _first_video_frame(path)
+        if img is None:
+            return None
+    else:
+        img = Image.open(path).convert("RGBA")
+    img = img.convert("RGBA").resize((n, n), Image.LANCZOS)
     r, g, b, a = img.split()
     return Image.merge("RGBA", (ImageChops.multiply(r, a),
                                 ImageChops.multiply(g, a),
@@ -106,7 +116,10 @@ def same_image(a: Path, b: Path, fmt: str) -> bool | None:
             return None
         if hamming(ha, hb) > UPLOAD_PHASH_TOLERANCE:
             return False
-        diff = ImageChops.difference(_premultiplied(a), _premultiplied(b))
+        pa, pb = _premultiplied(a, fmt=fmt), _premultiplied(b, fmt=fmt)
+        if pa is None or pb is None:
+            return None          # could not look; unknown is not false
+        diff = ImageChops.difference(pa, pb)
         return sum(ImageStat.Stat(diff).mean) / 4.0 <= UPLOAD_MEAN_DELTA
     except Exception as exc:     # noqa: BLE001 - a failed probe is not a "no"
         log.debug("same_image(%s, %s) failed: %s", a.name, b.name, exc)
@@ -153,37 +166,13 @@ def _video_content_digest(path: Path) -> str:
 
 
 def _video_frames_rgba(path: Path) -> bytes:
-    """The normalized frame stream BOTH video identity keys are built from.
+    """The canonical sample stream. See `emojikit.video_decode` for the rules.
 
-    One helper, not two copies of the ffmpeg call: fingerprint() used to carry
-    its own, and when the single-frame retry was added to the digest alone the
-    two silently disagreed -- the same file getting one key from content_key()
-    and a different one from fingerprint(), which is the identity bug this
-    project exists to avoid.
-
-    Failure is NOT caught here. A hung or timed-out ffmpeg is "I could not
-    look", and turning that into an empty sample would turn it into a byte
-    hash -- a key that looks fine, never dedups, and hides the timeout.
-    fingerprint() used to swallow it exactly that way. Let MediaError out;
-    every ingest site already fails that one item and counts it.
-
-    An EMPTY result from a SUCCESSFUL run is different: the file decoded, it
-    just produced no frames at this sampling rate. That is the case the retry
-    below is for, and the byte-hash fallback in the callers remains only for a
-    file that genuinely renders nothing.
+    Kept as a name here because content_key, fingerprint, perceptual_hash and
+    same_image all reach for it; the decoding itself lives in one module so the
+    alpha-capable decoder and the sampling rate cannot drift apart again.
     """
-    ff = media.ffmpeg_path()
-
-    def sample(rate_filter: str) -> bytes:
-        cmd = [ff, "-v", "error", "-t", str(media.WEBM_MAX_SECONDS), "-i", str(path),
-               "-an", "-vf", f"{rate_filter}scale=64:64,format=rgba",
-               "-f", "rawvideo", "-"]
-        return media._run(cmd, capture=True).stdout or b""
-
-    # fps=10 is what makes two encodes of the same clip agree. A single-frame
-    # video is shorter than one sampling interval and yields NOTHING, so retry
-    # at the file's own frames before giving up on a content key.
-    return sample("fps=10,") or sample("")
+    return video_decode.frames_rgba(path)
 
 
 def _animated_content_digest(path: Path) -> str:
@@ -207,6 +196,8 @@ def perceptual_hash(path: Path, fmt: str) -> int | None:
             img = Image.open(path)
         elif fmt == "video":
             img = _first_video_frame(path)
+            if img is None:
+                return None
         else:
             return None
     except Exception as exc:  # noqa: BLE001
@@ -237,13 +228,13 @@ def fingerprint(path: Path, fmt: str) -> tuple[str, int | None]:
         if not raw:
             return "v:" + hashlib.sha256(path.read_bytes()).hexdigest()[:32], None
         key = "v:" + hashlib.sha256(raw).hexdigest()[:32]
-        frame = _VIDEO_FRAME_BYTES
         phash = None
-        if len(raw) >= frame:
-            try:
-                phash = _dhash(Image.frombytes("RGBA", (64, 64), raw[:frame]))
-            except Exception as exc:  # noqa: BLE001 - a bad frame is not fatal
-                log.debug("phash failed for %s: %s", path.name, exc)
+        try:
+            img = _frame_image(raw)
+            if img is not None:
+                phash = _dhash(img)
+        except Exception as exc:  # noqa: BLE001 - a bad frame is not fatal
+            log.debug("phash failed for %s: %s", path.name, exc)
         return key, phash
 
     if fmt == "static":
@@ -262,16 +253,24 @@ def fingerprint(path: Path, fmt: str) -> tuple[str, int | None]:
     return content_key(path, fmt), perceptual_hash(path, fmt)
 
 
-# One 64x64 RGBA frame, the unit both the content digest and the dHash consume.
-_VIDEO_FRAME_BYTES = 64 * 64 * 4
+def _first_video_frame(path: Path) -> Image.Image | None:
+    """Frame zero of the canonical stream, decoded once.
+
+    This used to run its OWN ffmpeg with `-frames:v 1` and no fps filter, which
+    is a different frame from the one `fingerprint` hashes: a 30 fps clip with a
+    distinct opening frame measured 6510615555426900570 here and
+    5300177295401782857 there, for the same file through two public APIs (F13).
+    Both now slice the same bytes, so they cannot disagree.
+    """
+    return _frame_image(video_decode.frames_rgba(path))
 
 
-def _first_video_frame(path: Path) -> Image.Image:
-    ff = media.ffmpeg_path()
-    cmd = [ff, "-v", "error", "-i", str(path), "-frames:v", "1",
-           "-vf", "scale=64:64,format=rgba", "-f", "rawvideo", "-"]
-    res = media._run(cmd, capture=True)
-    return Image.frombytes("RGBA", (64, 64), res.stdout[:_VIDEO_FRAME_BYTES])
+def _frame_image(raw: bytes) -> Image.Image | None:
+    """Wrap frame zero of a canonical stream, or None if there is not one."""
+    frame = video_decode.first_frame_bytes(raw)
+    if frame is None:
+        return None
+    return Image.frombytes("RGBA", (video_decode.FRAME_SIDE, video_decode.FRAME_SIDE), frame)
 
 
 def _dhash(img: Image.Image, hash_size: int = 8) -> int:

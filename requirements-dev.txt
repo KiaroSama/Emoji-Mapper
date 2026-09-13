@@ -1,0 +1,25 @@
+# Test-only dependencies. NOT needed to build or publish a pack -- nothing in
+# the runtime imports any of this, and `requirements.txt` stays the list a user
+# installs.
+#
+#     .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#     .venv\Scripts\python.exe -m playwright install chromium
+#
+# Chromium is downloaded once into the user profile, not into the repo, and is
+# shared by every project on the machine that uses the same playwright version.
+
+# Drives the real Curate panel in headless Chromium: tests/test_panel_browser.py
+# asserts what the page DID, which is the only level at which a save pipeline
+# that forgets an edit, or a zoom that clamps against a stale document height,
+# is distinguishable from a correct one. Headless on purpose -- an occluded
+# window is throttled to 1-2 animation frames a second, which makes every
+# timing assertion a coin toss.
+#
+# Pinned: the browser build is downloaded per playwright version, so a floating
+# version would silently ask for a Chromium that is not on the machine and the
+# module would fail at launch rather than at install.
+playwright==1.62.0
+
+# The linter scripts\check.ps1 runs. Not a runtime dependency either; kept here
+# so `ruff check .` means the same thing locally as it does in CI.
+ruff>=0.15

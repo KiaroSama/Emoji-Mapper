@@ -34,6 +34,7 @@ import gzip
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -43,6 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
+
+# Safe at module level: video_decode reaches back into this module only
+# from inside its functions, so there is no import-time cycle.
+from emojikit import video_decode
 
 log = logging.getLogger("emojikit.media")
 
@@ -261,7 +266,12 @@ def _trim(img: Image.Image) -> Image.Image:
 
 
 def fit_100(img: Image.Image) -> Image.Image:
-    """Trim transparent borders and center the image on a 100x100 RGBA canvas."""
+    """Trim transparent borders and center the image on a 100x100 RGBA canvas.
+
+    THE ONE fitting implementation. ``make_emoji_pngs`` and the coin providers
+    carried byte-identical copies, so the bug below had to be found three times
+    to be fixed once; they call this now.
+    """
     img = _trim(img)
     w, h = img.size
     if w == 0 or h == 0:
@@ -270,7 +280,16 @@ def fit_100(img: Image.Image) -> Image.Image:
     nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
     img = img.resize((nw, nh), Image.LANCZOS)
     canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    canvas.paste(img, ((SIZE - nw) // 2, (SIZE - nh) // 2), img)
+    # NO MASK. `paste(img, pos, img)` makes img its own mask, which COMPOSITES
+    # it over the canvas -- and the canvas is transparent black, so every pixel
+    # came back multiplied by its own alpha twice: colour once and alpha again.
+    # A half-opaque red (255, 0, 0, 128) fitted to (128, 0, 0, 64), i.e. a
+    # quarter-opaque dark red, and only fully opaque art survived unharmed,
+    # which is why this stood for so long. The destination region is fully
+    # transparent, so the correct operation is a verbatim RGBA copy: it keeps
+    # unassociated colour, real opacity, and the partial alpha LANCZOS leaves
+    # along an antialiased edge.
+    canvas.paste(img, ((SIZE - nw) // 2, (SIZE - nh) // 2))
     return canvas
 
 
@@ -337,13 +356,14 @@ def to_video_webm(src: Path, out: Path, *, max_bytes: int = WEBM_MAX_BYTES) -> P
     out.parent.mkdir(parents=True, exist_ok=True)
     # VP9 stores alpha as a SEPARATE WebM layer, and ffmpeg's default vp9
     # decoder drops it silently -- the filter chain then never sees an alpha
-    # channel and the transparent-pad colour lands on an opaque frame. Naming
-    # the libvpx decoder is what carries transparency through a re-encode.
-    # Missed for so long because every video emoji so far arrived as a download
-    # that owner rule 1 remuxes with `-c copy`, so this path had never had to
-    # re-encode a transparent source. It flattened a cue-ball emoji to a black
-    # square before anyone noticed.
-    decoder = ["-c:v", "libvpx-vp9"] if src.suffix.lower() == ".webm" else []
+    # channel and the transparent-pad colour lands on an opaque frame. It
+    # flattened a cue-ball emoji to a black square before anyone noticed.
+    #
+    # The choice used to be `suffix == ".webm"`, which is wrong twice: it forces
+    # a VP9 decoder onto a VP8 WebM, and it skips a download saved without an
+    # extension, which is exactly how a transparent source reaches this path.
+    # The container knows its own codec, so ask it.
+    decoder = video_decode.decoder_args(src)
     last_size = -1
     for crf in (32, 40, 48, 56, 63):
         cmd = [
@@ -624,9 +644,18 @@ def validate_tgs(path: Path) -> None:
                          f"{TGS_SIZE}x{TGS_SIZE}")
     try:
         fr = float(lottie["fr"])
-        frames = float(lottie["op"]) - float(lottie["ip"])
+        ip, op = float(lottie["ip"]), float(lottie["op"])
+        frames = op - ip
     except (TypeError, ValueError) as exc:
         raise MediaError(f"{path.name}: non-numeric fr/ip/op ({exc})") from exc
+    # NaN parses as a float and then defeats every comparison below: `nan <= 0`,
+    # `nan > 60` and `nan > 3.0` are all False, so a Lottie with a NaN frame
+    # rate or a NaN out-point sailed through this entire function and only
+    # failed deep inside a publish. Infinity was caught by the range checks by
+    # luck, not by design; both are rejected here for the same reason.
+    for name, value in (("fr", fr), ("ip", ip), ("op", op)):
+        if not math.isfinite(value):
+            raise MediaError(f"{path.name}: {name} is {value}, not a finite number")
     if fr <= 0:
         raise MediaError(f"{path.name}: frame rate {fr} must be positive")
     if fr > TGS_FPS:
@@ -748,84 +777,9 @@ def reencode_in_place(path: Path, fmt: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Baking Telegram's repaint ourselves
 # --------------------------------------------------------------------------- #
-def parse_tint(text: str) -> tuple[int, int, int]:
-    """``#RRGGBB`` / ``RRGGBB`` -> (r, g, b). Raises MediaError on anything else."""
-    s = text.strip().lstrip("#")
-    if len(s) != 6 or any(c not in "0123456789abcdefABCDEF" for c in s):
-        raise MediaError(f"tint must be #RRGGBB, got {text!r}")
-    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+# Repainting lives in emojikit.repaint -- a different job from detect/convert/
+# validate, and this module was over the size ceiling. Re-exported so every
+# existing caller (fetch_emoji_ids, the tests) keeps working unchanged.
+from emojikit.repaint import parse_tint, repaint_in_place  # noqa: E402
 
-
-def _tint_lottie(node, k: list[float]) -> None:
-    """Rewrite every solid colour and gradient stop in a Lottie tree, in place."""
-    if isinstance(node, dict):
-        colour = node.get("c")
-        if (isinstance(colour, dict) and isinstance(colour.get("k"), list)
-                and all(isinstance(v, (int, float)) for v in colour["k"])):
-            colour["k"] = k[:len(colour["k"])]
-        grad = node.get("g")
-        if isinstance(grad, dict) and isinstance(grad.get("k"), dict):
-            stops = grad["k"].get("k")
-            if isinstance(stops, list) and all(isinstance(v, (int, float)) for v in stops):
-                # [offset, r, g, b, offset, r, g, b, ...]; keep the offsets so the
-                # shape of the ramp survives, flatten only the colour.
-                for base in range(0, len(stops) - 3, 4):
-                    stops[base + 1:base + 4] = k[:3]
-        for value in node.values():
-            _tint_lottie(value, k)
-    elif isinstance(node, list):
-        for value in node:
-            _tint_lottie(value, k)
-
-
-def repaint_in_place(path: Path, fmt: str, rgb: tuple[int, int, int]) -> bool:
-    """Flatten ``path`` to one colour, keeping its shape. True when rewritten.
-
-    This is what a client does to a `needs_repainting` sticker: the artwork is
-    only a silhouette, the colour comes from the theme. We cannot ask for that
-    flag -- the Bot API exposes it on `Sticker` (read-only) and on
-    `createNewStickerSet` (whole-set, at creation) and nowhere else -- so for a
-    pack that already exists the only way to get the look is to bake it.
-
-    Animated goes through the Lottie tree rather than the raster, because
-    flattening frames would throw the animation away. Static fills through the
-    original alpha, so anti-aliased edges and cut-outs (the tick inside a
-    verified badge is a HOLE, not a dark shape) both survive.
-
-    Video is refused: there is no cheap colour-exact route, and a silent
-    no-op would publish the untouched art under a name that says otherwise.
-
-    Call this BEFORE fingerprinting -- like `reencode_in_place`, it moves the
-    bytes and the content key must describe what is on disk.
-    """
-    try:
-        if fmt == "animated":
-            data = _load_lottie(path)
-            _tint_lottie(data, [c / 255 for c in rgb] + [1])
-            raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
-            buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-                gz.write(raw)
-            out = buf.getvalue()
-            if len(out) > TGS_MAX_BYTES:
-                log.warning("repaint of %s would be %d bytes, over the %d cap; "
-                            "keeping the original", path.name, len(out), TGS_MAX_BYTES)
-                return False
-        elif fmt == "static":
-            with Image.open(path) as im:
-                rgba = im.convert("RGBA")
-            flat = Image.new("RGBA", rgba.size, (*rgb, 255))
-            flat.putalpha(rgba.getchannel("A"))
-            buf = io.BytesIO()
-            flat.save(buf, format="WEBP", lossless=True, quality=100,
-                      method=6, exact=True)
-            out = buf.getvalue()
-        else:
-            log.warning("repaint not supported for %s (%s)", path.name, fmt)
-            return False
-    except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
-        log.warning("repaint skipped for %s (%s): %s", path.name, fmt, exc)
-        return False
-
-    path.write_bytes(out)
-    return True
+__all__ = ["parse_tint", "repaint_in_place"]

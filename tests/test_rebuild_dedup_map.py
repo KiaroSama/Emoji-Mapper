@@ -115,8 +115,11 @@ class MapIsResolvedByImageIdentity(RebuildCase):
             with self.assertRaises(ps.LockBusy):
                 dmap.map_and_fill(self.tg)
         self.assertFalse(self.map.exists())
-        self.assertFalse(cfg.LOCK.exists(),
-                         "the pack lock outlived the run that took it")
+        # "Outlived" is about the HOLD, not the file: the lock file is never
+        # unlinked, because an unlinked inode is a lock nobody else can see.
+        # Taking it is the only honest way to ask whether it is free.
+        with ps.exclusive_lock(cfg.LOCK):
+            pass
 
     def test_a_provider_cannot_change_the_map_during_the_snapshot(self):
         """A: the live read and the whole-map write are ONE locked span.

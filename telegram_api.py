@@ -412,17 +412,21 @@ class Telegram:
             from emojikit import identity, media
         except Exception:         # noqa: BLE001 - media stack unavailable
             return None
-        tmp = None
+        # A PRIVATE directory, not a name derived from the sticker id in the
+        # shared system temp. That name was predictable and reused, so two runs
+        # verifying the same sticker overwrote each other's download; a file or
+        # symlink already sitting there was written THROUGH, which on a
+        # multi-user machine means writing wherever the link points; and the
+        # cleanup then deleted whatever was there, ours or not. A fresh
+        # directory is unique, owner-only, and takes its contents with it.
         try:
             fmt = media.telegram_sticker_format(sticker)
-            tmp = Path(tempfile.gettempdir()) / f"_em_{sticker['file_unique_id']}"
-            self.download_file(sticker["file_id"], tmp)
-            return identity.same_image(tmp, source, fmt)
+            with tempfile.TemporaryDirectory(prefix="emoji-verify-") as box:
+                tmp = Path(box) / "sticker.dl"
+                self.download_file(sticker["file_id"], tmp)
+                return identity.same_image(tmp, source, fmt)
         except Exception:         # noqa: BLE001 - a failed probe is not a "no"
             return None
-        finally:
-            if tmp is not None:
-                Path(tmp).unlink(missing_ok=True)
 
     def get_me(self) -> dict:
         return self._call("getMe")

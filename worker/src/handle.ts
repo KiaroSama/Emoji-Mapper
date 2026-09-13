@@ -8,7 +8,7 @@
  * wrong bot still gets an answer instead of silence.
  */
 
-import { escapeHtml, Telegram } from "./telegram";
+import { escapeHtml, Telegram, TEXT_LIMIT } from "./telegram";
 import { extractCustomEmojiIds, parseIdList } from "./emoji";
 import { isAdmin } from "./auth";
 import type { PublishRequest, TgMessage, TgUpdate } from "./types";
@@ -22,9 +22,6 @@ const START_TEXT =
   "reply with their ids.\n\nWorks with emoji in the text, in a caption, and " +
   "inside a quoted reply.\n\nOr the other way round: <b>send me ids</b> and I " +
   "show you the emoji. One per line, comma-separated, or a single id.";
-
-/** Telegram rejects a sendMessage over 4096 characters. */
-const TEXT_LIMIT = 4096;
 
 /**
  * Outcome meaning "this was our own log line coming back; record nothing".
@@ -189,6 +186,20 @@ export async function handleUpdate(tg: Telegram, update: TgUpdate,
 const TITLE_LIMIT = 200;
 
 /**
+ * Cut raw text to at most `max` UTF-16 units -- what Telegram counts.
+ *
+ * Applied to the text BEFORE it is escaped, because cutting escaped HTML can
+ * leave half an entity (`&am`) behind, which Telegram either renders raw or
+ * rejects. The surrogate check keeps the cut off the middle of an astral
+ * emoji: an emoji costs two units, so a limit landing inside one would emit a
+ * lone surrogate, which is not valid text at all.
+ */
+function clampText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, /[\uD800-\uDBFF]/.test(s[max - 1]) ? max - 1 : max);
+}
+
+/**
  * The announcement(s) the local builder asks this Worker to post.
  *
  * Returns a LIST for the same reason renderIdMessages does: the coin rebuild
@@ -201,10 +212,18 @@ const TITLE_LIMIT = 200;
 export function renderAnnouncement(req: PublishRequest): string[] {
   const blocks: string[] = [];
   const list = req.style === "list";
-  if (req.note) blocks.push(escapeHtml(req.note));
+  // Bounded here, not only at the /publish gate: the loop below splits BETWEEN
+  // blocks, so whatever one block holds goes out as one message. A 5000-
+  // character note used to become exactly that -- a 5000-character sendMessage
+  // Telegram rejects. Every block has to fit before the loop can guarantee
+  // anything.
+  if (req.note) blocks.push(escapeHtml(clampText(String(req.note), TEXT_LIMIT)));
   for (const p of req.packs) {
-    const title = escapeHtml((p.title ?? p.name).slice(0, TITLE_LIMIT));
-    const count = p.count !== undefined ? ` — ${p.count}` : "";
+    const title = escapeHtml(clampText(String(p.title ?? p.name), TITLE_LIMIT));
+    // Escaped at the sink. The validator keeps this a number, but this
+    // function is exported and a string `count` used to land in the HTML
+    // Telegram parses without ever passing an escape.
+    const count = p.count !== undefined ? ` — ${escapeHtml(String(p.count))}` : "";
     // addemoji is the install link for a custom-emoji set.
     const url = `https://t.me/addemoji/${encodeURIComponent(p.name)}`;
     blocks.push(list ? `${title}. ${url}`
