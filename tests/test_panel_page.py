@@ -501,7 +501,7 @@ class ThePanelPageActuallyShips(unittest.TestCase):
     """
 
     def test_the_page_is_a_real_file_inside_the_repo(self):
-        asset = p.ASSET_DIR / "emojikit.panel.html"
+        asset = p.ASSET_DIR / "panel.html"
         self.assertTrue(asset.is_file(), f"the panel page is missing: {asset}")
         self.assertTrue(
             str(asset.resolve()).startswith(str(ROOT.resolve())),
