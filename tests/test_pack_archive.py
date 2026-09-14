@@ -13,7 +13,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-import pack_archive as pa
+from emojikit import pack_archive as pa
 
 KEY = "s:" + "a" * 32
 ARCHIVED_NAME = "002_static_" + "a" * 12 + ".webp"

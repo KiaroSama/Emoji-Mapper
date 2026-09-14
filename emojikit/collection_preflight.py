@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL
+from emojikit.build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact
 from emojikit.telegram_api import BotApiError, Telegram

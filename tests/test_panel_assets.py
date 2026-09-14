@@ -22,7 +22,7 @@ from tests._panel_fixtures import ROOT, _make_png
 
 sys.path.insert(0, str(ROOT))
 
-import panel as p
+from emojikit import panel as p
 from emojikit.catalog import Catalog
 
 

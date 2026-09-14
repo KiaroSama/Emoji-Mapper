@@ -38,7 +38,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from build_pack import safe_int_env
+from emojikit.build_pack import safe_int_env
 
 # Project root = parent of this package directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

@@ -19,8 +19,8 @@ same index twice leaves the same set -- so this is safe to re-run, and a run
 interrupted halfway simply continues.
 
 Usage:
-  python sync_order.py --base mypack              # show what would move
-  python sync_order.py --base mypack --apply
+  python -m emojikit.sync_order --base mypack              # show what would move
+  python -m emojikit.sync_order --base mypack --apply
 """
 
 from __future__ import annotations
@@ -33,14 +33,14 @@ from pathlib import Path
 
 from emojikit.collection_state import (_lock_path, _state_path, load_state,
                               save_json)
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, load_env)
+from emojikit.build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, load_env)
 from emojikit.packstate import (LockBusy, exclusive_lock)
 from emojikit.maintenance import writer
 from emojikit.telegram_api import (Telegram)
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("sync_order")
 
 # Telegram rate-limits set mutations. One move per ~120 ms keeps a 200-emoji

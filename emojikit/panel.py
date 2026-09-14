@@ -8,7 +8,7 @@ perceptual hash) so you can deselect look-alikes quickly. "Save" writes the
 selection back to the catalog; build_collection then only publishes included
 items.
 
-Run:  python panel.py            (serves http://127.0.0.1:9450 and opens it)
+Run:  python -m emojikit.panel   (serves http://127.0.0.1:9450 and opens it)
 """
 
 from __future__ import annotations
@@ -33,11 +33,12 @@ from emojikit.catalog import Catalog
 from emojikit.packstate import LockBusy
 from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.panel_logging import ClientEventLog
+from emojikit.panel_instance import reopen_existing, session_identity
 from emojikit.media import PREVIEW_FPS
 from emojikit.panel_preview import parameters as preview_parameters, preview_bytes as _preview_bytes
 from emojikit.panel_view import build_view, packs_named
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 ASSET_DIR = ROOT / "assets"
 log = logging.getLogger("panel")
 
@@ -81,7 +82,7 @@ def _is_loopback(netloc: str) -> bool:
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                  preview_fps: int = PREVIEW_FPS, bot_username: str = "",
                  show_published: bool = False, hidden: int = 0,
-                 keep_sets: set[str] | None = None):
+                 keep_sets: set[str] | None = None, session_info: dict | None = None):
     lock = threading.Lock()
     client_log = ClientEventLog(log)
     # A one-element list, not an int: `_reload_view` has to update it and the
@@ -179,6 +180,10 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # a liveness probe that can block behind a publish would report
                 # a healthy server as dead. No token: it reveals nothing.
                 self._send(200, b'{"ok":true}', cache="no-store")
+                return
+            if self.path == "/api/session":
+                info = session_info or session_identity(db_path, show_published, [])
+                self._send(200, json.dumps(info).encode("utf-8"), cache="no-store")
                 return
             if self.path == "/" or self.path.startswith("/index"):
                 # /api/order sorts ``view`` in place, and CPython empties a list
@@ -443,7 +448,7 @@ def _detect_bot_username() -> str:
     (missing .env, no network, bad token) the logo preview is simply skipped.
     """
     try:
-        from build_pack import (load_env)
+        from emojikit.build_pack import (load_env)
         from emojikit.telegram_api import (Telegram)
         load_env()
         token = os.environ.get("GENERAL_BOT_TOKEN", "")
@@ -485,7 +490,7 @@ def main() -> int:
     # this did, via _detect_bot_username() further down -- left any .env-only
     # credential unregistered for literal masking in the one process that serves
     # a browser UI. It also decides the log retention window.
-    from build_pack import load_env
+    from emojikit.build_pack import load_env
     load_env()
     setup_logging("panel")
     ap = argparse.ArgumentParser(description="Curate downloaded emoji before publishing.")
@@ -507,12 +512,19 @@ def main() -> int:
                          "half-full pack can be arranged beside the new "
                          "candidates going into it. Repeatable.")
     args = ap.parse_args()
+    if not 1 <= args.port <= 65535:
+        ap.error("--port must be between 1 and 65535")
 
     data_dir = (ROOT / args.data_dir) if not os.path.isabs(args.data_dir) else Path(args.data_dir)
     db_path = data_dir / "catalog.db"
     if not db_path.is_file():
         log.error("no catalog at %s (run fetch_pack.py / add_media.py first).", db_path)
         return 2
+
+    session_info = session_identity(db_path, args.all, args.with_pack)
+    existing = reopen_existing(args.port, session_info, no_open=args.no_open)
+    if existing is not None:
+        return existing
 
     bot_username = args.bot_username or _detect_bot_username()
 
@@ -538,7 +550,7 @@ def main() -> int:
     # catalog behind the user's back.
     token = secrets.token_urlsafe(24)
     handler = make_handler(view, by_key, db_path, token, args.preview_fps,
-                           bot_username, args.all, hidden, keep_sets)
+                           bot_username, args.all, hidden, keep_sets, session_info)
 
     class QuietServer(ThreadingHTTPServer):
         # SO_REUSEADDR OFF. socketserver turns it on by default, and on Windows
@@ -562,21 +574,16 @@ def main() -> int:
     try:
         httpd = QuietServer(("127.0.0.1", args.port), handler)
     except OSError as exc:
-        # Say what to do about it. A traceback here reads as "the panel is
-        # broken" when the real state is "the panel is already open".
+        # Another launch can win the bind after the first readiness probe.
+        existing = reopen_existing(args.port, session_info, no_open=args.no_open)
+        if existing is not None:
+            return existing
         log.error("cannot listen on port %d: %s", args.port, exc)
         pid = _port_holder(args.port)
-        # NAME the process. "Press Ctrl+C in the window running it" is useless
-        # when the holder was started detached and has no window -- which is how
-        # every stray one so far got there.
-        stop = (f"  Or stop it:   taskkill /PID {pid} /F" if pid
-                else "  Or stop it:   press Ctrl+C in the window running it")
         who = f" (pid {pid})" if pid else ""
         print(
-            f"\nA panel is already running on port {args.port}{who}." + "\n"
-            f"  Open it:      http://127.0.0.1:{args.port}/" + "\n"
-            + stop + "\n"
-            f"  Or use another port:  panel.py --port {args.port + 1}" + "\n",
+            f"\nPort {args.port}{who} is unavailable; no reusable panel was identified.\n"
+            "Choose another port with --port.\n",
             flush=True)
         return 2
     url = f"http://127.0.0.1:{args.port}/"
@@ -588,6 +595,8 @@ def main() -> int:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
+    finally:
+        httpd.server_close()
     return 0
 
 

@@ -334,10 +334,10 @@ class ActualWriterOwnership(unittest.TestCase):
                 self.assertEqual(child.returncode, 0, stderr)
 
     def test_pending_journal_blocks_ingest_archive_publisher_and_panel_save(self):
-        import add_media
-        import build_collection
-        import pack_archive
-        import panel
+        from emojikit import add_media
+        from emojikit import build_collection
+        from emojikit import pack_archive
+        from emojikit import panel
         from PIL import Image
 
         image = self.data / "incoming.png"

@@ -10,7 +10,7 @@ catalog. Re-running is cheap and safe:
 * identical / near-identical media collapse onto a single catalog entry.
 
 Usage:
-  python fetch_pack.py PACK [PACK ...] [--token-env GENERAL_BOT_TOKEN]
+  python -m emojikit.fetch_pack PACK [PACK ...] [--token-env GENERAL_BOT_TOKEN]
                        [--data-dir collection] [--phash-threshold 5] [--limit N]
 
 PACK may be a bare set name (``coolpack_by_somebot``) or a full
@@ -25,7 +25,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from build_pack import (EXIT_USAGE, REPAINT_MODES, ingest_exit_code,
+from emojikit.build_pack import (EXIT_USAGE, REPAINT_MODES, ingest_exit_code,
                         load_env, repaintable_gate)
 from emojikit.telegram_api import (Telegram)
 from emojikit import identity, media
@@ -33,7 +33,7 @@ from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_a
 from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("fetch_pack")
 
 

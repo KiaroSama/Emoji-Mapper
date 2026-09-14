@@ -126,10 +126,10 @@ def build_view(cat: Catalog, bot_username: str = "",
 
     Hidden, never deleted -- those rows are what dedup recognises a re-download
     by, what maps a source premium id to ours, and what `sync_order` reads to
-    re-sort a live set. ``show_published`` (``panel.py --all``) brings them
+    re-sort a live set. ``show_published`` (``python -m emojikit.panel --all``) brings them
     back, which is how you reorder a pack that is already published.
 
-    ``keep_sets`` (``panel.py --with-pack N``) is the narrow version of that:
+    ``keep_sets`` (``python -m emojikit.panel --with-pack N``) is the narrow version of that:
     it un-hides ONE published set so its emoji can be arranged beside the new
     candidates going into it. `--all` is the wrong tool for that -- it also
     brings back every finished pack, which here is hundreds of cards you cannot

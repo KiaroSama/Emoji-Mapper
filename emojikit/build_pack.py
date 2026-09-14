@@ -20,11 +20,11 @@ associated standard emoji (--emoji) and optional searchable keywords (from a
 keywords.csv mapping ``ticker -> keywords``; falls back to the file name).
 
 Usage (crypto coins, original bot):
-  python build_pack.py --base gvcryptoemoji --title "@GodVerify Crypto Emoji" \
+  python -m emojikit.build_pack --base gvcryptoemoji --title "@GodVerify Crypto Emoji" \
       [--user-id 123] [--emoji ߞ] [--limit N] [--start N] [--dry-run]
 
 Usage (general pack, new bot):
-  python build_pack.py --base mystickers --title "My Emojis" \
+  python -m emojikit.build_pack --base mystickers --title "My Emojis" \
       --source-dir build/myset --token-env GENERAL_BOT_TOKEN --emoji ߘ
 
 Run with --dry-run first to validate inputs without calling Telegram.
@@ -50,7 +50,7 @@ from emojikit.packstate import (LockBusy, StateInvalid, _intent_key,
 from emojikit.telegram_api import (DEFAULT_EMOJI, MAX_PER_SET, PER_SET,
                           AmbiguousUploadError, SetState, Telegram)
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("build_pack")
 
 

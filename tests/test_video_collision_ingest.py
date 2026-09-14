@@ -14,10 +14,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import add_media
+from emojikit import add_media
 from emojikit import collection_reconcile as cr
-import fetch_emoji_ids
-import fetch_pack
+from emojikit import fetch_emoji_ids
+from emojikit import fetch_pack
 from emojikit import identity, media, video_decode
 from emojikit.catalog import Catalog
 from emojikit.ingest import store_media

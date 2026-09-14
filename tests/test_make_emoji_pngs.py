@@ -17,8 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import make_emoji_pngs as m  # noqa: E402
-from build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL  # noqa: E402
+from emojikit import make_emoji_pngs as m  # noqa: E402
+from emojikit.build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL  # noqa: E402
 
 BLUE_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
             '<rect width="64" height="64" fill="#0000ff"/></svg>')
