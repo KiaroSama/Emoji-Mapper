@@ -12,8 +12,10 @@ questions.
 
 from __future__ import annotations
 
+from contextlib import closing
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -228,12 +230,14 @@ class Harness:
         return handler
 
     def db_order(self):
-        with Catalog(self.db) as cat:
-            return [it.content_key for it in cat.all_items()]
+        # Observe committed WAL state while the server writes. Constructing a
+        # Catalog owns the writer lease and would make the observer contend.
+        with closing(sqlite3.connect(self.db.as_uri() + "?mode=ro", uri=True)) as con:
+            return [r[0] for r in con.execute("SELECT content_key FROM items ORDER BY position, rowid")]
 
     def excluded_in_db(self):
-        with Catalog(self.db) as cat:
-            return {it.content_key for it in cat.all_items() if not it.included}
+        with closing(sqlite3.connect(self.db.as_uri() + "?mode=ro", uri=True)) as con:
+            return {r[0] for r in con.execute("SELECT content_key FROM items WHERE included=0")}
 
 
 def synth(n, *, logo=False, fmt="static", packs=None, excluded=()):
