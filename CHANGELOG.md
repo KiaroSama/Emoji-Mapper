@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - curation and coordinated identity recovery
+
+- Held cards leave the grid and pack counts; Unhold/Unhold all restore positions
+  with capacity checks. Shift range picking, complete Undo/Redo and a last-Save
+  Reset checkpoint cover the curation workflow.
+- Newer saves survive older permanent refusals. UI action/error logging is
+  bounded, and conflict warnings offer a local draft export.
+- Compact previews reduce size/frame rate, covered animations stop, and inactive
+  video players release their decoders. Rendering work is limited per server.
+- Video merges and recovery verify native timelines, including unmatched tails;
+  colliding sampled keys preserve distinct files and identities.
+- Migration excludes permanent writers, replays evidenced per-file operations,
+  refuses unrelated destinations, preserves an application rollback bundle and
+  requires complete final invariants before success.
+- Nine support modules moved into the shared package; public CLI paths stay
+  stable. CI covers the new browser/native regressions.
+
 ### Added - a holding area for parked emoji
 
 - **A holding area in the curate panel.** Drag an emoji onto it to exclude it

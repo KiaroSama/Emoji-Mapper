@@ -30,7 +30,7 @@ from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-import collection_reconcile as cr
+from emojikit import collection_reconcile as cr
 from emojikit import identity
 from emojikit.catalog import Catalog
 

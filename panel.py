@@ -28,12 +28,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from collection_state import PER_SET
+from emojikit.collection_state import PER_SET
 from emojikit.catalog import Catalog
+from emojikit.packstate import LockBusy
 from emojikit.logsetup import record_exit_code, setup_logging
-from emojikit.media import (PREVIEW_FPS, lottie_preview_webp,
-                            lottie_still_webp)
-from panel_view import build_view, packs_named
+from emojikit.panel_logging import ClientEventLog
+from emojikit.media import PREVIEW_FPS
+from emojikit.panel_preview import parameters as preview_parameters, preview_bytes as _preview_bytes
+from emojikit.panel_view import build_view, packs_named
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -76,46 +78,12 @@ def _is_loopback(netloc: str) -> bool:
     return host in LOOPBACK_HOSTS
 
 
-# Animated previews are rendered once and kept on disk. The work is ~300-500 ms
-# per animation, and the server is threaded, so a scrolling browser will ask for
-# the same key from several connections at once -- one lock per key collapses
-# that to a single render instead of N identical ones fighting for the CPU.
-_preview_locks: dict[str, threading.Lock] = {}
-_preview_locks_guard = threading.Lock()
-
-
-def _preview_bytes(key: str, src: Path, db_path: Path, fps: int,
-                   still: bool = False) -> bytes:
-    """Preview for a .tgs, rendered once and cached on disk.
-
-    ``still`` gives frame 0 as a single-frame WebP, which is what off-screen
-    cards show -- see lottie_still_webp for why that matters.
-    """
-    cache_dir = db_path.parent / "preview"
-    # content_key is a hash of the media, so the name can never go stale; ':'
-    # is not legal in a Windows filename. The rate is part of the name because
-    # it changes the bytes -- otherwise --preview-fps would silently serve
-    # whatever the last run happened to render.
-    tag = "still" if still else str(fps)
-    dest = cache_dir / f"{key.replace(':', '_')}@{tag}.webp"
-    if dest.is_file():
-        return dest.read_bytes()
-    with _preview_locks_guard:
-        per_key = _preview_locks.setdefault(dest.name, threading.Lock())
-    with per_key:
-        if not dest.is_file():          # another thread may have won the race
-            if still:
-                lottie_still_webp(src, dest)
-            else:
-                lottie_preview_webp(src, dest, fps=fps)
-        return dest.read_bytes()
-
-
 def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                  preview_fps: int = PREVIEW_FPS, bot_username: str = "",
                  show_published: bool = False, hidden: int = 0,
                  keep_sets: set[str] | None = None):
     lock = threading.Lock()
+    client_log = ClientEventLog(log)
     # A one-element list, not an int: `_reload_view` has to update it and the
     # page handler has to read the update, and rebinding a closed-over int
     # would leave the handler reading the value from start-up forever -- the
@@ -249,14 +217,18 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # these are served immutable, so a browser that cached the old
                 # rate would keep using it and --preview-fps would look inert.
                 path, _, query = self.path.partition("?")
-                still = "still=1" in query
+                try:
+                    still, fps, size = preview_parameters(query, preview_fps)
+                except ValueError:
+                    self._send(400, b"invalid preview parameters", "text/plain")
+                    return
                 key = unquote(path[len("/preview/"):])
                 it = by_key.get(key)
                 if not it or not it.is_file():
                     self._send(404, b"not found", "text/plain")
                     return
                 try:
-                    body = _preview_bytes(key, it, db_path, preview_fps, still)
+                    body = _preview_bytes(key, it, db_path, fps, still, size)
                 except Exception as exc:  # noqa: BLE001 - one bad item must not 500 the grid
                     log.warning("preview failed for %s: %s", key, exc)
                     self._send(404, b"no preview", "text/plain")
@@ -302,7 +274,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
         def do_POST(self):
             try:
                 self._route_post()
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, LockBusy) as exc:
                 # build_collection.py reads the same database file and
                 # sqlite3.connect only waits 5 s, so "database is locked" is
                 # routine here, not freak. Uncaught it escaped the handler and
@@ -335,6 +307,15 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 return
             if not isinstance(payload, dict):
                 self._send(400, b'{"error":"expected a JSON object"}')
+                return
+
+            if self.path == "/api/client-log":
+                try:
+                    status = client_log.record(payload) if n <= 16384 else 413
+                except ValueError as exc:
+                    self._send(400, json.dumps({"error": str(exc)}).encode("utf-8"))
+                    return
+                self._send(status, b"", cache="no-store")
                 return
 
             if self.path == "/api/save":
@@ -463,7 +444,7 @@ def _detect_bot_username() -> str:
     """
     try:
         from build_pack import (load_env)
-        from telegram_api import (Telegram)
+        from emojikit.telegram_api import (Telegram)
         load_env()
         token = os.environ.get("GENERAL_BOT_TOKEN", "")
         if not token:
@@ -510,12 +491,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Curate downloaded emoji before publishing.")
     ap.add_argument("--data-dir", default="collection")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--preview-fps", type=int, default=PREVIEW_FPS,
+    ap.add_argument("--preview-fps", type=int, choices=range(1, 31), metavar="N", default=PREVIEW_FPS,
                     help="Frame rate for animated previews. The grid can show "
                          "60+ cards at once and the browser decodes every frame "
                          "of each, so this is the main lever on how heavy the "
                          "panel feels (default: %(default)s).")
     ap.add_argument("--no-open", action="store_true", help="Don't auto-open the browser.")
+    ap.add_argument("--bot-username", default="",
+                    help="Known bot username for branding; avoids a Telegram lookup.")
     ap.add_argument("--all", action="store_true",
                     help="Also show emoji already live in a pack. They are hidden by "
                          "default so the grid is the pack being built.")
@@ -531,7 +514,7 @@ def main() -> int:
         log.error("no catalog at %s (run fetch_pack.py / add_media.py first).", db_path)
         return 2
 
-    bot_username = _detect_bot_username()
+    bot_username = args.bot_username or _detect_bot_username()
 
     keep_sets = packs_named(data_dir, set(args.with_pack)) if args.with_pack else {}
     if args.with_pack and not keep_sets:

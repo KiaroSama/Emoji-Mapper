@@ -16,6 +16,7 @@ safe and importing identity from media would not be.
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_right
 import json
 import logging
 from pathlib import Path
@@ -59,14 +60,8 @@ UPLOAD_MEAN_DELTA = 8.0
 
 # A video is compared across its timeline, not at one frame.
 #
-# The comparison rate is NOT the identity rate. `SAMPLE_FPS` (10) is frozen --
-# every stored content key is a hash of that stream -- and it is too coarse to
-# compare with: measured on a 30 fps clip with ONE differing frame, the
-# difference is present at 30 fps and gone at both 10 and 15, because ffmpeg's
-# fps filter takes the nearest frame to each output timestamp and a change
-# shorter than one interval falls between them. 30 is `media.WEBM_FPS`, the rate
-# every emoji video this project encodes is normalised to, so two of our own
-# clips align frame for frame.
+# The comparison uses native frames; 30 fps only defines the permitted endpoint
+# rounding. The frozen 10 fps lookup stream cannot prove identity.
 VIDEO_COMPARE_FPS = 30
 
 # Bounded work: 30 fps over WEBM_MAX_SECONDS is ~90 frames of 64x64. An explicit
@@ -116,16 +111,11 @@ def _premultiply(img: Image.Image, n: int = 64) -> Image.Image:
 
 
 def _frame_images(path: Path) -> list[Image.Image]:
-    """Every frame of the COMPARISON stream, in order.
-
-    Denser than the identity stream on purpose (see `VIDEO_COMPARE_FPS`), and
-    cached by `video_decode` under its own rate, so asking for both streams of
-    one file decodes each once.
-    """
-    raw = video_decode.frames_rgba(path, fps=VIDEO_COMPARE_FPS)
+    """Every native frame, with an enforced ceiling and no silent truncation."""
+    raw, _, _ = video_decode.timeline_rgba(path)
     side = video_decode.FRAME_SIDE
     stride = video_decode.FRAME_BYTES
-    count = min(len(raw) // stride, VIDEO_MAX_FRAMES)
+    count = len(raw) // stride
     return [Image.frombytes("RGBA", (side, side), raw[i * stride:(i + 1) * stride])
             for i in range(count)]
 
@@ -139,32 +129,46 @@ def _same_frame(x: Image.Image, y: Image.Image) -> bool:
 
 
 def _same_video(a: Path, b: Path) -> bool | None:
-    """Do two clips hold the same picture THROUGHOUT? None when undecidable.
+    """Compare every native frame against the other timeline, including tails.
 
-    The first-frame answer was a false positive generator. Two real one-second
-    30 fps clips sharing ten opening red frames -- one then blue, the other
-    green -- had different content keys and still compared equal, because both
-    the perceptual hash and the colour check read frame zero and nothing else.
-    Reconciliation then bound the foreign clip's file_unique_id and
-    custom_emoji_id to our catalog item, and that survived reopening SQLite.
-
-    So: compare the timelines. Length first, because a clip that runs longer is
-    not the same clip however well its opening matches; then every sampled frame
-    pair, each under the same two-agreement rule a static image gets. Every pair
-    must agree -- an average over the clip is exactly what lets one differing
-    segment hide, so there is no averaging across frames here.
-
-    The re-encode tolerance the callers depend on is preserved: the sampler
-    normalises rate and geometry, and per-frame tolerances absorb what a lossy
-    round trip does to colour. One frame of slack in the count absorbs the
-    rounding at the end of a stream, and nothing more.
+    Timing comes from the decoded frames. Midpoints in both directions cover
+    short and variable-rate frames without duplicating or dropping any. Duration
+    slack permits a repeated endpoint only after comparing its actual picture.
+    The existing per-frame colour/alpha/structure tolerances stay unchanged.
     """
+    _, ta, da = video_decode.timeline_rgba(a)
+    _, tb, db = video_decode.timeline_rgba(b)
     fa, fb = _frame_images(a), _frame_images(b)
     if not fa or not fb:
         return None                  # nothing to look at; unknown is not false
-    if abs(len(fa) - len(fb)) > VIDEO_FRAME_SLACK:
-        return False                 # different duration: a different clip
-    return all(_same_frame(x, y) for x, y in zip(fa, fb, strict=False))
+    if abs(da - db) > VIDEO_FRAME_SLACK / VIDEO_COMPARE_FPS + 0.002:
+        return False
+    # Visit BOTH timelines: the midpoint of a short native frame cannot fall
+    # between samples. An unmatched endpoint is compared to the other's actual
+    # terminal picture; duration slack never means permission to ignore it.
+    for frames, times, duration, other, other_times in (
+            (fa, ta, da, fb, tb), (fb, tb, db, fa, ta)):
+        for i, frame in enumerate(frames):
+            end = times[i + 1] if i + 1 < len(times) else duration
+            midpoint = (times[i] + end) / 2
+            j = max(0, bisect_right(other_times, midpoint) - 1)
+            if not _same_frame(frame, other[j]):
+                return False
+    # Midpoints alone can miss a transition shifted within two long VFR
+    # frames. Compare every overlap as well; only adjacent boundaries within
+    # two milliseconds may differ through container timestamp quantization.
+    stop = min(da, db)
+    edges = sorted({t for t in (*ta, *tb) if t < stop} | {stop})
+    for start, end in zip(edges, edges[1:], strict=False):
+        midpoint = (start + end) / 2
+        i, j = bisect_right(ta, midpoint) - 1, bisect_right(tb, midpoint) - 1
+        if not _same_frame(fa[i], fb[j]):
+            rounded_boundary = (end - start <= 0.002 + 1e-9
+                                and ((start in ta[1:] and end in tb[1:])
+                                     or (start in tb[1:] and end in ta[1:])))
+            if not rounded_boundary:
+                return False
+    return True
 
 
 def same_image(a: Path, b: Path, fmt: str) -> bool | None:
@@ -200,9 +204,8 @@ def same_image(a: Path, b: Path, fmt: str) -> bool | None:
             # real 30 fps clips differing in exactly one frame (flat blue vs
             # flat green, premultiplied mean delta 100.5) hash to the SAME key.
             # Answering True from that equality reports two different clips as
-            # one picture, which is the attribution this function exists to
-            # prevent. Comparing the denser stream costs one cached decode and
-            # cannot be fooled that way.
+            # one picture. Native frames, including their actual timestamps,
+            # are required: even 30 fps can miss a short VFR segment.
             return _same_video(a, b)
         if content_key(a, fmt) == content_key(b, fmt):
             return True
@@ -236,6 +239,23 @@ def content_key(path: Path, fmt: str) -> str:
         return "a:" + _animated_content_digest(path)[:32]
     # Unknown format: fall back to raw bytes so it is at least exactly deduped.
     return "r:" + hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+
+
+def collision_key(path: Path, sampled_key: str) -> str:
+    """Disambiguate proven-different files without re-keying existing items.
+
+    The first digest stays unique for archive filenames. The trailing digest
+    retains the frozen lookup bucket, so remuxed collisions remain discoverable.
+    Bytes disambiguate storage; only a verified comparison permits a merge.
+    """
+    prefix, _, lookup = sampled_key.partition(":")
+    lookup = lookup.rsplit(":", 1)[-1]
+    return f"{prefix}:{hashlib.sha256(path.read_bytes()).hexdigest()[:32]}:{lookup}"
+
+
+def preserve_collision_key(path: Path, calculated_key: str, stored_key: str) -> str:
+    """Keep a collision identity distinct during a coordinated key migration."""
+    return collision_key(path, calculated_key) if stored_key.count(":") == 2 else calculated_key
 
 
 def _video_content_digest(path: Path) -> str:

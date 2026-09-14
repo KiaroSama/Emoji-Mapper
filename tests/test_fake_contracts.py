@@ -29,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from telegram_api import Telegram  # noqa: E402
+from emojikit.telegram_api import Telegram  # noqa: E402
 
 TESTS = Path(__file__).resolve().parent
 

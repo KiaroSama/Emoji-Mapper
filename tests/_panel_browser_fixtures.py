@@ -28,7 +28,7 @@ from tests._panel_fixtures import ROOT
 sys.path.insert(0, str(ROOT))
 
 import panel
-import panel_view
+from emojikit import panel_view
 from emojikit.catalog import Catalog
 
 TOKEN = "test-token-value"
@@ -150,12 +150,17 @@ class Harness:
     def start(self) -> None:
         self._pw = sync_playwright().start()
         try:
-            self.browser = self._pw.chromium.launch(headless=True)
+            # Local hardware checks may use installed Chrome; CI keeps its pinned build.
+            channel = os.environ.get("EMOJI_MAPPER_BROWSER_CHANNEL") or None
+            self.browser = self._pw.chromium.launch(headless=True, channel=channel)
         except Exception as exc:         # re-raised, with the cure attached
             self._pw.stop()
             raise RuntimeError(HOWTO) from exc
 
-        self.tmp = tempfile.TemporaryDirectory()
+        # Windows test artifacts stay under the project; CI uses the same layout.
+        temp_root = ROOT / "logs" / "test-temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(dir=temp_root)
         self.data = Path(self.tmp.name)
         self.db = self.data / "catalog.db"
         with Catalog(self.db) as cat:

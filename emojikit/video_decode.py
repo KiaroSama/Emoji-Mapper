@@ -29,6 +29,8 @@ STREAM. ``fps=10`` does not necessarily emit native frame zero -- measured: a
 from __future__ import annotations
 
 import logging
+import math
+import re
 import shutil
 from collections import OrderedDict
 from pathlib import Path
@@ -70,6 +72,8 @@ _available: dict[tuple[str, tuple[str, int, int]], bool] = {}
 # thousands of files: this is a working set, not a store.
 _FRAME_CACHE_MAX = 8
 _frame_cache: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
+_timeline_cache: OrderedDict[tuple, tuple[bytes, tuple[float, ...], float]] = OrderedDict()
+MAX_NATIVE_FRAMES = 128
 
 
 def _media():
@@ -254,3 +258,47 @@ def first_frame_bytes(raw: bytes) -> bytes | None:
     a DIFFERENT frame -- that is F13 in one line.
     """
     return raw[:FRAME_BYTES] if len(raw) >= FRAME_BYTES else None
+
+
+def timeline_rgba(path: Path) -> tuple[bytes, tuple[float, ...], float]:
+    """Every native frame and its presentation time, without dropping VFR frames.
+
+    The frozen 10 fps stream is a lookup hint. Even 30 fps misses brief VFR
+    frames, so destructive identity decisions need the actual decoded frames.
+    Unsupported lengths and incomplete timing evidence raise, never truncate.
+    """
+    path = Path(path)
+    st = path.stat()
+    cache_key = (str(path.resolve()), st.st_size, st.st_mtime_ns, _ffmpeg_identity())
+    if cache_key in _timeline_cache:
+        _timeline_cache.move_to_end(cache_key)
+        return _timeline_cache[cache_key]
+    media = _media()
+    info = media.probe_video(path)
+    if not math.isfinite(info.duration) or not 0 < info.duration <= media.WEBM_MAX_SECONDS + 0.05:
+        raise UndecodableVideo(f"{path.name}: complete video duration is outside the comparison limit")
+    result = media._run([
+        media.ffmpeg_path(), "-v", "info", *decoder_args(path), "-i", str(path),
+        "-map", "0:v:0", "-an", "-vf",
+        f"scale={FRAME_SIDE}:{FRAME_SIDE},format=rgba,showinfo",
+        "-fps_mode", "passthrough", "-frames:v", str(MAX_NATIVE_FRAMES + 1),
+        "-f", "rawvideo", "-"], capture=True)
+    raw = result.stdout or b""
+    times = tuple(float(t) for t in re.findall(
+        rb"\bn:\s*\d+\s+pts:\s*\S+\s+pts_time:([^\s]+)", result.stderr or b""))
+    count, remainder = divmod(len(raw), FRAME_BYTES)
+    if remainder or not 0 < count <= MAX_NATIVE_FRAMES or len(times) != count:
+        raise UndecodableVideo(f"{path.name}: native frames and timestamps are incomplete")
+    if not all(math.isfinite(t) for t in times) or any(
+            b <= a for a, b in zip(times, times[1:], strict=False)):
+        raise UndecodableVideo(f"{path.name}: native frame timestamps cannot be aligned")
+    origin = times[0]
+    duration = info.duration - origin
+    normalized = tuple(t - origin for t in times)
+    if not 0 < duration - normalized[-1] <= media.WEBM_MAX_SECONDS:
+        raise UndecodableVideo(f"{path.name}: final frame duration cannot be established")
+    value = (raw, normalized, duration)
+    _timeline_cache[cache_key] = value
+    while len(_timeline_cache) > _FRAME_CACHE_MAX:
+        _timeline_cache.popitem(last=False)
+    return value

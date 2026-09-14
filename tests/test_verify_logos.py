@@ -30,8 +30,8 @@ import requests  # noqa: E402
 from PIL import Image, ImageOps  # noqa: E402
 
 import build_pack as bp  # noqa: E402
-import telegram_api as tg_api  # noqa: E402
-import packstate as ps  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_USAGE  # noqa: E402
 from tests._cli_fixtures import _load_standalone, _noise_png_bytes  # noqa: E402
 

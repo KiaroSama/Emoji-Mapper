@@ -1,11 +1,12 @@
-// panel-actions.js -- gestures, history and the network. Loaded after
+// panel-actions.js -- gestures and save queues. History lives in panel-holding.js.
+// Loaded after
 // panel-grid.js, which owns ITEMS, the row model and the mounted cards.
 'use strict';
 
 let lastIdx = null;
 
 function setAll(fn){ remember();
-  for(const it of ITEMS){ if(it.isLogo) continue; it.included = fn(it); setCard(it); }
+  for(const it of ITEMS){ if(it.isLogo) continue; setIncluded(it, fn(it)); }
   // relayout() too, not just the counter: unticking moves the pack splits.
   relayout(); updateCount(); markSelDirty(); }
 
@@ -42,6 +43,7 @@ function paintSelLabel(){
                                               : 'Selection: On';
 }
 document.getElementById('selmode').addEventListener('click', ()=>{
+  remember();
   selMode = !selMode;
   document.body.classList.toggle('selmode', selMode);
   document.getElementById('selmode').setAttribute('aria-pressed', selMode ? 'true' : 'false');
@@ -56,6 +58,7 @@ document.getElementById('selmode').addEventListener('click', ()=>{
 let paintFrom = null, paintTo = null;
 let strokeBase = null;        // what was picked BEFORE this stroke
 let strokeSpan = [];          // indices this stroke is currently claiming
+let lastPick = null;          // a key survives reorders, unlike a remembered index
 grid.addEventListener('pointerdown', e=>{
   if(!selMode) return;
   const box = e.target.closest('.pick'); if(!box) return;
@@ -63,7 +66,10 @@ grid.addEventListener('pointerdown', e=>{
   const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
   if(i < 0 || ITEMS[i].isLogo) return;
   e.preventDefault();
-  paintFrom = i;
+  remember();
+  const anchor = ITEMS.findIndex(x=>x.key===lastPick && x.included);
+  paintFrom = e.shiftKey && anchor >= 0 ? anchor : i;
+  if(!e.shiftKey || anchor < 0) lastPick = ITEMS[i].key;
   paintTo = !picked.has(ITEMS[i].key);   // the whole stroke does what the first box did
   // The stroke is re-applied from this baseline on every move, so dragging BACK
   // shrinks the run instead of leaving whatever the pointer already passed.
@@ -85,7 +91,7 @@ grid.addEventListener('pointermove', e=>{
 function applyStroke(j){
   const [a,b] = [Math.min(paintFrom,j), Math.max(paintFrom,j)];
   const span = [];
-  for(let k=a;k<=b;k++){ if(!ITEMS[k].isLogo) span.push(k); }
+  for(let k=a;k<=b;k++){ if(!ITEMS[k].isLogo && ITEMS[k].included) span.push(k); }
   const now = new Set(span);
   for(const k of strokeSpan){                    // released by dragging back
     if(!now.has(k)) markPicked(ITEMS[k].key, strokeBase.has(ITEMS[k].key));
@@ -112,82 +118,11 @@ grid.addEventListener('click',e=>{
   if(e.shiftKey && lastIdx!==null){
     const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
     const val = !ITEMS[i].included;
-    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; ITEMS[k].included=val; setCard(ITEMS[k]); }
+    for(let k=a;k<=b;k++){ if(ITEMS[k].isLogo) continue; setIncluded(ITEMS[k], val); }
   } else {
-    ITEMS[i].included=!ITEMS[i].included; setCard(ITEMS[i]);
+    setIncluded(ITEMS[i], !ITEMS[i].included);
   }
   lastIdx=i; relayout(); updateCount(); markSelDirty();
-});
-
-// --- Undo / redo ---------------------------------------------------------
-// Snapshots, not a command log. A snapshot is the keys plus the included set,
-// which is nothing, and it cannot drift out of step with ITEMS the way an
-// inverse-operation log can -- and ITEMS is the only thing that decides what
-// gets published. Bounded so a long session cannot grow without limit.
-const HISTORY_MAX = 100;
-let past = [], future = [];
-
-function snapshot(){
-  return {order: ITEMS.map(x=>x.key),
-          included: ITEMS.filter(x=>x.included).map(x=>x.key)};
-}
-
-// Call BEFORE mutating, so the stack holds the state to return to -- or pass
-// the snapshot that was taken before the mutation began, which is what a drag
-// does, since its mutations start at the first dragover and end at the drop.
-// A new action drops the redo branch, which is what every editor does.
-function remember(snap){
-  past.push(snap || snapshot());
-  if(past.length > HISTORY_MAX) past.shift();
-  future.length = 0;
-  updateHistoryButtons();
-}
-
-function applyOrder(order){
-  const pos = new Map(order.map((k,i)=>[k,i]));
-  ITEMS.sort((a,b)=>pos.get(a.key)-pos.get(b.key));
-}
-
-function applySnapshot(snap){
-  const inc = new Set(snap.included);
-  for(const it of ITEMS) if(!it.isLogo) it.included = inc.has(it.key);
-  applyOrder(snap.order);
-  for(const it of ITEMS) if(!it.isLogo) setCard(it);
-  // relayout() moves the mounted nodes rather than rebuilding them, so every
-  // loaded thumbnail, preview and playing video survives an undo.
-  relayout();
-  updateCount();
-  markSelDirty();       // undo can land either side of what the server knows
-  saveOrder();          // order is auto-saved; selection waits for Save, as always
-  updateHistoryButtons();
-}
-
-function undo(){
-  if(!past.length) return;
-  future.push(snapshot());
-  applySnapshot(past.pop());
-  toast('Undone');
-}
-
-function redo(){
-  if(!future.length) return;
-  past.push(snapshot());
-  applySnapshot(future.pop());
-  toast('Redone');
-}
-
-function updateHistoryButtons(){
-  document.getElementById('undo').disabled = !past.length;
-  document.getElementById('redo').disabled = !future.length;
-}
-
-document.getElementById('undo').onclick = undo;
-document.getElementById('redo').onclick = redo;
-addEventListener('keydown', e=>{
-  if(!(e.ctrlKey || e.metaKey)) return;
-  const k = e.key.toLowerCase();
-  if(k === 'z' && !e.shiftKey){ e.preventDefault(); undo(); }
-  else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redo(); }
 });
 
 // --- Losing the server must never be silent ------------------------------
@@ -200,7 +135,6 @@ addEventListener('keydown', e=>{
 // asks before you close the tab on work that never landed.
 let TOK = TOKEN;              // reissued per run; a restart invalidates ours
 let lastAlert = '';
-let orderTimer = null;
 
 // Two queues, one for the order and one for the selection, each holding ONE
 // outstanding state stamped with the revision that produced it. That stamp is
@@ -237,6 +171,8 @@ let orderNextAt = 0, selNextAt = 0;
 // until the request itself changes.
 const PERMANENT = new Set([400, 409]);
 let orderStuck = false, selStuck = false;
+let refusedOrder = null, refusedSel = null;
+const orderSig = keys => keys.join('\0');
 
 // What the SERVER has confirmed, as a comparable signature. Distinct from
 // `pendingSel`, which is only ever "a Save that has not landed yet": edits made
@@ -269,9 +205,11 @@ function setAlert(html){
 }
 
 function offline(why){
-  setAlert('<b>Not saving.</b> ' + why +
+  const safe = document.createElement('span'); safe.textContent = why;
+  setAlert('<b>Not saving.</b> ' + safe.innerHTML +
            ' Your work is only in this page — <b>do not close this tab.</b>' +
-           ' It saves itself as soon as the panel is reachable again.');
+           ' Eligible saves resume when the panel is reachable. <button id="exportDraft">Export draft</button>');
+  document.getElementById('exportDraft').onclick=exportDraft;
 }
 
 /** Take the warning down only when there is nothing left to write.
@@ -343,23 +281,23 @@ async function apiPost(path, body){
  * then, so two saves can never race for the same catalog rows.
  */
 async function flushOrder(order){
-  if(orderFlight || pendingOrder === null || order !== pendingOrder) return false;
+  if(orderFlight || orderStuck || Date.now()<orderNextAt || pendingOrder === null || order !== pendingOrder) return false;
   const rev = orderRev;
   orderFlight = rev;
   let r;
   try{
     r = await apiPost('/api/order', {order});
   }catch(_){
-    return failOrder('The panel at this address is not responding.', 0);
+    return failOrder('The panel at this address is not responding.', 0, order);
   }
   if(!r.ok){
     return failOrder(PERMANENT.has(r.status)
       ? 'The panel rejected this arrangement — its catalog no longer matches '
-        + 'this page. Your arrangement is still here and still guarded; open '
-        + 'this panel in a new tab to reconcile, then arrange again.'
-      : 'The panel refused the save (HTTP ' + r.status + ').', r.status);
+        + 'this page. Export the draft before reconciling the catalog.'
+      : 'The panel refused the save (HTTP ' + r.status + ').', r.status, order);
   }
   orderFlight = 0; orderBackoff = 0; orderStuck = false;
+  logUI('save_succeeded',{revision:rev,count:order.length});
   // Only the acknowledged revision is saved. An arrangement made WHILE this was
   // in flight is still at risk and goes next, instead of being forgotten the
   // moment an older save came back ✓.
@@ -369,7 +307,8 @@ async function flushOrder(order){
   return true;
 }
 
-function failOrder(why, status){
+function failOrder(why, status, submitted){
+  logUI('save_failed',{status,revision:orderFlight});
   orderFlight = 0;
   // The failed snapshot is deliberately NOT written back to pendingOrder: that
   // already holds the newest arrangement, which is this one or something later,
@@ -379,10 +318,13 @@ function failOrder(why, status){
     // Its own comment already said retrying cannot fix a 400 -- and then it
     // scheduled a retry anyway, so a refusal repeated forever. The work stays
     // queued and guarded; what stops is the resubmitting.
-    orderStuck = true;
+    refusedOrder = orderSig(submitted);
+    orderStuck = pendingOrder !== null && orderSig(pendingOrder)===refusedOrder;
     clearTimeout(orderWait);
+    if(!orderStuck){orderBackoff=0;kickOrder(0);}
     return false;
   }
+  orderStuck = false;
   orderBackoff = Math.min(RETRY_MAX, orderBackoff ? orderBackoff * 2 : RETRY_MIN);
   kickOrder(orderBackoff);
   return false;
@@ -396,14 +338,11 @@ function kickOrder(ms){
 }
 
 function saveOrder(){
-  clearTimeout(orderTimer);
   pendingOrder = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
   orderRev++;                           // at risk from this moment on
-  // Reads pendingOrder when it FIRES, not when it was armed: whatever the
-  // grid holds 400 ms from now is what is worth sending.
-  orderTimer = setTimeout(async ()=>{
-    if(await flushOrder(pendingOrder)) toast('Order saved ✓');
-  }, 400);
+  orderStuck = orderSig(pendingOrder)===refusedOrder;
+  // The debounce uses the same eligibility gate as retry and heartbeat.
+  if(!orderStuck){orderBackoff=0;kickOrder(400);}
 }
 
 // Poll for the server rather than waiting for the next drag to discover it is
@@ -504,6 +443,7 @@ grid.addEventListener('drop',e=>{
   if(dragKey===null) return;
   e.preventDefault();
   stopEdgeScroll();
+  if(!acceptHeldDrop()){endDrag(false);return;}
   commitDrag();
   endDrag(true);
 });
@@ -512,15 +452,17 @@ grid.addEventListener('dragend',()=>endDrag(false));
 /** Keep what the drag left in ITEMS: record where it started, save. */
 function commitDrag(){
   const order = ITEMS.map(x=>x.key);
-  if(order.every((k,i)=>k===dragSnap.order[i])) return;   // released where it started
+  if(order.every((k,i)=>k===dragSnap.order[i]) &&
+     selSig(ITEMS.filter(x=>x.included).map(x=>x.key))===selSig(dragSnap.included)) return;
   remember(dragSnap);
+  logUI('reorder',{count:carried.size});
   saveOrder();
 }
 
 function endDrag(committed){
   // A cancelled drag has to put the order back: the model moved with the
   // pointer, so leaving it would make the grid disagree with what was saved.
-  if(!committed && dragKey !== null){ applyOrder(dragSnap.order); relayout(); }
+  if(!committed && dragKey !== null){ applySnapshot(dragSnap,false); }
   for(const k of carried){ const n = cards.get(k); if(n) n.classList.remove('drag'); }
   carried.clear(); dragKey=null; dragSnap=null;
   stopEdgeScroll();
@@ -587,9 +529,10 @@ document.getElementById('top').onclick=()=>window.scrollTo({top:0});
 document.getElementById('bot').onclick=()=>
   window.scrollTo({top:document.documentElement.scrollHeight});
 document.getElementById('all').onclick=()=>selMode ? pickAll() : setAll(()=>true);
-document.getElementById('none').onclick=()=>selMode ? clearPicked() : setAll(()=>false);
+document.getElementById('none').onclick=()=>{ if(selMode){remember();clearPicked();}else setAll(()=>false); };
 document.getElementById('inv').onclick=()=>selMode ? invertPicked() : setAll(x=>!x.included);
 document.getElementById('anim').onclick=()=>{
+  remember();
   ANIM_ON = !ANIM_ON;
   prefs.set('animOn', ANIM_ON ? '1' : '0');
   applyAnim();
@@ -608,6 +551,7 @@ function applyBg(b){
   prefs.set('emojiBg', b);
 }
 document.getElementById('bg').onclick=()=>{
+  remember();
   const cur=BGS.find(x=>document.body.classList.contains('bg-'+x))||'checker';
   applyBg(BGS[(BGS.indexOf(cur)+1)%BGS.length]);
 };
@@ -617,8 +561,9 @@ document.getElementById('bg').onclick=()=>{
 // the owner presses Save again -- the same as if the failure had never
 // happened. What did change is that the refusal is no longer forgotten.
 async function flushSel(excluded){
-  if(selFlight || pendingSel === null || excluded !== pendingSel) return false;
+  if(selFlight || selStuck || Date.now()<selNextAt || pendingSel === null || excluded !== pendingSel) return false;
   const rev = selRev;
+  const checkpoint = pendingSaveSnapshot;
   selFlight = rev;
   let r, j = {};
   // `known` is WHAT THIS PAGE CAN SEE. `excluded` is full-state -- every key
@@ -628,11 +573,11 @@ async function flushSel(excluded){
   // then silently re-include emoji it has never heard of and be told "Saved".
   const known = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
   try{ r = await apiPost('/api/save', {excluded, known}); }
-  catch(_){ return failSel('The panel at this address is not responding.', 0); }
+  catch(_){ return failSel('The panel at this address is not responding.', 0, excluded); }
   j = r.json;
   if(!r.ok){
     return failSel('The panel refused the save (' + (j.error || r.status) + ').',
-                   r.status);
+                   r.status, excluded);
   }
   selFlight = 0; selBackoff = 0; selStuck = false;
   // Acknowledge the snapshot that was SUBMITTED, not whatever the model holds
@@ -640,6 +585,8 @@ async function flushSel(excluded){
   // them as saved is what cleared the dirty state, said "Saved ✓", and let the
   // tab close on an exclusion the server had never been told about.
   ackedSel = selSig(excluded);
+  logUI('save_succeeded',{revision:rev,count:excluded.length});
+  if(checkpoint) savedSnapshot = checkpoint;
   markSelDirty();
   if(rev !== selRev){ kickSel(0); return false; }   // a newer Save is waiting
   pendingSel = null;
@@ -651,7 +598,8 @@ async function flushSel(excluded){
   return true;
 }
 
-function failSel(why, status){
+function failSel(why, status, submitted){
+  logUI('save_failed',{status,revision:selFlight});
   selFlight = 0;
   // Not a toast: a failed save you did not see is how an afternoon of work
   // goes missing. The banner stays up until the save actually lands, and the
@@ -662,10 +610,13 @@ function failSel(why, status){
     // that the body itself is wrong. Re-sending the same body gets the same
     // answer; the selection stays queued and guarded until a reconciled tab
     // saves it.
-    selStuck = true;
+    refusedSel = selSig(submitted);
+    selStuck = pendingSel !== null && selSig(pendingSel)===refusedSel;
     clearTimeout(selWait);
+    if(!selStuck){selBackoff=0;kickSel(0);}
     return false;
   }
+  selStuck = false;
   selBackoff = Math.min(RETRY_MAX, selBackoff ? selBackoff * 2 : RETRY_MIN);
   kickSel(selBackoff);
   return false;
@@ -678,14 +629,16 @@ function kickSel(ms){
   selWait = setTimeout(()=>flushSel(pendingSel), ms);
 }
 
-document.getElementById('save').onclick=()=>{
+function queueSelection(checkpoint){
   pendingSel = currentExcluded();
+  pendingSaveSnapshot = checkpoint;
   selRev++;
-  // A fresh submission is a fresh request, so a permanent refusal of the last
-  // one no longer applies: this body differs from the one that was rejected.
-  selStuck = false;
+  logUI('save_requested',{revision:selRev,count:pendingSel.length});
+  selStuck = selSig(pendingSel)===refusedSel;
+  if(!selStuck){selBackoff=0;selNextAt=Date.now();}
   flushSel(pendingSel);
-};
+}
+document.getElementById('save').onclick=()=>queueSelection(snapshot());
 async function copyText(text){
   if(!text) return;
   // The panel is served from a loopback host, which IS a secure context, so

@@ -31,11 +31,12 @@ import os
 import time
 from pathlib import Path
 
-from collection_state import (_lock_path, _state_path, load_state,
+from emojikit.collection_state import (_lock_path, _state_path, load_state,
                               save_json)
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, load_env)
-from packstate import (LockBusy, exclusive_lock)
-from telegram_api import (Telegram)
+from emojikit.packstate import (LockBusy, exclusive_lock)
+from emojikit.maintenance import writer
+from emojikit.telegram_api import (Telegram)
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, setup_logging
 
@@ -167,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Same lock as the publisher: reordering while a publish appends would
         # move stickers out from under it.
-        with exclusive_lock(_lock_path(data_dir, args.base)):
+        with writer(data_dir), exclusive_lock(_lock_path(data_dir, args.base)):
             state = load_state(data_dir, args.base)
             sets = sorted(state.get("sets", []), key=lambda s: s["index"])
             if not sets:

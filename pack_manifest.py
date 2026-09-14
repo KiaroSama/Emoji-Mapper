@@ -39,12 +39,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pack_gallery
+from emojikit import pack_gallery
 from build_pack import EXIT_FAILED, EXIT_OK, Telegram, load_env
-from collection_state import BRAND_LOGO_DEFAULT
+from emojikit.collection_state import BRAND_LOGO_DEFAULT
 from emojikit import media
 from emojikit.logsetup import record_exit_code, setup_logging
-from packstate import write_json_atomic
+from emojikit.packstate import write_json_atomic
 
 ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "packs"

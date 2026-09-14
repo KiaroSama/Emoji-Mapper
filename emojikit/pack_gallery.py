@@ -30,7 +30,7 @@ from PIL import Image
 
 from emojikit import media
 
-log = logging.getLogger("pack_gallery")
+log = logging.getLogger("emojikit.pack_gallery")
 
 THUMB = 88          # px. Big enough to recognise, small enough that 200 of them
                     # inline stay a page rather than a download.
