@@ -6,7 +6,7 @@ background). This script produces those from your source images.
 Two modes:
 
 1. General mode (any emoji pack):
-     python make_emoji_pngs.py --in input/myset --out build/myset
+     python -m emojikit.make_emoji_pngs --in input/myset --out build/myset
    Reads every image in ``--in`` (.svg via resvg; .png/.jpg/.jpeg/.webp/.gif
    via Pillow) and writes ``<name>.png`` (100x100) into ``--out``. When several
    files share a name (foo.svg, foo.png) they are tried in ``SOURCE_PRIORITY``
@@ -14,7 +14,7 @@ Two modes:
    renders broken or blank.
 
 2. Legacy crypto-coin mode (default, no --in/--out):
-     python make_emoji_pngs.py
+     python -m emojikit.make_emoji_pngs
    Reads ``logos/svg/<ticker>.svg`` and ``logos/png/<ticker>.png`` and writes
    ``logos/emoji/<ticker>.png``.
 
@@ -43,10 +43,10 @@ from pathlib import Path
 import resvg_py
 from PIL import Image
 
-from build_pack import EXIT_USAGE, ingest_exit_code
+from emojikit.build_pack import EXIT_USAGE, ingest_exit_code
 from emojikit import media
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 # Legacy crypto-coin defaults (used when --in/--out are not provided).
 SVG_DIR = ROOT / "logos" / "svg"
 PNG_DIR = ROOT / "logos" / "png"

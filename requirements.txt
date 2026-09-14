@@ -16,6 +16,6 @@ Pillow>=12.3.0          # image decode / 100x100 fitting
 resvg-py>=0.5.0           # note: the import name is resvg_py
 # Lottie -> animated WebP, for the curate panel's animated thumbnails. Bundles
 # rlottie (the same renderer Telegram's own clients use), so there is no system
-# library to install. Only panel.py imports it, and only through
+# library to install. Only emojikit/panel.py imports it, and only through
 # media.lottie_preview_webp.
 rlottie-python>=1.3.8

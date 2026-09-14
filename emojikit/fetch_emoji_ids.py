@@ -17,7 +17,7 @@ Pipeline:
    media (two different IDs pointing at the same file) collapse onto one entry.
 
 Usage:
-  python fetch_emoji_ids.py --ids-file ids.txt [--id 123 --id 456]
+  python -m emojikit.fetch_emoji_ids --ids-file ids.txt [--id 123 --id 456]
                             [--token-env GENERAL_BOT_TOKEN]
                             [--data-dir collection] [--phash-threshold -1]
 """
@@ -31,7 +31,7 @@ import tempfile
 import re
 from pathlib import Path
 
-from build_pack import (REPAINT_MODES, ingest_exit_code, load_env,
+from emojikit.build_pack import (REPAINT_MODES, ingest_exit_code, load_env,
                         repaintable_gate)
 from emojikit.telegram_api import (Telegram)
 from emojikit import identity, media
@@ -39,7 +39,7 @@ from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_a
 from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("fetch_emoji_ids")
 
 

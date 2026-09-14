@@ -14,7 +14,7 @@ from urllib import error, request
 
 from PIL import Image
 
-import panel
+from emojikit import panel
 from emojikit import media
 
 

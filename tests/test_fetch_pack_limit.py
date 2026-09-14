@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import fetch_pack  # noqa: E402
+from emojikit import fetch_pack  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 

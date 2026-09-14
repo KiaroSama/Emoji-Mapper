@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
+from emojikit.build_pack import (EXIT_FAILED, EXIT_OK, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
 from emojikit.packstate import (LockBusy, canonical_map_lock, exclusive_lock, make_intent, pack_family_lock_path, write_json_atomic)
 from emojikit.telegram_api import (AmbiguousUploadError, SetState, Telegram, _input_sticker, _mime_for_path)
 from coins import _http

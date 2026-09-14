@@ -37,7 +37,7 @@ from pathlib import Path
 import requests
 from PIL import Image
 
-from build_pack import (EXIT_FAILED, EXIT_USAGE, ingest_exit_code, load_env)
+from emojikit.build_pack import (EXIT_FAILED, EXIT_USAGE, ingest_exit_code, load_env)
 from emojikit.packstate import (write_json_atomic)
 from emojikit.telegram_api import (Telegram, api_base)
 # The pipeline's single definition of "this image is effectively empty" -- this

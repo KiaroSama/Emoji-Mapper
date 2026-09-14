@@ -20,7 +20,7 @@ from tests._panel_fixtures import ROOT, _make_png
 
 sys.path.insert(0, str(ROOT))
 
-import panel as p
+from emojikit import panel as p
 from emojikit.catalog import Catalog
 
 
@@ -106,7 +106,7 @@ class TheSandboxCannotTakeTheRealPanelsPort(unittest.TestCase):
 
 
 class OnlyOnePanelPerPort(unittest.TestCase):
-    """A second panel must REFUSE the port, not quietly bind over the first.
+    """A second launch reuses the first panel without binding over it.
 
     socketserver sets SO_REUSEADDR by default and on Windows that does not mean
     what it means on Linux: the second bind SUCCEEDS. Two panels then run, both
@@ -116,9 +116,9 @@ class OnlyOnePanelPerPort(unittest.TestCase):
     kills every instance, made a change appear.
     """
 
-    TIMEOUT = 60
+    TIMEOUT = 15
 
-    def test_the_second_instance_exits_instead_of_sharing_the_port(self):
+    def test_the_second_instance_reuses_the_live_panel(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         data = Path(tmp.name)
@@ -132,10 +132,10 @@ class OnlyOnePanelPerPort(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
 
-        argv = [sys.executable, str(ROOT / "panel.py"), "--data-dir", str(data),
-                "--port", str(port), "--no-open"]
+        argv = [sys.executable, "-m", "emojikit.panel", "--data-dir", str(data),
+                "--port", str(port), "--no-open", "--bot-username", "FixtureBot"]
         first = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True)
+                                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", cwd=ROOT)
 
         def stop_first():
             # kill() alone leaves a zombie and an open pipe -- the guarded
@@ -166,10 +166,13 @@ class OnlyOnePanelPerPort(unittest.TestCase):
                 continue
         self.assertTrue(ready, "the first panel never became reachable")
 
-        second = subprocess.run(argv, capture_output=True, text=True,
-                                timeout=self.TIMEOUT)
-        self.assertEqual(second.returncode, 2, second.stdout[-400:])
+        second = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                timeout=self.TIMEOUT, cwd=ROOT)
+        self.assertEqual(second.returncode, 0, (second.stdout + second.stderr)[-900:])
         self.assertIn("already running", second.stdout + second.stderr)
+        self.assertIsNone(first.poll(), "reopening must preserve the first process")
+        with request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=2) as response:
+            self.assertEqual(response.status, 200)
 
 
 if __name__ == "__main__":

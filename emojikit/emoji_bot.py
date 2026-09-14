@@ -12,7 +12,7 @@ Capabilities:
 "Tap to copy" uses Telegram's CopyTextButton (Bot API 9.0): an inline button
 with ``copy_text`` copies its text to the clipboard on click.
 
-Run:  python emoji_bot.py        (uses GENERAL_BOT_TOKEN from .env)
+Run:  python -m emojikit.emoji_bot        (uses GENERAL_BOT_TOKEN from .env)
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import re
 import time
 from pathlib import Path
 
-from build_pack import (load_env, safe_int_env)
+from emojikit.build_pack import (load_env, safe_int_env)
 from emojikit.packstate import (write_json_atomic)
 from emojikit.telegram_api import (BotApiError, Telegram)
 from emojikit.logsetup import record_exit_code, redact, setup_logging
@@ -126,7 +126,7 @@ PER_ID_COST = 110             # worst-case chars per id (rich <tg-emoji> + code)
 COPY_MAX = 256                # CopyTextButton.text hard limit (Bot API)
 
 # getUpdates cursor, persisted so a restart does not replay handled updates.
-OFFSET_FILE = Path(__file__).resolve().parent / "state_emoji_bot.json"
+OFFSET_FILE = Path(__file__).resolve().parent.parent / "state_emoji_bot.json"
 
 
 def _load_offset() -> int:
@@ -529,4 +529,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(record_exit_code(main()))
-

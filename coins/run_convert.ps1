@@ -11,8 +11,8 @@
 # quarantined, or when the converter itself reports failures -- never pretend a
 # dead run succeeded.
 #
-# This script lives in coins/. The shared converter (make_emoji_pngs.py) and the
-# virtual environment (.venv) are at the PROJECT ROOT, one level up. Coin images
+# This script lives in coins/. The converter lives in emojikit/ and the virtual
+# environment (.venv) stays at the PROJECT ROOT, one level up. Coin images
 # live in coins/logos/{svg,png} and are written to coins/logos/emoji.
 
 # NOT a script-wide SilentlyContinue. That swallowed every failure below,
@@ -27,7 +27,7 @@ $ProjectRoot = Split-Path -Parent $ScriptRoot
 Set-Location -LiteralPath $ScriptRoot
 
 $py       = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
-$convert  = Join-Path $ProjectRoot 'make_emoji_pngs.py'
+$convert  = Join-Path $ProjectRoot 'emojikit\make_emoji_pngs.py'
 $svgDir   = Join-Path $ScriptRoot 'logos\svg'
 $pngDir   = Join-Path $ScriptRoot 'logos\png'
 $emojiDir = Join-Path $ScriptRoot 'logos\emoji'
@@ -64,11 +64,11 @@ $finished = $false
 # Pass 1: SVGs (hang-prone) under the watchdog. Start-Process joins -ArgumentList
 # with plain spaces, so every path must carry its own quotes -- this project
 # lives under "G:\Program Files\...".
-$svgArgs = @("`"$convert`"", '--in', "`"$svgDir`"", '--out', "`"$emojiDir`"")
+$svgArgs = @('-m', 'emojikit.make_emoji_pngs', '--in', "`"$svgDir`"", '--out', "`"$emojiDir`"")
 for ($iter = 1; $iter -le 100; $iter++) {
-    $proc = Start-Process -FilePath $py -ArgumentList $svgArgs `
+    $proc = Start-Process -FilePath $py -ArgumentList $svgArgs -WorkingDirectory $ProjectRoot `
         -PassThru -NoNewWindow `
-        -RedirectStandardOutput 'emoji_conv.txt' -RedirectStandardError 'emoji_err.txt'
+        -RedirectStandardOutput (Join-Path $ScriptRoot 'emoji_conv.txt') -RedirectStandardError (Join-Path $ScriptRoot 'emoji_err.txt')
     if (-not $proc) {
         # No process object means nothing is running, so every $proc member
         # below reads as $null and the watchdog would "supervise" a corpse.
@@ -130,8 +130,11 @@ if (-not $finished) {
 # Pass 2: raster PNGs (fast, no watchdog needed). Also the fallback for SVGs
 # that produced nothing, so it runs even when pass 1 reported failures.
 if (Test-Path -LiteralPath $pngDir) {
-    & $py $convert --in $pngDir --out $emojiDir
-    if ($LASTEXITCODE -gt $exit) { $exit = $LASTEXITCODE }
+    Push-Location -LiteralPath $ProjectRoot
+    try {
+        & $py -m emojikit.make_emoji_pngs --in $pngDir --out $emojiDir
+        if ($LASTEXITCODE -gt $exit) { $exit = $LASTEXITCODE }
+    } finally { Pop-Location }
 }
 
 exit $exit

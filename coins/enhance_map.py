@@ -17,7 +17,7 @@ import json
 import re
 from pathlib import Path
 
-from build_pack import (EXIT_FAILED)
+from emojikit.build_pack import (EXIT_FAILED)
 from emojikit.packstate import (LockBusy, canonical_map_lock, write_json_atomic)
 # The suffix list and the explicit aliases used to live here while the fetchers
 # carried their own copy without the aliases, so "which asset is avaxc" had two

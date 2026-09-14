@@ -32,10 +32,10 @@ sys.path.insert(0, str(ROOT))
 MAP_LOCK = "canonical_map_lock"
 PACK_LOCK = "exclusive_lock"
 
-# Scanned tools. `emojikit/` holds no locks; the launcher and the panel mutate
-# nothing that is locked.
+# Scan executable modules and coin tools after the package relocation.
 SOURCES = sorted(
-    [p for p in ROOT.glob("*.py") if p.name != "conftest.py"]
+    [p for p in (ROOT / "emojikit").glob("*.py")
+     if '\nif __name__ == "__main__":' in p.read_text(encoding="utf-8")]
     + list((ROOT / "coins").glob("*.py"))
 )
 

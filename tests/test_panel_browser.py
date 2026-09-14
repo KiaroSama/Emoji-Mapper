@@ -27,7 +27,7 @@ from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-import panel
+from emojikit import panel
 from tests._panel_browser_fixtures import DENY_STORAGE, synth
 
 # Eight, because the drag and revision suites below reach for card six. One

@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from emojikit import pack_gallery
-import pack_manifest as pm
+from emojikit import pack_manifest as pm
 
 
 def _sticker(cid, emoji="\U0001f600", *, animated=False, video=False):

@@ -10,8 +10,8 @@ A shared library for the collector, publishing workflows and local curation:
                    deduplicates emoji at ingest time and tracks what has already
                    been uploaded (idempotent, resumable, duplicate-proof).
 
-The command-line entry points stay at the project root. State, API, migration,
-gallery and panel helpers live here, so their implementations have one home.
+Run the command-line modules from the project root with ``python -m emojikit.NAME``.
+State, API, migration, gallery and panel implementations share this package.
 """
 
 from __future__ import annotations

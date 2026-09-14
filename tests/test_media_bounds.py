@@ -32,8 +32,8 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import add_media  # noqa: E402
-from build_pack import EXIT_FAILED, EXIT_USAGE  # noqa: E402
+from emojikit import add_media  # noqa: E402
+from emojikit.build_pack import EXIT_FAILED, EXIT_USAGE  # noqa: E402
 from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import (Catalog, PHASH_BITS,  # noqa: E402
                               PHASH_MAX_THRESHOLD, check_phash_threshold)

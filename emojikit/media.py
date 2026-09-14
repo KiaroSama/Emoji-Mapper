@@ -113,7 +113,7 @@ def ff_timeout() -> float:
     """Per-child ffmpeg/ffprobe wall limit; override with EMOJI_FFMPEG_TIMEOUT."""
     # Lazy import: emojikit stays importable without the CLI layer (and this is
     # called once per child process, so the sys.modules lookup is free).
-    from build_pack import safe_int_env
+    from emojikit.build_pack import safe_int_env
     return safe_int_env("EMOJI_FFMPEG_TIMEOUT", FFMPEG_TIMEOUT, minimum=1)
 
 
@@ -299,7 +299,7 @@ def _load_image(src: Path) -> Image.Image:
     """Decode a raster or SVG source into an RGBA Pillow image."""
     if src.suffix.lower() == ".svg":
         # The SVG rasterizer is only needed for SVG; import lazily.
-        from make_emoji_pngs import _render_svg  # type: ignore
+        from emojikit.make_emoji_pngs import _render_svg  # type: ignore
         img = _render_svg(src)
         if img is None:
             raise MediaError(f"failed to render SVG: {src.name}")
@@ -497,7 +497,7 @@ def _load_lottie(src: Path) -> dict:
 #: can show 60+ cards at once. Measured per animation: 30fps = 54 frames /
 #: 119 KB, 20fps = 37 / 80 KB, 15fps = 28 / 60 KB, 12fps = 22 / 48 KB. 15 halves
 #: both the decode work and the bytes against 30 and still reads as motion on a
-#: 104 px tile. Override with ``panel.py --preview-fps`` rather than editing
+#: 104 px tile. Override with ``python -m emojikit.panel --preview-fps`` rather than editing
 #: this; the cache is keyed by content hash, so changing it means clearing
 #: ``<data-dir>/preview/``.
 PREVIEW_SIZE = 104

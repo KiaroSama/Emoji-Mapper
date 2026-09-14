@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 from emojikit import packstate as ps  # noqa: E402
-from build_pack import EXIT_FAILED, EXIT_OK  # noqa: E402
+from emojikit.build_pack import EXIT_FAILED, EXIT_OK  # noqa: E402
 from coins import _inventory  # noqa: E402
 from coins import fetch_cmc as coins_cmc  # noqa: E402
 from coins import fetch_paprika as coins_fp  # noqa: E402

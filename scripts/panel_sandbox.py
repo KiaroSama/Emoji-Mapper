@@ -36,7 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from panel import DEFAULT_PORT as PANEL_PORT  # noqa: E402 - needs ROOT on the path
+from emojikit.panel import DEFAULT_PORT as PANEL_PORT  # noqa: E402 - needs ROOT on the path
 
 # IMPORTED, never re-typed: the sandbox's whole job is to stay off the port a
 # real panel uses, and two copies of that number would drift the day one moves.
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"the real catalog at {source} is NOT served and cannot be modified",
           flush=True)
 
-    cmd = [sys.executable, str(ROOT / "panel.py"), "--data-dir", str(tmp),
+    cmd = [sys.executable, "-m", "emojikit.panel", "--data-dir", str(tmp),
            "--port", str(args.port), "--no-open", *panel_args]
     return subprocess.call(cmd, cwd=ROOT)
 

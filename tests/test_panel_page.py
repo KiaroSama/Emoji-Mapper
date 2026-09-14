@@ -17,7 +17,7 @@ from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-import panel as p
+from emojikit import panel as p
 
 PAGE = p.PAGE
 SCRIPT = p.SCRIPT
@@ -501,7 +501,7 @@ class ThePanelPageActuallyShips(unittest.TestCase):
     """
 
     def test_the_page_is_a_real_file_inside_the_repo(self):
-        asset = p.ASSET_DIR / "panel.html"
+        asset = p.ASSET_DIR / "emojikit.panel.html"
         self.assertTrue(asset.is_file(), f"the panel page is missing: {asset}")
         self.assertTrue(
             str(asset.resolve()).startswith(str(ROOT.resolve())),

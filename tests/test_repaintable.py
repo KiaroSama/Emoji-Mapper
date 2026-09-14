@@ -26,9 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_pack as bp  # noqa: E402
-import fetch_emoji_ids  # noqa: E402
-import fetch_pack  # noqa: E402
+from emojikit import build_pack as bp  # noqa: E402
+from emojikit import fetch_emoji_ids  # noqa: E402
+from emojikit import fetch_pack  # noqa: E402
 from emojikit import media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
