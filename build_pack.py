@@ -42,12 +42,12 @@ import time
 from pathlib import Path
 
 
-from announce import announce_packs
-from packstate import (LockBusy, StateInvalid, _intent_key,
+from emojikit.announce import announce_packs
+from emojikit.packstate import (LockBusy, StateInvalid, _intent_key,
                        exclusive_lock, make_intent,
                        pack_family_lock_path, validate_state_shape,
                        write_json_atomic)
-from telegram_api import (DEFAULT_EMOJI, MAX_PER_SET, PER_SET,
+from emojikit.telegram_api import (DEFAULT_EMOJI, MAX_PER_SET, PER_SET,
                           AmbiguousUploadError, SetState, Telegram)
 
 ROOT = Path(__file__).resolve().parent

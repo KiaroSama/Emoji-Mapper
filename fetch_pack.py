@@ -22,13 +22,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from build_pack import (EXIT_USAGE, REPAINT_MODES, ingest_exit_code,
                         load_env, repaintable_gate)
-from telegram_api import (Telegram)
+from emojikit.telegram_api import (Telegram)
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
+from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -105,12 +107,8 @@ def fetch_one(tg: Telegram, cat: Catalog, name: str, data_dir: Path,
             # doubled, once per sticker of every fetched pack.
             key, phash = identity.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
-            dest = _media_path(data_dir, fmt, key, ext)
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp.replace(dest)
-            else:
-                tmp.unlink(missing_ok=True)
+            dest = store_media(tmp, _media_path(data_dir, fmt, key, ext), fmt, key,
+                               provenance={"source": name, "file_unique_id": fuid})
             _, is_new = cat.add(content_key=key, fmt=fmt, file_path=dest,
                                 emojis=emojis, keywords=keywords, source=name,
                                 phash=phash, file_unique_id=fuid)
@@ -177,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
 
     total = {"new": 0, "dedup": 0, "failed": 0, "repaintable": 0}
     packs_failed = 0
-    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
+    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat, \
+            tempfile.TemporaryDirectory(prefix="pack-", dir=tmp_dir) as scratch:
+        tmp_dir = Path(scratch)
         for raw in args.packs:
             name = pack_name(raw)
             try:
@@ -193,11 +193,6 @@ def main(argv: list[str] | None = None) -> int:
             for k in total:
                 total[k] += c[k]
         stats = cat.stats()
-
-    # Clean the scratch download directory (keep the catalog + media).
-    for f in tmp_dir.glob("*"):
-        f.unlink(missing_ok=True)
-    tmp_dir.rmdir() if not any(tmp_dir.iterdir()) else None
 
     log.info("TOTAL ingested: new=%d dedup=%d failed=%d packs_failed=%d "
              "repaintable_skipped=%d", total["new"], total["dedup"],

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import pack_gallery
+from emojikit import pack_gallery
 import pack_manifest as pm
 
 
@@ -244,7 +244,7 @@ class ThePageCarriesTheDataToo(unittest.TestCase):
         """The page inlines both frames' worth of data, so the ONLY thing
         stopping 150 simultaneous decodes is that the card starts on its still
         and the observer opts it in."""
-        page_src = Path("pack_gallery.py").read_text(encoding="utf-8")
+        page_src = Path("emojikit/pack_gallery.py").read_text(encoding="utf-8")
         self.assertIn('data-still="{still}"', page_src)
         self.assertIn("src=\"{still}\"", page_src, "an animated card must START on the still")
         self.assertIn("freezeAll()", page_src)

@@ -39,8 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_pack as bp  # noqa: E402
-import telegram_api as tg_api  # noqa: E402
-import packstate as ps  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 from coins import rebuild_dedup as rd  # noqa: E402
 from coins import _dedup_plan as cfg  # noqa: E402
 from tests._rebuild_fixtures import (  # noqa: E402

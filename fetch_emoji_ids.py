@@ -27,14 +27,16 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import tempfile
 import re
 from pathlib import Path
 
 from build_pack import (REPAINT_MODES, ingest_exit_code, load_env,
                         repaintable_gate)
-from telegram_api import (Telegram)
+from emojikit.telegram_api import (Telegram)
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
+from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, redact, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -201,12 +203,9 @@ def fetch_ids(tg: Telegram, cat: Catalog, ids: list[str], data_dir: Path,
             # One decode for both keys -- see identity.fingerprint.
             key, phash = identity.fingerprint(tmp, fmt)
             ext = media.media_extension(tmp, fmt)
-            dest = _media_path(data_dir, fmt, key, ext)
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp.replace(dest)
-            else:
-                tmp.unlink(missing_ok=True)
+            dest = store_media(tmp, _media_path(data_dir, fmt, key, ext), fmt, key,
+                               provenance={"source": "bot-inventory", "file_unique_id": fuid,
+                                           "custom_emoji_id": cid})
             _, is_new = cat.add(content_key=key, fmt=fmt, file_path=dest,
                                 emojis=emojis, keywords=keywords,
                                 source="bot-inventory", phash=phash,
@@ -284,15 +283,11 @@ def main(argv: list[str] | None = None) -> int:
         log.error("getMe failed: %s", redact(str(exc)))
         return 2
 
-    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
+    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat, \
+            tempfile.TemporaryDirectory(prefix="ids-", dir=tmp_dir) as scratch:
+        tmp_dir = Path(scratch)
         counts = fetch_ids(tg, cat, ids, data_dir, tmp_dir, args.repaintable, tint)
         stats = cat.stats()
-
-    # Clean the scratch download directory (keep the catalog + media).
-    for f in tmp_dir.glob("*"):
-        f.unlink(missing_ok=True)
-    if tmp_dir.exists() and not any(tmp_dir.iterdir()):
-        tmp_dir.rmdir()
 
     log.info("TOTAL: unique_ids=%d new=%d dedup=%d failed=%d missing=%d "
              "repaintable_skipped=%d repainted=%d", len(ids), counts["new"],

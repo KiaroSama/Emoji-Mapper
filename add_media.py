@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from PIL import Image
@@ -32,6 +33,7 @@ from PIL import Image
 from build_pack import ingest_exit_code
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
+from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, setup_logging
 
 ROOT = Path(__file__).resolve().parent
@@ -133,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     extra_kw = [k.strip() for k in args.keywords.split(",") if k.strip()]
 
     counts = {"new": 0, "dedup": 0, "failed": 0}
-    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat:
+    with Catalog(data_dir / "catalog.db", phash_threshold=args.phash_threshold) as cat, \
+            tempfile.TemporaryDirectory(prefix="local-", dir=tmp_dir) as scratch:
+        tmp_dir = Path(scratch)
         for src in sources:
             try:
                 fmt = choose_format(src, args.as_fmt)
@@ -142,12 +146,8 @@ def main(argv: list[str] | None = None) -> int:
                 # launches over the same clip -- the priciest step in ingest,
                 # doubled.
                 key, phash = identity.fingerprint(tmp, fmt)
-                dest = _media_path(data_dir, fmt, key)
-                if not dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    tmp.replace(dest)
-                else:
-                    tmp.unlink(missing_ok=True)
+                dest = store_media(tmp, _media_path(data_dir, fmt, key), fmt, key,
+                                   provenance={"source": "local", "name": src.name})
                 kw = [src.stem.lower()] + extra_kw
                 _, is_new = cat.add(content_key=key, fmt=fmt, file_path=dest,
                                     emojis=[args.emoji], keywords=kw,
@@ -159,11 +159,6 @@ def main(argv: list[str] | None = None) -> int:
                 log.warning("failed %s: %s", src.name, exc)
                 counts["failed"] += 1
         stats = cat.stats()
-
-    for f in tmp_dir.glob("*"):
-        f.unlink(missing_ok=True)
-    if tmp_dir.exists() and not any(tmp_dir.iterdir()):
-        tmp_dir.rmdir()
 
     print(f"Done. new={counts['new']} dedup={counts['dedup']} failed={counts['failed']}",
           flush=True)

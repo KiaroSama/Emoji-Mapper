@@ -32,6 +32,11 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Definitio
 # The suite prints emoji and writes UTF-8 logs; without this the child inherits
 # the console code page and dies on encode instead of on a real failure.
 $env:PYTHONUTF8 = '1'
+$testTemp = Join-Path $Root 'logs/test-temp'
+New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+$env:TEMP = $testTemp
+$env:TMP = $testTemp
+$env:TMPDIR = $testTemp
 
 function Resolve-Python {
     if ($Python) {
@@ -97,7 +102,14 @@ if (-not $py) {
 }
 Write-Host "Python: $py" -ForegroundColor DarkGray
 
-$code = Invoke-Step 'Byte-compile all sources' $py @('-m', 'compileall', '-q', '.')
+# Git's source list includes new unignored files and excludes runtime snapshots,
+# environments, private data and caches. Compiling '.' traversed all of them.
+$sources = @(& git -c core.quotePath=false -C $Root ls-files --cached --others --exclude-standard -- '*.py')
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$sourceArgs = @($sources | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) } |
+    ForEach-Object { '"' + $_ + '"' })
+if (-not $sourceArgs.Count) { throw 'No Python source files were discovered.' }
+$code = Invoke-Step 'Byte-compile all sources' $py (@('-m', 'compileall', '-q') + $sourceArgs)
 if ($code -ne 0) { exit $code }
 
 # `ruff check .` and nothing else: ruff.toml at the repo root carries the rule

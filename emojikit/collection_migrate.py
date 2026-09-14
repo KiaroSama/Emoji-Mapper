@@ -1,62 +1,34 @@
-"""Moving a content key is a versioned migration, not three SQL updates.
+"""A catalog identity migration owns every writer and every durable reference.
 
-The content key is this project's primary identity, and it is written down in
-more places than the table it names. A decode fix that changes what a key IS
-therefore has to move every one of them together:
-
-| where | what holds a key |
-|---|---|
-| `items` | the row id, plus a derived `phash` and a `file_path` whose NAME embeds the key |
-| `publications` | the foreign key carrying each `custom_emoji_id` |
-| `seen_files` | the foreign key mapping a Telegram `file_unique_id` to an item |
-| `publish_<base>.json` | `sets[].keys[]` and `skipped[]` -- what `reconcile_set` attributes live stickers by |
-| `publish_plan_<base>.json` | the frozen plan, `{format: [keys]}` |
-
-The first round moved the three tables and stopped. The owner's own state file
-was left naming 51 keys that no longer existed, so the next `reconcile_set()`
-would have read an untouched live pack as reordered or replaced; the stored
-`phash` stayed stale even where a key happened not to move; and the archived
-files kept the old key in their names. "Run `pack_archive.py --sync` next" was
-the documented finish, which is an unverified manual step, not a migration.
-
-Two invariants make the rest safe:
-
-* **Every stage is idempotent.** Each one is expressed as "make it so", never
-  "apply a delta", so an interrupted run is repaired by running it again and a
-  second migration over a finished catalog is a verified no-op. That is what
-  lets the journal be a breadcrumb rather than a transaction log.
-* **Nothing is applied from an incomplete picture.** A file that cannot be read
-  is not "unchanged"; if the survey cannot establish what every row should
-  become, the migration refuses rather than half-converting.
-
-JSON replacement and a SQL COMMIT are not one atomic transaction and this does
-not pretend otherwise. The journal records the intended map and how far the run
-got, so a crash between stages is visible and resumable instead of silent.
+The canonical data-directory lock spans survey, backup, JSON/media/SQL changes,
+verification and journal retirement. The SQLite snapshot plus rollback manifest
+preserve the complete prior application state. Evidenced per-file intents replay
+before survey so an interrupted rename cannot strand the old database path.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import packstate
+from emojikit import packstate
 from emojikit import identity
+from emojikit import migration_bundle as bundle
+from emojikit.maintenance import JOURNAL_NAME, maintenance
 # The signed-storage conversion is imported, never re-implemented: a 64-bit
 # hash that overflowed SQLite's signed range once dropped rows from this very
 # catalog, and a second copy of that arithmetic is how the two drift apart.
 from emojikit.catalog import _phash_from_db, _phash_to_db
 from emojikit.errors import MediaError
 
-log = logging.getLogger("collection_migrate")
+log = logging.getLogger("emojikit.collection_migrate")
 
-JOURNAL_NAME = "identity-migration.journal.json"
-JOURNAL_VERSION = 1
+JOURNAL_VERSION = bundle.VERSION
 
 # Every table whose rows are named by a content key. Missing one leaves a
 # publication pointing at a row that no longer exists, which is worse than not
@@ -138,6 +110,8 @@ def survey(data_dir: Path) -> Survey:
             continue
         try:
             fresh, phash = identity.fingerprint(p, "video")
+            if old.count(":") == 2:
+                fresh = identity.preserve_collision_key(p, fresh, old)
         except (MediaError, OSError, ValueError) as exc:
             out.undecodable.append(f"{old}: {type(exc).__name__}: {exc}")
             continue
@@ -192,8 +166,11 @@ def backup_catalog(db: Path) -> Path:
         # in the same second must not silently share one snapshot.
         suffix = "" if attempt == 0 else f"-{attempt}"
         dest = db.with_name(f"catalog.before-video-identity-{stamp}{suffix}.db")
-        if not dest.exists():
+        try:
+            dest.open("xb").close()
             break
+        except FileExistsError:
+            continue
     else:
         raise RuntimeError(f"cannot find an unused backup name beside {db}")
 
@@ -248,7 +225,10 @@ def read_journal(data_dir: Path) -> dict | None:
     if not p.is_file():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict) or not doc:
+            raise ValueError("journal must contain a migration object")
+        return doc
     except (OSError, ValueError) as exc:
         raise RuntimeError(
             f"{p} exists but cannot be read ({exc}). A migration was "
@@ -269,16 +249,8 @@ def _apply_database(db: Path, key_map: dict[str, str],
     con = sqlite3.connect(db)
     try:
         con.execute("BEGIN IMMEDIATE")
-        moved = 0
-        for old, new in key_map.items():
-            for table, column in KEY_REFERENCES:
-                cur = con.execute(
-                    f"UPDATE {table} SET {column}=? WHERE {column}=?", (new, old))
-                if table == "items":
-                    moved += cur.rowcount
-        for key, phash in phashes.items():
-            con.execute("UPDATE items SET phash=? WHERE content_key=?",
-                        (_phash_to_db(phash), key))
+        moved = bundle.rewrite_database(
+            con, key_map, {key: _phash_to_db(value) for key, value in phashes.items()})
         con.commit()
         return moved
     except Exception:
@@ -304,7 +276,7 @@ def _remap(node, key_map: dict[str, str]):
     return node
 
 
-def _apply_state(data_dir: Path, key_map: dict[str, str]) -> list[str]:
+def _apply_state(data_dir: Path, key_map: dict[str, str], states=None) -> list[str]:
     """Rewrite the state and plan files. Idempotent: a key already moved is
     simply not in the map any more, so a second pass changes nothing."""
     touched = []
@@ -316,50 +288,17 @@ def _apply_state(data_dir: Path, key_map: dict[str, str]) -> list[str]:
                 f"{path.name} could not be read ({exc}); refusing to leave it "
                 f"naming keys the catalog no longer has") from exc
         fresh = _remap(doc, key_map)
+        if states is not None:
+            fresh = states[path.name]["after"]
         if fresh != doc:
             packstate.write_json_atomic(path, fresh)
             touched.append(path.name)
     return touched
 
 
-def _apply_files(db: Path, key_map: dict[str, str]) -> list[str]:
-    """Rename archived media whose NAME embeds the old key, and record it.
-
-    The archive names a file `<slot>_<format>_<key[:12]>.<ext>`, so a moved key
-    leaves every archived file misnamed. Doing it here rather than telling the
-    owner to run the archive tool afterwards is the difference between a
-    migration and a migration plus an unverified manual step -- and it needs no
-    network, because the rename is decided entirely by the map.
-    """
-    renamed = []
-    con = sqlite3.connect(db)
-    try:
-        con.execute("BEGIN IMMEDIATE")
-        for old, new in key_map.items():
-            row = con.execute("SELECT file_path FROM items WHERE content_key=?",
-                              (new,)).fetchone()
-            if not row:
-                continue
-            path = Path(row[0])
-            want_stem = path.name.replace(old.split(":", 1)[1][:12],
-                                          new.split(":", 1)[1][:12])
-            if want_stem == path.name:
-                continue
-            dest = path.with_name(want_stem)
-            if path.is_file():
-                os.replace(path, dest)
-                renamed.append(dest.name)
-            elif not dest.is_file():
-                continue          # nothing on disk either way; leave the row
-            con.execute("UPDATE items SET file_path=? WHERE content_key=?",
-                        (str(dest), new))
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
-    return renamed
+def _apply_files(db: Path, files: list[dict]) -> list[str]:
+    """Replay durable, verified source/destination intents before re-survey."""
+    return bundle.apply_files(db, files)
 
 
 # --------------------------------------------------------------------------- #
@@ -380,110 +319,147 @@ def _bases(data_dir: Path) -> list[str]:
     return sorted(set(out))
 
 
-def apply_migration(data_dir: Path, sv: Survey,
+def apply_migration(data_dir: Path, sv: Survey | None = None,
                     recovered: dict[str, str] | None = None) -> dict:
-    """Do it, under the writer exclusion every other tool honours.
-
-    The pack-family lock is the project's writer-exclusion protocol: ingest,
-    publishing, the panel's saves and the archive all take it, so taking it here
-    is what makes this safe against them. A migration-only lock nobody else
-    honours would be decoration.
-    """
-    db = catalog_path(data_dir)
-    with ExitStack() as stack:
+    """Own discovery through final verification and retirement, across writers."""
+    from emojikit.collection_state import _lock_path
+    with maintenance(data_dir) as data_dir, ExitStack() as stack:
+        db = catalog_path(data_dir)
         for base in _bases(data_dir):
+            stack.enter_context(packstate.exclusive_lock(_lock_path(data_dir, base)))
             stack.enter_context(
                 packstate.exclusive_lock(packstate.pack_family_lock_path(base)))
-
-        doc = read_journal(data_dir) or {}
-
-        # A resumed run CANNOT re-derive the map by surveying. Once the
-        # database stage has committed, the rows already hold their new keys,
-        # so a fresh survey reports nothing pending -- while the state files
-        # still name the old ones. The journal's map is the only record that
-        # those two facts belong together, which is the whole reason it is
-        # written before the first durable change. Merged, not replaced: a
-        # resume may also have new work of its own.
-        key_map = {**(recovered or {}), **doc.get("key_map", {}), **sv.key_map}
-        phashes = {**doc.get("phash", {}), **sv.phashes}
-
-        doc.update({"version": JOURNAL_VERSION,
-                    "started_utc": doc.get("started_utc")
-                    or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "key_map": key_map,
-                    "phash": phashes,
-                    "stage": doc.get("stage", "planned")})
-        _write_journal(data_dir, doc)
-
-        result = {"backup": doc.get("backup"), "moved": 0,
-                  "state": [], "renamed": []}
-        if not doc.get("backup"):
-            result["backup"] = str(backup_catalog(db))
-            doc["backup"] = result["backup"]
-            doc["stage"] = "backup"
+        doc = read_journal(data_dir)
+        if doc is None:
+            # Never trust a caller's pre-lock survey: a writer may have changed
+            # any key, path or plan between its discovery and this ownership.
+            sv = survey(data_dir)
+            if not sv.complete or sv.collisions:
+                raise RuntimeError("migration survey is incomplete or contains collisions")
+            key_map = {**(recovered or {}), **sv.key_map}
+            required = required_state_keys(data_dir)
+            uncovered = {k for keys in required.values() for k in keys} - set(key_map)
+            if uncovered:
+                raise RuntimeError("required state references have no trusted mapping: "
+                                   + ", ".join(sorted(uncovered)))
+            files = bundle.plan_files(db, key_map)
+            states = {}
+            for path in state_files(data_dir):
+                original = json.loads(path.read_text(encoding="utf-8"))
+                states[path.name] = {"before": original, "after": _remap(original, key_map)}
+            backup = backup_catalog(db)
+            phashes = {key: _phash_to_db(value) for key, value in sv.phashes.items()}
+            doc = bundle.make_bundle(data_dir, backup, key_map, phashes, files, states)
+            doc["started_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            doc["bundle"] = str(backup.with_suffix(".rollback.json"))
+            packstate.write_json_atomic(Path(doc["bundle"]), doc)
             _write_journal(data_dir, doc)
-
-        result["moved"] = _apply_database(db, key_map, phashes)
+        current = bundle.verify_current(data_dir, doc)
+        if doc.get("direction") == "restore":
+            raise RuntimeError("rollback is interrupted; re-run restore --apply with its bundle")
+        result = {"backup": doc["backup"], "bundle": doc["bundle"], "moved": 0,
+                  "state": [], "renamed": [], "key_map": doc["key_map"]}
+        if current == doc["before_signature"]:
+            result["moved"] = _apply_database(db, doc["key_map"], doc["phash"])
         doc["stage"] = "database"
         _write_journal(data_dir, doc)
-
-        result["state"] = _apply_state(data_dir, key_map)
+        result["state"] = _apply_state(data_dir, doc["key_map"], doc["states"])
         doc["stage"] = "state"
         _write_journal(data_dir, doc)
-
-        result["renamed"] = _apply_files(db, key_map)
+        result["renamed"] = _apply_files(db, doc["files"])
         doc["stage"] = "files"
         _write_journal(data_dir, doc)
+        bundle.verify_applied(data_dir, doc)
+        issues = invariant_issues(data_dir, moved=set(doc["key_map"]))
+        if issues:
+            raise RuntimeError("migration final verification failed: " + "; ".join(issues))
+        doc["stage"] = "verified"
+        _write_journal(data_dir, doc)
+        packstate.write_json_atomic(Path(doc["bundle"]), doc)
+        journal_path(data_dir).unlink()
+        return result
 
-    journal_path(data_dir).unlink(missing_ok=True)
-    return result
+
+def restore_migration(data_dir: Path, manifest: Path, *, apply: bool) -> None:
+    from emojikit.collection_state import _lock_path
+    with maintenance(data_dir) as directory, ExitStack() as stack:
+        for base in _bases(directory):
+            stack.enter_context(packstate.exclusive_lock(_lock_path(directory, base)))
+            stack.enter_context(packstate.exclusive_lock(packstate.pack_family_lock_path(base)))
+        doc = json.loads(manifest.read_text(encoding="utf-8"))
+        existing = read_journal(directory)
+        if existing and Path(existing.get("bundle", "")).resolve() != manifest.resolve():
+            raise RuntimeError("a different migration journal is still pending")
+        bundle.verify_current(directory, doc)
+        if not apply:
+            return
+        bundle.restore(directory, doc, _write_journal)
+        packstate.write_json_atomic(manifest, doc)
+        journal_path(directory).unlink()
 
 
 def recover_key_map(data_dir: Path, backup: Path) -> dict[str, str]:
-    """Reconstruct old -> new for a migration that ran before journals existed.
+    """Recover legacy keys only from shared, unambiguous immutable identifiers.
 
-    The first round moved the table rows and kept no record of the map, so the
-    state files it left behind cannot be repaired by surveying: the catalog
-    already holds the new keys, so a fresh survey reports nothing pending while
-    the state still names the old ones. The backup that round DID write is the
-    missing half, and pairing it with the live catalog recovers the map.
-
-    Content-based, never positional -- position-based mapping is the defect
-    this project has already been bitten by twice. A row is paired by the part
-    of its identity the migration did not invent:
-
-    * the same `file_path` in both catalogs is the same row (media that was
-      never archived, so nothing renamed it), then
-    * the same path once each side's OWN key prefix is blanked out, which is
-      exactly what the archive rename changes and nothing else.
-
-    An old row that matches more than one live row is left unmapped rather than
-    guessed at, and the caller checks coverage before applying anything.
+    Paths and archive slots are mutable. Recomputing the current file only
+    verifies its current key; it says nothing about the backup row's identity.
+    FUID/CID associations must agree across snapshots before that verification.
+    Missing or conflicting provenance stays uncovered for the caller to refuse.
     """
-    def _rows(db: Path):
+    def snapshot(db: Path):
         con = sqlite3.connect(db)
         try:
-            return con.execute(
-                "SELECT content_key, file_path FROM items WHERE format='video'"
-            ).fetchall()
+            rows = dict(con.execute(
+                "SELECT content_key, file_path FROM items WHERE format='video'"))
+            identifiers = {}
+
+            def collect(kind, query):
+                for key, value in con.execute(query):
+                    if isinstance(value, (str, int)) and str(value).strip():
+                        identifiers.setdefault((kind, str(value)), set()).add(key)
+
+            collect("fuid", "SELECT content_key, file_unique_id FROM seen_files")
+            collect("cid", "SELECT content_key, custom_emoji_id FROM publications")
+            if any(row[1] == "custom_emoji_id" for row in con.execute("PRAGMA table_info(items)")):
+                collect("cid", "SELECT content_key, custom_emoji_id FROM items")
+            return rows, identifiers
+        except sqlite3.Error as exc:
+            raise RuntimeError(f"cannot verify legacy identifier provenance in {db.name}: {exc}") from exc
         finally:
             con.close()
 
-    def _shape(key: str, path: str) -> str:
-        return path.replace(key.split(":", 1)[1][:12], "\0KEY\0")
+    previous, old_ids = snapshot(backup)
+    current, current_ids = snapshot(catalog_path(data_dir))
+    old_targets, current_sources = {}, {}
+    ambiguous_old, ambiguous_current = set(), set()
+    for identifier in old_ids.keys() & current_ids.keys():
+        sources, targets = old_ids[identifier], current_ids[identifier]
+        if len(sources) != 1 or len(targets) != 1:
+            ambiguous_old.update(sources)
+            ambiguous_current.update(targets)
+            continue
+        source, target = next(iter(sources)), next(iter(targets))
+        old_targets.setdefault(source, set()).add(target)
+        current_sources.setdefault(target, set()).add(source)
 
-    live = _rows(catalog_path(data_dir))
-    by_path: dict[str, list[str]] = {}
-    by_shape: dict[str, list[str]] = {}
-    for key, path in live:
-        by_path.setdefault(path, []).append(key)
-        by_shape.setdefault(_shape(key, path), []).append(key)
-
-    mapping: dict[str, str] = {}
-    for key, path in _rows(backup):
-        found = by_path.get(path) or by_shape.get(_shape(key, path)) or []
-        if len(found) == 1 and found[0] != key:
-            mapping[key] = found[0]
+    mapping = {}
+    for key in previous:
+        candidates = old_targets.get(key, set())
+        if key in ambiguous_old or len(candidates) != 1:
+            continue
+        target = next(iter(candidates))
+        if (target == key or target not in current or target in ambiguous_current
+                or current_sources.get(target) != {key}):
+            continue
+        path = Path(current[target])
+        try:
+            fresh, _ = identity.fingerprint(path, "video")
+            if target.count(":") == 2:
+                fresh = identity.preserve_collision_key(path, fresh, target)
+        except (MediaError, OSError, ValueError):
+            continue
+        if fresh == target:
+            mapping[key] = target
     return mapping
 
 
@@ -513,6 +489,76 @@ def stale_state_keys(data_dir: Path) -> dict[str, list[str]]:
         if stale:
             out[path.name] = stale
     return out
+
+
+def required_state_keys(data_dir: Path) -> dict[str, list[str]]:
+    """Missing live/in-flight keys; obsolete frozen-plan/skipped history stays."""
+    con = sqlite3.connect(catalog_path(data_dir))
+    try:
+        known = {r[0] for r in con.execute("SELECT content_key FROM items")}
+    finally:
+        con.close()
+    out = {}
+    for path in state_files(data_dir):
+        if path.name.startswith("publish_plan_"):
+            continue
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out[path.name] = ["<unreadable>"]
+            continue
+        if not isinstance(doc, dict):
+            out[path.name] = ["<invalid state>"]
+            continue
+        found = set()
+        _collect_keys({k: v for k, v in doc.items() if k != "skipped"}, found)
+        stale = sorted(found - known)
+        if stale:
+            out[path.name] = stale
+    return out
+
+
+def invariant_issues(data_dir: Path, *, moved=frozenset()) -> list[str]:
+    """Recompute under ownership; missing evidence cannot certify completion."""
+    issues = []
+    sv = survey(data_dir)
+    if not sv.complete or sv.pending:
+        issues.append(f"survey: missing={len(sv.missing)}, undecodable={len(sv.undecodable)}, "
+                      f"changed={len(sv.changed)}, hashes={len(sv.phash_only)}, "
+                      f"collisions={len(sv.collisions)}")
+    for name, keys in required_state_keys(data_dir).items():
+        issues.append(f"required references in {name}: {', '.join(keys)}")
+    for name, keys in stale_state_keys(data_dir).items():
+        left = sorted(set(keys) & moved)
+        if left or "<unreadable>" in keys:
+            issues.append(f"unresolved references in {name}: {', '.join(left or keys)}")
+    con = sqlite3.connect(catalog_path(data_dir))
+    try:
+        for table in ("publications", "seen_files"):
+            orphan = con.execute(f"SELECT content_key FROM {table} WHERE content_key "
+                                 "NOT IN (SELECT content_key FROM items)").fetchall()
+            if orphan:
+                issues.append(f"{table} has {len(orphan)} orphaned reference(s)")
+        rows = con.execute("SELECT content_key, file_path, format FROM items").fetchall()
+        check = con.execute("PRAGMA integrity_check").fetchone()[0]
+        if check != "ok":
+            issues.append(f"database integrity: {check}")
+    finally:
+        con.close()
+    for key, path, fmt in rows:
+        p = Path(path)
+        if not p.is_file():
+            issues.append(f"missing catalog media: {key}")
+        elif fmt != "video":
+            try:
+                fresh, _ = identity.fingerprint(p, fmt)
+                if key.count(":") == 2:
+                    fresh = identity.preserve_collision_key(p, fresh, key)
+                if fresh != key:
+                    issues.append(f"non-video identity mismatch: {key}")
+            except (MediaError, OSError, ValueError) as exc:
+                issues.append(f"non-video identity undecodable: {key}: {exc}")
+    return issues
 
 
 def _collect_keys(node, into: set[str]) -> None:

@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import identity
+from .ingest import catalog_identity
+from .maintenance import writer
 
 log = logging.getLogger("emojikit.catalog")
 
@@ -122,10 +123,12 @@ class Catalog:
         # silently merges unrelated emoji, and every caller routes through here.
         self.phash_threshold = check_phash_threshold(phash_threshold)
         self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
-        self.db.row_factory = sqlite3.Row
+        self._ownership = writer(self.path.parent)
+        self._ownership.__enter__()
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.db = sqlite3.connect(self.path)
+            self.db.row_factory = sqlite3.Row
             # add() / mark_uploaded() / record_file_unique_id() commit per row,
             # and the default rollback journal at synchronous=FULL makes each of
             # those several fsyncs. WAL at NORMAL can lose only the last
@@ -134,12 +137,15 @@ class Catalog:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
             self._init_schema()
-        except Exception:
+        except BaseException:
             # Otherwise a failed migration (routinely "database is locked",
             # since the panel builds a Catalog per request while
             # build_collection holds the file) leaks this connection: nobody
             # holds the half-built object, so nobody can close it.
-            self.db.close()
+            if hasattr(self, "db"):
+                self.db.close()
+            self._ownership.__exit__(None, None, None)
+            self._ownership = None
             raise
 
     # ----- lifecycle ----------------------------------------------------- #
@@ -208,9 +214,15 @@ class Catalog:
         # Idempotent: safe to call more than once (e.g. context manager + test).
         try:
             self.db.commit()
-            self.db.close()
         except sqlite3.ProgrammingError:
             pass
+        finally:
+            try:
+                self.db.close()
+            finally:
+                if self._ownership is not None:
+                    self._ownership.__exit__(None, None, None)
+                    self._ownership = None
 
     def __enter__(self) -> "Catalog":
         return self
@@ -260,20 +272,6 @@ class Catalog:
         self.db.commit()
 
     # ----- ingest -------------------------------------------------------- #
-    def _find_near_duplicate(self, fmt: str, phash: int | None) -> str | None:
-        """Return an existing content_key whose perceptual hash is within the
-        configured Hamming threshold of ``phash`` (same format only)."""
-        if phash is None or self.phash_threshold < 0:
-            return None
-        rows = self.db.execute(
-            "SELECT content_key, phash FROM items WHERE format=? AND phash IS NOT NULL",
-            (fmt,),
-        ).fetchall()
-        for r in rows:
-            if identity.hamming(_phash_from_db(r["phash"]), phash) <= self.phash_threshold:
-                return r["content_key"]
-        return None
-
     def add(self, *, content_key: str, fmt: str, file_path: Path,
             emojis: list[str] | None = None, keywords: list[str] | None = None,
             source: str | None = None, phash: int | None = None,
@@ -287,24 +285,16 @@ class Catalog:
         emojis = emojis or []
         keywords = keywords or []
 
-        existing = self.db.execute(
-            "SELECT content_key FROM items WHERE content_key=?", (content_key,)
-        ).fetchone()
-        canonical = existing["content_key"] if existing else None
-
-        if canonical is None:
-            near = self._find_near_duplicate(fmt, phash)
-            if near is not None:
-                log.info("near-duplicate of %s -> merging (key %s)", near, content_key)
-                canonical = near
-
-        if canonical is not None:
+        canonical, is_new = catalog_identity(self, content_key, fmt, Path(file_path), phash)
+        if not is_new:
             self._merge(canonical, emojis, keywords, source)
             if file_unique_id:
                 self._record_seen(file_unique_id, canonical)
             self.db.commit()
             self._drop_unreferenced(canonical, file_path)
             return canonical, False
+
+        content_key = canonical
 
         next_pos = self.db.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM items").fetchone()[0]
@@ -339,6 +329,11 @@ class Catalog:
         except OSError:
             return
         if kept == losing or not losing.is_file():
+            return
+        # A caller can submit a path another item already owns. A successful
+        # merge may remove only an orphan, never that other item's media.
+        if any(Path(it.file_path).resolve() == losing for it in self.all_items()
+               if it.content_key != canonical):
             return
         try:
             losing.unlink()

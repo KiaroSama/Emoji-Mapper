@@ -106,10 +106,11 @@ jobs:
       # tests/test_ci_coverage.py fails if a browser suite exists on disk and is
       # missing from this line.
       - name: Panel browser tests
-        run: python -m unittest tests.test_panel_browser tests.test_panel_queues -v
+        run: python -m unittest tests.test_panel_browser tests.test_panel_queues tests.test_panel_curation -v
 
   build:
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
     # The panel's browser suite has its own job above. Opting out here is
     # deliberate and must stay explicit: test_panel_browser.py raises rather
     # than skipping when playwright or Chromium is missing, because a browser
@@ -153,21 +154,6 @@ jobs:
           fi
           ffmpeg -version | head -1
 
-      # Before the suite: a syntax-level finding should fail in seconds, not
-      # after 70 s of tests. No arguments -- ruff.toml owns the rule set, and a
-      # --select here is how CI and a developer's local run start linting two
-      # different things. scripts/check.ps1 runs the identical command.
-      - name: Lint (ruff)
-        run: ruff check .
-
-      # The hand-written module list this replaced could not go stale loudly:
-      # coins/verify_logos.py imported a name build_pack no longer exported and
-      # nothing caught it, because no list mentioned coins/*. tests/
-      # test_entry_points.py DISCOVERS every entry point, so a new tool is
-      # covered as soon as it exists.
-      - name: Import smoke test (all entry points, discovered)
-        run: python -m unittest tests.test_entry_points -v
-
       # Byte-compile + the full suite, through the same script a developer runs,
       # so CI and local runs cannot drift into different invocations. The script
       # owns the `-t .` form, which is REQUIRED, not cosmetic: without it the
@@ -175,7 +161,7 @@ jobs:
       # of `tests.test_x`, and tests/__init__.py -- which scrubs credentials and
       # blocks the network -- never runs. tests.test_entry_points.SuiteIsHermetic
       # fails loudly if the suite is ever started without it.
-      - name: Project checks (compile + unit tests)
+      - name: Project checks (compile + lint + unit and entry-point tests)
         shell: pwsh
         run: |
           ./scripts/check.ps1
@@ -184,14 +170,18 @@ jobs:
       - name: build_pack dry-run (no network)
         run: |
           python - <<'PY'
-          import os, subprocess, sys
+          import tests
+          import os, subprocess, sys, tempfile
+          from pathlib import Path
           from PIL import Image
-          os.makedirs("ci_tmp/out", exist_ok=True)
-          Image.new("RGBA", (100, 100), (0, 128, 255, 255)).save("ci_tmp/out/a.png")
-          os.environ["GENERAL_BOT_TOKEN"] = "dummy"
-          r = subprocess.run([sys.executable, "build_pack.py", "--base", "ci",
-                              "--title", "CI", "--user-id", "1",
-                              "--source-dir", "ci_tmp/out",
-                              "--token-env", "GENERAL_BOT_TOKEN", "--dry-run"])
+          Path("logs").mkdir(exist_ok=True)
+          with tempfile.TemporaryDirectory(prefix="ci-smoke-", dir="logs") as folder:
+              Image.new("RGBA", (100, 100), (0, 128, 255, 255)).save(Path(folder) / "a.png")
+              os.environ["GENERAL_BOT_TOKEN"] = "dummy"
+              r = subprocess.run([sys.executable, "build_pack.py", "--base", "ci",
+                                  "--title", "CI", "--user-id", "1",
+                                  "--source-dir", folder,
+                                  "--token-env", "GENERAL_BOT_TOKEN", "--dry-run"],
+                                 timeout=30, stdin=subprocess.DEVNULL)
           sys.exit(r.returncode)
           PY

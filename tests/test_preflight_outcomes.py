@@ -26,11 +26,11 @@ from tests._panel_fixtures import ROOT, _make_png
 
 sys.path.insert(0, str(ROOT))
 
-import collection_preflight as pf
+from emojikit import collection_preflight as pf
 from build_collection import pending_keys
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL
 from emojikit.catalog import Catalog
-from telegram_api import BotApiError
+from emojikit.telegram_api import BotApiError
 
 BASE = "testbase"
 

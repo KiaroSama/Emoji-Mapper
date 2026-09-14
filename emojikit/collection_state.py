@@ -15,14 +15,15 @@ from pathlib import Path
 
 from PIL import Image
 
-from packstate import (write_json_atomic)
+from emojikit.packstate import (write_json_atomic)
 from emojikit import media
 from emojikit.catalog import Catalog
+from emojikit.maintenance import writer
 
 log = logging.getLogger("build_collection")
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 PER_SET = 200                       # Telegram custom-emoji set hard cap
 FMT_TAG = {"static": "s", "video": "v", "animated": "a"}
@@ -164,7 +165,8 @@ def load_json(path: Path, default):
 def save_json(path: Path, data) -> None:
     # Atomic: a half-written state file is exactly the corruption load_json now
     # refuses to start from.
-    write_json_atomic(path, data)
+    with writer(path.parent):
+        write_json_atomic(path, data)
 
 
 def load_plan(data_dir: Path, base: str) -> dict:

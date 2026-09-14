@@ -11,7 +11,7 @@ import os
 
 import requests
 
-from telegram_api import Telegram
+from emojikit.telegram_api import Telegram
 
 log = logging.getLogger("build_pack")
 

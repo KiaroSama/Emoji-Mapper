@@ -44,8 +44,8 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (ingest_exit_code, load_env, load_keywords, safe_int_env)
-from packstate import (LockBusy, canonical_map_lock, exclusive_lock, make_intent, pack_family_lock_path, write_json_atomic)
-from telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
+from emojikit.packstate import (LockBusy, canonical_map_lock, exclusive_lock, make_intent, pack_family_lock_path, write_json_atomic)
+from emojikit.telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
 from coins import _inventory
 from coins._paprika_api import (QUOTA_EXHAUSTED, SLEEP, http_bytes, http_json, search_match,
                                 to_emoji_png)

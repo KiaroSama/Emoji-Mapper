@@ -17,8 +17,8 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import telegram_api as tg_api  # noqa: E402
-from telegram_api import (SetState)  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
+from emojikit.telegram_api import (SetState)  # noqa: E402
 
 def _make_png(path: Path, color=(200, 30, 30, 255)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

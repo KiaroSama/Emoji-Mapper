@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import telegram_api as tg_api  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
 
 SET = "gvcryptoemoji1_by_bot"
 
