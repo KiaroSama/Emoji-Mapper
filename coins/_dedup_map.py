@@ -22,12 +22,12 @@ from pathlib import Path
 
 from PIL import Image
 
-from announce import announce_packs
+from emojikit.announce import announce_packs
 from coins._inventory import refill_inventory
 from emojikit.identity import _dhash, hamming
-from packstate import (canonical_map_lock, exclusive_lock,
+from emojikit.packstate import (canonical_map_lock, exclusive_lock,
                        write_json_atomic)
-from telegram_api import (Telegram)
+from emojikit.telegram_api import (Telegram)
 from coins import _dedup_plan as cfg
 from coins._dedup_plan import (load_plan, load_state, save_state)
 

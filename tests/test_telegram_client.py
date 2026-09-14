@@ -27,8 +27,8 @@ sys.path.insert(0, str(ROOT))
 import requests  # noqa: E402
 
 import build_pack as bp  # noqa: E402
-import telegram_api as tg_api  # noqa: E402
-import packstate as ps  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 from tests._pack_fixtures import _png  # noqa: E402
 
 

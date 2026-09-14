@@ -36,8 +36,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import collection_migrate as cm  # noqa: E402
-import packstate  # noqa: E402
+from emojikit import collection_migrate as cm  # noqa: E402
+from emojikit import packstate  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import identity_repair as ir  # noqa: E402
@@ -98,11 +98,14 @@ class MigrationCase(unittest.TestCase):
 
     def fake_fingerprint(self, mapping: dict[str, tuple[str, int | None]]):
         """Pretend the corrected decoder returns these (key, phash) by filename."""
+        by_bytes = {(self.data / name).read_bytes(): result
+                    for name, result in mapping.items() if (self.data / name).is_file()}
         def fp(path, fmt):
             name = Path(path).name
-            if name not in mapping:
+            result = mapping.get(name) or by_bytes.get(Path(path).read_bytes())
+            if result is None:
                 raise cm.MediaError(f"undecodable: {name}")
-            return mapping[name]
+            return result
         return mock.patch.object(cm.identity, "fingerprint", fp)
 
     def state(self, base: str, doc: dict) -> Path:
@@ -287,14 +290,13 @@ class NothingIsAppliedFromAnIncompletePicture(MigrationCase):
         self.assertEqual(self.cat.col("items"), ["v:old"])
         self.assertNotEqual(before, b"")      # the fixture really wrote a db
 
-    def test_a_stale_state_file_alone_is_pending_work(self):
-        """Even with every key correct, a state file naming an unknown key is
-        unfinished business -- that is exactly what was left behind."""
+    def test_only_obsolete_plan_entries_are_informational(self):
+        """The publisher intentionally skips absent frozen-plan candidates."""
         m = self.media("clip.webm")
         self.cat.add("v:same", m, phash=1)
         self.plan("pk", {"mixed": ["v:ghost"]})
         with self.fake_fingerprint({"clip.webm": ("v:same", 1)}):
-            self.assertEqual(ir.report(self.data), ir.EXIT_STALE)
+            self.assertEqual(ir.report(self.data), ir.EXIT_OK)
 
 
 class APreexistingPartialMigrationIsRecoverable(MigrationCase):
@@ -304,9 +306,8 @@ class APreexistingPartialMigrationIsRecoverable(MigrationCase):
     it left behind cannot be repaired by surveying -- the catalog already holds
     the new keys, so a fresh survey reports nothing pending while the state
     still names the old ones. The backup that round DID write is the missing
-    half. Pairing is content-based (same file path, or the same path once each
-    side's own key prefix is blanked); position-based mapping is the defect
-    this project has already been bitten by twice.
+    half. Pairing requires shared immutable FUID/CID provenance; a path or
+    archive position alone cannot distinguish migration from replacement.
     """
 
     def _preexisting(self):
@@ -316,20 +317,23 @@ class APreexistingPartialMigrationIsRecoverable(MigrationCase):
         plain = self.media("loose.webm")
         backup = self.data / "catalog.before-video-identity-1.db"
         old = _Catalog(backup)
-        old.add("v:aaaaaaaaaaaaaaaa", archived)
-        old.add("v:cccccccccccccccc", plain)
+        old.add("v:aaaaaaaaaaaaaaaa", archived, cid="CID-archive", fuid="FUID-archive")
+        old.add("v:cccccccccccccccc", plain, cid="CID-loose", fuid="FUID-loose")
 
         # ... and the live catalog, already moved and already renamed.
         renamed = self.data / "007_video_bbbbbbbbbbbb.webm"
         archived.rename(renamed)
-        self.cat.add("v:bbbbbbbbbbbbbbbb", renamed)
-        self.cat.add("v:dddddddddddddddd", plain)
+        self.cat.add("v:bbbbbbbbbbbbbbbb", renamed, cid="CID-archive", fuid="FUID-archive")
+        self.cat.add("v:dddddddddddddddd", plain, cid="CID-loose", fuid="FUID-loose")
         self.plan("pk", {"mixed": ["v:aaaaaaaaaaaaaaaa", "v:cccccccccccccccc"]})
         return backup
 
     def test_the_map_is_recovered_from_the_backup(self):
         backup = self._preexisting()
-        got = cm.recover_key_map(self.data, backup)
+        with self.fake_fingerprint({"007_video_bbbbbbbbbbbb.webm":
+                                    ("v:bbbbbbbbbbbbbbbb", 1),
+                                    "loose.webm": ("v:dddddddddddddddd", 2)}):
+            got = cm.recover_key_map(self.data, backup)
         self.assertEqual(got, {"v:aaaaaaaaaaaaaaaa": "v:bbbbbbbbbbbbbbbb",
                                "v:cccccccccccccccc": "v:dddddddddddddddd"})
 
@@ -362,9 +366,9 @@ class APreexistingPartialMigrationIsRecoverable(MigrationCase):
         backup = self.data / "catalog.before-video-identity-1.db"
         old = _Catalog(backup)
         shared = self.media("same.webm")
-        old.add("v:oldoldoldoldold1", shared)
-        self.cat.add("v:new1", shared)
-        self.cat.add("v:new2", shared)          # two live rows, one path
+        old.add("v:oldoldoldoldold1", shared, cid="ambiguous-CID")
+        self.cat.add("v:new1", shared, cid="ambiguous-CID")
+        self.cat.add("v:new2", shared, cid="ambiguous-CID")
         self.assertEqual(cm.recover_key_map(self.data, backup), {})
 
 

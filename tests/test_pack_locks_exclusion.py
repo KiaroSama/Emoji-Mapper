@@ -33,7 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import packstate as ps  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 
 PY = sys.executable
 
@@ -48,7 +48,7 @@ CHILD_TIMEOUT = 60
 CHILD = r'''
 import json, os, sys, time
 sys.path.insert(0, os.environ["REPO"])
-import packstate as ps
+from emojikit import packstate as ps
 
 LOCK = os.environ["LOCK"]
 JOURNAL = os.environ["JOURNAL"]

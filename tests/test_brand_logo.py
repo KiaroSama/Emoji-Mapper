@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_collection as bc  # noqa: E402
-import collection_state as cs  # noqa: E402
+from emojikit import collection_state as cs  # noqa: E402
 from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 

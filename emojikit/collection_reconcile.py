@@ -17,12 +17,12 @@ import tempfile
 from pathlib import Path
 
 
-from telegram_api import (LiveStateUnknown, SetState)
+from emojikit.telegram_api import (LiveStateUnknown, SetState)
 from emojikit import identity, media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact
 
-from collection_state import (SetDrift, _state_path)
+from emojikit.collection_state import (SetDrift, _state_path)
 
 log = logging.getLogger("build_collection")
 
@@ -253,9 +253,13 @@ def _near_catalog_match(cat: Catalog, path: Path, fmt: str):
     # candidate" into "it is not a match" -- so it goes through the same content
     # comparison as a nominated one. (Animated never reaches here: its probe is
     # None above.)
+    lookup = identity.content_key(path, fmt) if fmt == "video" else None
     close = [it for it in items
              if it.phash is None
-             or identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE]
+             or identity.hamming(it.phash, probe) <= SEARCH_PHASH_TOLERANCE
+             or (lookup is not None and (it.content_key == lookup
+                 or (it.content_key.count(":") == 2
+                     and it.content_key.rsplit(":", 1)[-1] == lookup.split(":", 1)[-1])))]
     if not close:
         return None
 
@@ -322,11 +326,11 @@ def _resolve_sticker_key(tg, cat: Catalog, st: dict, tmp_dir: Path) -> str | Non
             raise Unresolvable(
                 f"could not fetch or hash {fuid or file_id}: {redact(str(exc))}"
             ) from exc
-        if cat.get(key) is None:
-            # Exact miss. Telegram re-encoded it, so for a raster format the
-            # key cannot match -- fall back to the perceptual hash, but only
-            # for a VERIFIED match. Guessing is what put a foreign llama on
-            # `sol`; anything short of proof is Unresolvable, not a negative.
+        if media.telegram_sticker_format(st) == "video" or cat.get(key) is None:
+            # A video's frozen sampled key only nominates candidates, even on
+            # an exact hit. Verify the native timeline and collision aliases
+            # before durably recording an identifier. Raster re-encodes also
+            # use this search on an exact miss.
             near = _near_catalog_match(cat, tmp,
                                        media.telegram_sticker_format(st))
             if near == AMBIGUOUS:

@@ -1,7 +1,6 @@
 """Emoji Mapper core toolkit.
 
-A small, layered, dependency-light core shared by the multi-format collector
-workflow:
+A shared library for the collector, publishing workflows and local curation:
 
 - ``logsetup``  -- mandatory UTC file logging.
 - ``media``     -- format detection, content/perceptual hashing and conversion
@@ -11,9 +10,8 @@ workflow:
                    deduplicates emoji at ingest time and tracks what has already
                    been uploaded (idempotent, resumable, duplicate-proof).
 
-The toolkit is deliberately independent of any specific bot or workflow so the
-same engine powers both "download from existing Telegram packs" and "build from
-scratch" use cases.
+The command-line entry points stay at the project root. State, API, migration,
+gallery and panel helpers live here, so their implementations have one home.
 """
 
 from __future__ import annotations

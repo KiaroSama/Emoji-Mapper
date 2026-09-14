@@ -38,7 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-import collection_reconcile as cr  # noqa: E402
+from emojikit import collection_reconcile as cr  # noqa: E402
 from emojikit import identity, media  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 

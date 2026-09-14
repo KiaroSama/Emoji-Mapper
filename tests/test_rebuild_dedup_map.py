@@ -26,7 +26,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import packstate as ps  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 from coins import _dedup_plan as cfg  # noqa: E402
 from coins import _dedup_map as dmap  # noqa: E402
 from tests._rebuild_fixtures import FakeTelegram, RebuildCase, _png_bytes  # noqa: E402

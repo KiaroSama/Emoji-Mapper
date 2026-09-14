@@ -35,23 +35,29 @@ Supported custom-emoji formats: **static** (PNG/WEBP, 100×100), **animated**
 Emoji Mapper/
   run.ps1                  Windows launcher (menu). Prefer this.
   build_pack.py            core engine: upload a folder of media to emoji sets
-  telegram_api.py          the Bot API client, its errors and Telegram's caps
-  packstate.py             state-file shape + atomic write + pack-family lock
-  announce.py              announce finished packs (Worker, or direct)
   make_emoji_pngs.py       image -> 100x100 PNG (static)
   fetch_pack.py            collector: download a Telegram pack -> catalog
   fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
   add_media.py             collector: build emoji from local files -> catalog
   build_collection.py      collector: publish the catalog into new packs
-  collection_state.py      publisher plan/resume state + brand logo
-  collection_reconcile.py  what is live in a set, and whose key each sticker is
-  collection_migrate.py    a content-key migration as ONE versioned change
-  collection_preflight.py  --preflight only: ask Telegram to validate the queue
   sync_order.py            reorder an already published pack (no re-upload)
+  pack_archive.py             # archived media reconciliation
+  pack_manifest.py            # pack roster and gallery CLI
   panel.py                 web "Curate" panel: the server, the page, the APIs
-  panel_view.py            the same panel's view model (build_view, ordering)
   emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
   emojikit/                shared core library
+    telegram_api.py           the Bot API client, its errors and Telegram's caps
+    packstate.py              state-file shape + atomic write + pack-family lock
+    announce.py               announce finished packs (Worker, or direct)
+    collection_state.py       publisher plan/resume state + brand logo
+    collection_reconcile.py   what is live in a set, and whose key each sticker is
+    collection_migrate.py     a content-key migration as ONE versioned change
+    collection_preflight.py   --preflight only: ask Telegram to validate the queue
+    panel_view.py             the same panel's view model (build_view, ordering)
+    pack_gallery.py           self-contained pack gallery rendering
+    ingest.py                 verified dedup and collision-safe media storage
+    panel_preview.py          bounded, sized thumbnail cache
+    panel_logging.py          validated, bounded browser event logs
     logsetup.py            UTC file logging (logs/)
     media.py               format detect + conversions (static/video/tgs)
     video_decode.py        the video decoder choice + a bounded frame cache
@@ -1027,30 +1033,22 @@ order; after that, drag-and-drop reordering is saved (POST `/api/order` →
 per-format set publishes in this relative order). The brand-logo preview card
 is fixed first and is never reordered/counted/saved.
 
-**Performance.** Animated `.tgs` are pre-rendered server-side to an **animated
-WebP** (`media.lottie_preview_webp`, rlottie) and served as a plain
-`<img loading=lazy>`, so the browser animates them on the compositor. There is
-no Lottie player and no animation library in the page. This replaced a
-lottie.js SVG player per card, which cost ~704 DOM nodes each -- measured on a
-146-animation catalog, the document went from 1 426 nodes with none mounted to
-8 476 with ten, and every scroll rebuilt a row's worth. Previews are cached
-under `<data-dir>/preview/` (~9 MB for 146 at 15fps/q60), keyed by content hash
-and frame rate, so they are built once. The frame rate is the lever that decides
-how heavy the grid feels, because the browser decodes every frame of every
-animated card: measured per animation, 30fps costs 54 frames / 119 KB against
-15fps's 28 / 60 KB. Use `--preview-fps` to go lower.
+**Performance.** The grid is virtual; only nearby rows exist in the DOM.
+Animated previews are native WebP images, with no browser animation library.
+Compact zoom caps playback at 10fps and uses 72px previews on ordinary-density
+screens; other previews are 104px. `--preview-fps` (1–30, default 15) limits the
+server rate. The cache key includes content identity, size and rate, and at most
+two uncached raster/codec jobs run concurrently so Save remains responsive.
 
-**Only cards near the viewport carry the animated frames.** Each animated
-preview is rendered twice -- `?still=1` (frame 0, ~3 KB) and the animated file
-(~60 KB) -- and one `IntersectionObserver` (300-px margin) swaps `img.src`
-between them. `content-visibility:auto` alone was not enough: a decoded
-off-screen animation still costs its full frame buffer, so the swap is what
-bounds the work to what is on screen. **Animation: On** in the header (default
-on, persisted in `localStorage`) forces every card back to the still. Benign
-browser disconnects while scrolling are swallowed server-side (no
-`ConnectionAbortedError` traceback spam).
+Only genuinely visible animations play: the sticky header's covered region,
+hidden tabs and scrolling are excluded. Switching animation off clears moving
+image layers and releases video sources; still WebP posters keep video artwork
+visible without an idle decoder. Changes affect preview quality, not stored or
+published media. Measure performance on a separate catalog with the same media,
+viewport, zoom and warm-cache state; desktop load and browser configuration matter.
 
-**Brand logo preview.** If `GENERAL_BOT_TOKEN` resolves to
+**Brand logo preview.** `--bot-username YourEmojiBot` selects branding
+without a Telegram lookup. Otherwise, if `GENERAL_BOT_TOKEN` resolves to
 `@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
 `build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
 first card** labelled "Brand logo (auto-added on publish)" so you can see where
@@ -1368,72 +1366,83 @@ values. (Regression test: `tests/test_catalog.py::test_large_phash_64bit`.)
 print(d.execute('SELECT format,COUNT(*),SUM(uploaded),SUM(included) FROM items GROUP BY format').fetchall())"
 ```
 
-### 13.6 When a decode fix changes what a key IS (`scripts/identity_repair.py`)
+### 13.6 Identity migration, recovery and rollback (`scripts/identity_repair.py`)
 
-The content key is this project's primary identity, and it is written down in
-more places than the table it names. Correcting how a file is *decoded* is
-therefore a versioned migration, not a few SQL updates:
-
-| where | what holds a key |
-|---|---|
-| `items` | the row id, a derived `phash`, and a `file_path` whose NAME embeds `key[:12]` |
-| `publications` | the foreign key carrying each `custom_emoji_id` |
-| `seen_files` | the foreign key mapping a Telegram `file_unique_id` to an item |
-| `publish_<base>.json` | `sets[].keys[]` and `skipped[]` — what `reconcile_set` attributes live stickers by |
-| `publish_plan_<base>.json` | the frozen plan, `{format: [keys]}` |
+A video decoder correction can change an item's key and perceptual hash. The
+migration updates `items`, `publications`, `seen_files`, publisher state/plans,
+and media names together. It never uploads to Telegram.
 
 ```powershell
-.venv\Scripts\python.exe scripts\identity_repair.py report                        # writes nothing
-.venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply    # writes
+.venv\Scripts\python.exe scripts\identity_repair.py report
+.venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply
 ```
 
-**Exit codes.** `0` clean, `2` usage, `3` work is pending and the picture is
-complete enough to act on, `4` INCOMPLETE or refused — something could not be
-inspected, or two rows would collide, and nothing was changed. A row whose file
-is missing used to be counted as *unchanged*, so a catalog nobody could read
-reported "Every video key already matches" and exited 0.
+The canonical data directory owns one native maintenance/writer lock. Catalog
+connections, collector storage, publishers (including a first family), panel
+saves and archive moves all honor it. Acquisition order is catalog ownership,
+existing family locks, then map locks. A `Catalog` must be closed to release its
+lease. A busy panel save returns HTTP 503 and retains the browser's queued edit.
+Reports take ownership for a consistent view but do not alter catalog/media/state.
 
-**What `--apply` does, in order.** Takes the pack-family lock (the same writer
-exclusion ingest, publishing and the archive all honour); snapshots the database
-through SQLite's **online backup API** and verifies that snapshot before
-changing anything; moves every key reference and refreshes every derived hash in
-one transaction; rewrites the state and plan files; renames the archived media.
-Each stage is idempotent and a journal records how far it got, so an interrupted
-run is repaired by running it again and a second run is a verified no-op.
+`--apply` owns discovery, revalidation, backup, all mutations, final verification
+and journal retirement. It first creates a WAL-safe SQLite backup plus a sibling
+`catalog.before-video-identity-<stamp>.rollback.json` manifest. The manifest
+records original publisher JSON, catalog signatures, byte digests and each
+source/destination intent before files change. Media moves use exclusive sibling
+hard links followed by removal of the verified source. An identical existing
+destination can be reused; unrelated destination bytes are never overwritten.
+Filesystems without hard-link support refuse safely with the journal retained.
 
-`shutil.copy2` is not a backup here: this catalog runs in WAL, where committed
-rows live in `-wal` until a checkpoint, so a copy of the `.db` alone opened as a
-database with `no such table: items` while the original held the row.
+**After interruption**, run the same `migrate-video-keys --apply` command. The
+validated journal is replayed before a fresh survey: a process killed between a
+rename and its SQLite path update is recoverable. Source-only, destination-only
+and both-present identical states have explicit replay behavior. Ordinary writers
+refuse while the journal remains. An unsupported/invalid journal is retained for
+inspection; deleting it is not a repair.
 
-**It refuses rather than guessing:**
-
-- **a collision** — two rows landing on one key — changes nothing. Merging them
-  would delete one row's media, the exact defect a decoder fix exists to prevent.
-- **an unreadable row** stops it. Half a conversion is a catalog where some keys
-  describe their file and some do not, with nothing recording which.
-- **a row whose media is gone** keeps the key it has.
-
-**Repairing a migration that ran before journals existed.** Such a run moved the
-table rows and kept no record of its map, so the state files it left behind
-cannot be fixed by surveying — the catalog already holds the new keys, so a
-fresh survey reports nothing pending while the state still names the old ones.
-The backup that run *did* write is the missing half:
+**Rollback restores the application snapshot**, including paths and JSON, rather
+than only copying the database back. Use the exact bundle path printed by the run:
 
 ```powershell
-.venv\Scripts\python.exe scripts\identity_repair.py migrate-video-keys --apply `
-    --from-backup catalog.before-video-identity-<stamp>.db
+.venv\Scripts\python.exe scripts\identity_repair.py restore `
+    --bundle catalog.before-video-identity-<stamp>.rollback.json
+.venv\Scripts\python.exe scripts\identity_repair.py restore --apply `
+    --bundle catalog.before-video-identity-<stamp>.rollback.json
 ```
 
-Pairing is content-based — the same file path, or the same path once each side's
-own key prefix is blanked — never positional. A key absent from that backup
-predates it and is left alone.
+The first command verifies without restoring; the second restores and verifies
+media bytes, the complete database (order, inclusion, IDs and publications), and
+original state/plan JSON. Later unrelated catalog edits, publisher changes or
+replacement media cause refusal. Previously existing identical destinations are
+preserved. An interrupted restore resumes with the same restore command. Keep
+both the `.db` and `.rollback.json` files; a whole-archive duplicate is unnecessary.
+Restoring the old snapshot can make the corrected decoder report pending identity
+work again; it restores the prior application version's state, not new identities.
 
-**SUSPECT MAPPINGS** in the report is a heuristic and nothing more: rows with a
-recorded Telegram id *and* a look-alike of the same format, which the old
-grayscale-only recovery rule could have confused. It does not validate
-historical id mappings, and zero would not prove none was ever wrong — the
-handle a past download was attributed by is not stored, so it cannot be
-re-checked at all.
+**Legacy migration repair** accepts `--from-backup <catalog.before-...db>`.
+Shared immutable FUID/CID evidence must identify one matching row in each snapshot,
+and every shared identifier must agree. The current file is then checked against
+its current identity. Paths and archive slots never prove identity. Missing or
+conflicting provenance leaves required live/in-flight references uncovered and
+refuses the repair with those references named.
+Only obsolete frozen-plan candidates and skipped history may remain unresolved;
+the publisher intentionally skips those absent candidates. History is preserved.
+
+**Exit codes:** `0` verified or clean; `2` usage/missing catalog; `3` pending work
+or a verified restore preview; `4` incomplete/refused. Exit 4 after interruption
+can mean partial application, with the journal and rollback bundle retained.
+Missing media, decode failures, stale required references, orphaned identifiers,
+collisions or unresolved operations never produce a `Verified` success.
+
+`SUSPECT MAPPINGS` remains a heuristic over historical near matches. It does not
+validate historical FUID/CID bindings: an old file_unique_id alone cannot retrieve
+its source bytes from Telegram, and zero suspects is not proof of past correctness.
+
+**Refused storage collisions** retain the complete incoming file under
+`<data-dir>/media/<format>/quarantine/`, outside per-run scratch cleanup. A JSON
+record preserves its checksum, size, attempted destination and available source
+identifiers. Repeating the same refused payload reuses its retained copy. Existing
+destination bytes and catalog bindings remain intact for deliberate recovery.
 
 ---
 
@@ -1885,12 +1894,13 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 |-------|----------|
 | `GET /` | The page (`assets/panel.html`: markup, CSS, items embedded as JSON, the per-run values). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
-| `GET /preview/<key>?fps=N` | A `.tgs` rendered to an **animated WebP**, cached on disk. The rate is in the URL because the response is immutable-cached. |
+| `GET /preview/<key>?fps=N&size=S` | Cached animated WebP for TGS; `still=1` returns a still for static/video/TGS. Sizes: 52, 72 or 104; rates: 1–30, bounded by `--preview-fps`. |
 | `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
 | `POST /api/save` | Body `{"excluded":[keys], "known":[keys]}` → `catalog.set_inclusion(...)`, **restricted to `known`**. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
+| `POST /api/client-log` | Up to 32 whitelisted events, 16KiB per batch; counts/revisions/status/error type and location only. No token, label, media ID or arbitrary message fields. |
 
-Both POST routes are mutation endpoints and are guarded: loopback-only `Host`/
+All POST routes are guarded: loopback-only `Host`/
 `Origin`, a per-run token sent as `X-Panel-Token`, an exact-permutation check on
 the order, a content-type check and a body cap (`tests/test_panel.py`).
 
@@ -1907,10 +1917,10 @@ a "reload the page and save again" message: one reload costs a second, while a
 silent re-inclusion is invisible until a publish ships the wrong pack.
 `tests/test_panel_save_scope.py` drives all of it through the real handler.
 
-Ordering: `panel_view.order_by_similarity` groups items by format (static, then
+Ordering: `emojikit.panel_view.order_by_similarity` groups items by format (static, then
 video, then animated) and within each runs a greedy nearest-neighbour walk on
 the perceptual hash so look-alikes are adjacent. Items without a hash (animated)
-keep content order. The view model lives in `panel_view.py` — `build_view`,
+keep content order. The view model lives in `emojikit/panel_view.py` — `build_view`,
 `order_by_similarity`, `packs_named`, `copy_id_for` — with `panel.py` left
 holding the server. Pure functions on one side, sockets on the other.
 
@@ -1933,38 +1943,37 @@ Front-end:
   `invertPicked`), otherwise `included` (`setAll`) — before this they only ever
   touched `included`, so picking several emoji looked broken because nothing
   on screen responded to them.
-- **Holding area** (`assets/panel-holding.js`, a full-width row inside the
-  sticky header so it stays reachable mid-drag). It reuses `included` exactly
-  as the tick does — a held emoji is simply excluded — rendered in its own
-  strip instead of wherever the card's position happens to be. Dragging a card
-  onto it reads the SAME `carried`/`dragKey` state a normal grid drag already
-  sets; dragging a parked card back sets `dragKey`/`carried`/`dragSnap` itself
-  so the grid's own `dragover`/`drop` repositions it, and its own `dragend`
-  (fired on the source regardless of drop target) flips `included=true` only
-  when `dropEffect==='move'` — 'none' means it was released over nothing, so
-  the emoji stays held. `panel-actions.js` and `panel-grid.js` were both at or
-  over the 700-line closed-to-new-code line, so this is a new file that only
-  reads their already-shared globals; nothing was added to either beyond
-  wrapping `updateCount()` once (already every include/exclude path's "the
-  counts changed, repaint" signal) and changing 3 existing one-line handlers
-  in place (net-zero growth).
-- **Pack boundaries are drawn in the grid.** When the selection needs more than
-  one set, a full-width marker carrying the brand logo sits at the head of each
-  pack, labelled with the grid range it spans (`Pack 2 · #201–#399`), so you can
-  see where each published pack will start and end while still curating.
-  Two things it deliberately does: the splits are counted from **included**
-  items only, since an unticked card never reaches Telegram and so cannot push
-  the next emoji into the following pack — which is why the markers move as you
-  tick and untick, not only when you drag. And a marker is a `.packsep`, never
-  a `.card`: the drop handler resolves its target with `closest('.card')`, so a
-  marker that matched would swallow a drop aimed past it and silently do
-  nothing. Card numbers stay **grid** positions and are unchanged by the
-  markers. The LAST pack's upper bound is the last actually-included,
-  non-logo item — not `ITEMS.length`, which is the raw array size and used to
-  count a held (excluded) tail as if it still occupied a slot: parking 5 of a
-  200-item pack's own emoji left it claiming `#1–#200` instead of `#1–#195`.
-  A pack that is not last is unaffected — its bound is the next pack's start,
-  and it correctly keeps claiming a full 200 by drawing on whatever follows.
+- **Selection and history** (`assets/panel-holding.js`). Selection mode hides
+  the inclusion tick and shows only the pick control. Shift-click picks the
+  inclusive range from the last anchor, skipping logos and held cards.
+  Snapshots include order, inclusion, picks, hold origins and view settings.
+  One drag or pick stroke creates one undo entry; cancelled drags restore the
+  original snapshot. **Reset all** restores the last successful explicit Save
+  in this page and is itself undoable. A Save captures its checkpoint before
+  sending, so a later edit is never folded into an older acknowledgement.
+- **Holding area.** Held cards stay in the ordering model but occupy no grid
+  slots. **Unhold** restores the original slot; **Unhold all** checks every
+  destination before changing any card. A full original pack refuses with a
+  capacity message. The grid drop commits a tray card's inclusion before
+  recording history; `dragend.dropEffect` is not used as proof of a successful
+  drop. Tray thumbnails are still images and are reused across updates.
+- **Pack boundaries and numbers** count included cards and the brand logos.
+  Holding four entries from a full pack changes `#1–#200` to `#1–#196`, including
+  when that pack is followed by other published packs. The same visible-index
+  projection controls virtual rows, card positions and separator ranges.
+- **Save queues** (`assets/panel-actions.js`). Orders auto-save; inclusion
+  waits for explicit Save. Each queue permits one request at a time and keeps
+  its newest body. A 400/409 rejection blocks only that body; a newer body can
+  progress and still retry a transient failure. Debounce, retry and heartbeat
+  share the same eligibility deadline. Dirty state and unload protection remain
+  until the corresponding state is acknowledged; the warning offers a local
+  JSON draft export for conflict recovery.
+- **UI logs** (`emojikit/panel_logging.py`). Browser events are batched at most
+  once per second, with a three-second delivery deadline and a 32-event buffer.
+  The authenticated endpoint validates the complete batch before logging and
+  caps request frequency. UI actions and error locations go to the panel's
+  normal UTF-8 UTC log; arbitrary exception text and private content do not.
+  Logging failure does not enter or block either save queue.
 - **The grid is virtual** (`assets/panel-grid.js`). `ITEMS` is the order and
   the selection; the DOM holds only the rows within half a screen of the
   viewport, between two spacers that carry the height of everything above and
@@ -2002,7 +2011,7 @@ Front-end:
   and compositing. Not `loading="lazy"`: a card only exists once its row is
   within half a screen, so the window is the lazy loading. Video is
   `<video preload="metadata">` (muted, looping, `playsinline`) whose **source
-  is attached only while the card is within 300 px of the viewport** and
+  is attached only while animation is on and the card is in the viewport** and
   released when it leaves (`videoIO`): a media player is the most expensive
   thing a card can create or tear down, and 56 of them alive at once was what
   the old page paid on every load. A card that is unmounted releases its

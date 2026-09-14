@@ -26,10 +26,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import build_collection as bc  # noqa: E402
-import collection_state as cs  # noqa: E402
+from emojikit import collection_state as cs  # noqa: E402
 import build_pack as bp  # noqa: E402
-import announce  # noqa: E402
-from announce import (announce_packs)  # noqa: E402
+from emojikit import announce  # noqa: E402
+from emojikit.announce import (announce_packs)  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 from tests._bc_fixtures import FakeTG, _make_png  # noqa: E402

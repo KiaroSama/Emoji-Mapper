@@ -239,18 +239,36 @@ Ctrl+plus/minus (Ctrl+0 resets) — out to fit more emoji per screen, in to
 inspect one; below 75 % the text under each thumbnail is dropped so the rows
 pack tighter. The level is remembered across reloads.
 
-Animated `.tgs` are **pre-rendered to animated WebP on the server** (rlottie)
-and shown as plain `<img>`, so hundreds of them animate on the browser's
-compositor with no animation library in the page. Only cards inside the
-viewport carry the animated frames; the rest hold a still. The header's
-**Animation: On/Off** button stops that everywhere (remembered across reloads),
-and `--preview-fps` sets the frame rate. Video plays the same way — on its own
-while in view, not on hover, since a grid of stills cannot be curated — and a
-video card only holds a player while it is on screen.
+**Selection mode** shows only the pick checkbox. Shift-click picks the whole
+range from the last anchor; Select all / Deselect all / Invert act on picks.
+**Hold** removes picked cards from the grid and pack counts. Each held card has
+**Unhold**, and **Unhold all** restores the group. A full original pack produces
+a capacity error without releasing any conflicting cards.
+
+**Undo/Redo** covers picking, inclusion, hold/unhold, dragging, zoom, animation
+and backdrop. **Reset all** restores this page's last successful explicit Save
+checkpoint; Reset is undoable. Order continues to auto-save, while inclusion
+changes require Save. Older replies never acknowledge edits made after a Save.
+A failed request retains the draft; transient failures retry, and a permanently
+rejected body waits for a changed request. **Export draft** preserves a local
+JSON copy if reconciliation is needed.
+
+Animated previews use browser-native WebP. At compact zoom, ordinary-density
+screens use 72px previews and at most 10fps; larger tiles use 104px. The server
+runs at most two uncached preview renders at once. Off-screen and header-covered
+animations stop, and switching animation off releases video decoders in favor
+of still posters. The source media and published files are unchanged.
+
+Panel actions and browser error locations join the normal UTC `logs/panel_*.log`
+file. Event fields contain counts, revisions, status and source locations;
+tokens, labels, media IDs and arbitrary error text are excluded. Log delivery
+is bounded and does not block saving.
 
 ```powershell
 .venv\Scripts\python.exe panel.py        # or run.ps1 -> B4
-.venv\Scripts\python.exe panel.py --preview-fps 12   # lighter still
+.venv\Scripts\python.exe panel.py --preview-fps 12
+# Branding without a Telegram username lookup:
+.venv\Scripts\python.exe panel.py --bot-username YourEmojiBot
 ```
 
 ## Crypto-coin workflow (one component: `coins/`)
@@ -295,29 +313,37 @@ Then build/rebuild with the coin bot:
 ```
 Emoji Mapper/                  # the whole project
   build_pack.py                # core engine: upload any source dir with any bot
-  telegram_api.py              # the Bot API client + Telegram's caps
-  packstate.py                 # state-file shape + atomic write + pack lock
-  announce.py                  # announce finished packs (Worker, or direct)
   make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
   fetch_pack.py                # collector: download Telegram packs -> catalog
   fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
   add_media.py                 # collector: build emoji from scratch -> catalog
   build_collection.py          # collector: publish catalog -> new packs
-  collection_state.py          # its plan/resume state + the brand logo
-  collection_reconcile.py      # what is live in a set, and whose key it is
-  collection_preflight.py      # --preflight: ask Telegram to validate the queue
-  collection_migrate.py        # move EVERY reference to a content key, as one change
   sync_order.py                # reorder a LIVE pack to match the panel
+  pack_archive.py             # archived media reconciliation
+  pack_manifest.py            # pack roster and gallery CLI
   panel.py                     # curate panel: the server, the page, the APIs
-  panel_view.py                # the panel's view model (build_view, ordering)
   emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
   emojikit/                    # shared core toolkit
+    telegram_api.py           # the Bot API client + Telegram's caps
+    packstate.py              # state-file shape + atomic write + pack lock
+    announce.py               # announce finished packs (Worker, or direct)
+    collection_state.py       # its plan/resume state + the brand logo
+    collection_reconcile.py   # what is live in a set, and whose key it is
+    collection_preflight.py   # --preflight: ask Telegram to validate the queue
+    collection_migrate.py     # move EVERY reference to a content key, as one change
+    panel_view.py             # the panel's view model (build_view, ordering)
+    pack_gallery.py           # self-contained pack gallery rendering
+    ingest.py                 # verified dedup and collision-safe media storage
+    panel_preview.py          # bounded, sized thumbnail cache
+    panel_logging.py          # validated, bounded browser event logs
     logsetup.py                # UTC file logging
     media.py                   # format detect + static/video/tgs convert
     video_decode.py            # the video decoder choice + a frame cache
     repaint.py                 # bake a tint into a Lottie or a static
     identity.py                # content keys, perceptual hashes, same_image
     catalog.py                 # content-addressed SQLite catalog (dedup)
+    maintenance.py             # canonical catalog writer/maintenance ownership
+    migration_bundle.py        # verified media intents and application rollback
     errors.py                  # the media exception types (a leaf: no cycle)
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
@@ -325,7 +351,7 @@ Emoji Mapper/                  # the whole project
   assets/                      # shipped images (incl. the brand logo) + the panel page and its scripts
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
-  scripts/identity_repair.py   # report/migrate catalog keys after a decode fix
+  scripts/identity_repair.py   # report/migrate/recover/restore catalog identity
   requirements.txt
   requirements-dev.txt         # test-only: ruff + playwright (never at runtime)
   .env.example                 # configuration template

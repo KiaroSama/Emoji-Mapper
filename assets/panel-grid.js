@@ -36,6 +36,7 @@ let zoom = 1;
 let G = {cols: 1, cardH: BASE.cardH, sepH: BASE.sepH, gap: BASE.gap};
 let rows = [];                // {top, h, sep|start,end}
 let rowOfItem = [];           // item index -> row index
+let displayPos = [];          // included cards only; held cards occupy no slot
 let total = 0;                // height of every row plus the gaps between them
 let gridTop = 0;              // document y of the first row
 let headerH = 0;              // what the sticky header hides at the top
@@ -68,6 +69,17 @@ function el(tag, cls, text){
   return n;
 }
 
+function previewSources(img,key){
+  const compact=zoom<COMPACT_BELOW;
+  const size=compact && devicePixelRatio<=1 ? 72 : 104;
+  const fps=Math.min(PREVIEW_FPS,compact?10:15);
+  const wasPlaying=img.dataset.anim && img.getAttribute('src')===img.dataset.anim;
+  img.dataset.anim='/preview/'+key+'?fps='+fps+'&size='+size;
+  img.dataset.still='/preview/'+key+'?still=1&size='+size;
+  const want=wasPlaying?img.dataset.anim:img.dataset.still;
+  if(img.getAttribute('src')!==want)img.src=want;
+}
+
 function makeThumb(it){
   const box = el('div','thumb');
   const src = '/img/' + encodeURIComponent(it.key);
@@ -83,6 +95,7 @@ function makeThumb(it){
     // No src yet: see videoIO. The URL waits on the element until the card is
     // about to be seen, so a mounted card costs no media player.
     v.dataset.src = src + '#t=0.001';
+    v.poster='/preview/'+encodeURIComponent(it.key)+'?still=1';
     box.appendChild(v);
   } else if(it.fmt === 'animated'){
     // An animated WebP, played by the browser itself. This used to be a
@@ -95,9 +108,7 @@ function makeThumb(it){
     // is in the viewport -- an animated image the browser cannot show still
     // costs its decoded frames (~2.5 MB each here).
     const k = encodeURIComponent(it.key);
-    img.dataset.anim = '/preview/' + k + '?fps=' + PREVIEW_FPS;
-    img.dataset.still = '/preview/' + k + '?still=1';
-    img.src = img.dataset.still;
+    previewSources(img,k);
     box.appendChild(img);
   } else {
     const img = el('img');
@@ -215,45 +226,41 @@ function layoutRows(){
 
   const {starts, logo} = packStarts();
   const sepAt = new Map();           // item index -> the marker that precedes it
-  // The LAST pack's end used to be ITEMS.length -- the raw array size, which
-  // counts an excluded (held) tail as if it still occupied a slot. Moving 5
-  // emoji to the holding area left "Pack 1 #1-#200" claiming 200 when only
-  // 195 were actually included. The real end is the last INCLUDED, non-logo
-  // card, wherever it sits -- excluded items no longer inflate the count.
-  let lastIncluded = -1;
-  for(let i = ITEMS.length - 1; i >= 0; i--){
-    if(!ITEMS[i].isLogo && ITEMS[i].included){ lastIncluded = i; break; }
+  const visible = [];
+  displayPos = new Array(ITEMS.length);
+  for(let i = 0; i < ITEMS.length; i++){
+    if(ITEMS[i].included || ITEMS[i].isLogo) visible.push(i);
+    displayPos[i] = visible.length;
   }
   // Only when there is more than one -- a single pack needs no divider.
   if(starts.length >= 2){
     for(let p = 0; p < starts.length; p++){
       // Pack 1 opens at the head logo, which already sits above its first item.
       const anchor = (p === 0 && logo) ? ITEMS.indexOf(logo) : starts[p].index;
-      const to = p + 1 < starts.length ? starts[p + 1].index : lastIncluded + 1;
+      const to = p + 1 < starts.length ? displayPos[starts[p + 1].index] - 1 : visible.length;
       const pk = starts[p].pack;
       // `run` is the marker's identity, and the label is NOT: live membership
       // can revisit a pack, so 1, 2, 1 is three runs carrying two labels.
       sepAt.set(anchor, {run: p, title: pk != null ? 'Pack ' + pk : 'Pack ' + (p + 1),
-                         from: starts[p].index + 1, to});
+                         from: displayPos[starts[p].index], to});
     }
   }
   seps.length = sepAt.size;          // runs that are gone drop their markers
-  const sepIdx = [...sepAt.keys()].sort((a,b)=>a-b);
   rows = []; rowOfItem = new Array(ITEMS.length);
-  let y = 0, i = 0, s = 0;
-  const N = ITEMS.length;
-  while(i < N){
+  let y = 0, v = 0;
+  while(v < visible.length){
+    const i = visible[v];
     if(sepAt.has(i)){
       rows.push({sep: sepAt.get(i), at: i, top: y, h: G.sepH});
       y += G.sepH + G.gap;
     }
-    while(s < sepIdx.length && sepIdx[s] <= i) s++;
-    const stop = s < sepIdx.length ? sepIdx[s] : N;
-    const end = Math.min(i + G.cols, stop);
-    rows.push({start: i, end, top: y, h: G.cardH});
-    for(let k = i; k < end; k++) rowOfItem[k] = rows.length - 1;
+    const indices = [visible[v++]];
+    while(v < visible.length && indices.length < G.cols && !sepAt.has(visible[v])){
+      indices.push(visible[v++]);
+    }
+    rows.push({start: i, end: indices[indices.length - 1] + 1, indices, top: y, h: G.cardH});
+    for(const k of indices) rowOfItem[k] = rows.length - 1;
     y += G.cardH + G.gap;
-    i = end;
   }
   total = rows.length ? y - G.gap : 0;
   win = {first: -1, last: -1};        // the rows changed: the next render must project
@@ -349,9 +356,10 @@ function unmountCard(c){
 // when the card comes within a row of the viewport and released when it leaves.
 const videoIO = window.IntersectionObserver ? new IntersectionObserver(es => {
   for (const e of es) attachVideo(e.target, e.isIntersecting);
-}, {root: null, rootMargin: '300px'}) : null;
+}, {root: null, rootMargin: '0px'}) : null;
 
 function attachVideo(v, on){
+  on=on && ANIM_ON && !document.hidden;
   try {
     if (on) { if (!v.getAttribute('src')) v.src = v.dataset.src; }
     else if (v.getAttribute('src')) { v.pause(); v.removeAttribute('src'); v.load(); }
@@ -387,7 +395,7 @@ function render(){
   for(let r = first; r <= last; r++){
     const row = rows[r];
     if(row.sep) desired.push(sepNode(row));
-    else for(let k = row.start; k < row.end; k++) desired.push(mount(k));
+    else for(const k of row.indices) desired.push(mount(k));
   }
   // The spacers are grid rows of their own, so each also costs one gap.
   setSpacer(padTop, first > 0 ? rows[first].top - G.gap : 0);
@@ -409,9 +417,9 @@ function render(){
   for(let r = first; r <= last; r++){
     const row = rows[r];
     if(row.sep) continue;
-    for(let k = row.start; k < row.end; k++){
+    for(const k of row.indices){
       const pos = cards.get(ITEMS[k].key).firstChild.firstChild;
-      if(pos.textContent !== String(k + 1)) pos.textContent = k + 1;
+      if(pos.textContent !== String(displayPos[k])) pos.textContent = displayPos[k];
     }
   }
 }
@@ -442,15 +450,19 @@ function firstVisibleIndex(){
   // back its ROW's first item, and a changed column count can only move that
   // backwards -- so zooming in and back out ratcheted the grid down one row per
   // step. Scrolling moves the top row off the held item, which drops it.
-  if(zoomAnchor >= row.start && zoomAnchor < row.end) return zoomAnchor;
+  if(row.indices.includes(zoomAnchor)) return zoomAnchor;
   return row.start;
 }
 function setZoom(z){
   z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
   if(z === zoom) return;
+  remember();
   const anchor = firstVisibleIndex();
   zoomAnchor = anchor;
   zoom = z;
+  for(const c of cards.values()){
+    const img=c.querySelector('img[data-anim]');if(img)previewSources(img,encodeURIComponent(c.dataset.key));
+  }
   prefs.set('panelZoom', String(z));
   paintZoom();
   layoutRows();
@@ -533,9 +545,10 @@ function mayAnimate(inView, hover){
 const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
   for (const e of es) {
     const t = e.target;
-    const live = mayAnimate(e.isIntersecting);
+    const live = mayAnimate(t.isConnected && e.isIntersecting && e.boundingClientRect.bottom>headerH);
     if (t.dataset.play) { setPlaying(t, live); continue; }
     const want = live ? t.dataset.anim : t.dataset.still;
+    t.style.willChange=live?'transform':'';
     if (want && t.getAttribute('src') !== want) t.src = want;
   }
 }, {root: null, rootMargin: '0px'}) : null;   // see freezeAll(): a band
@@ -547,7 +560,7 @@ const animIO = window.IntersectionObserver ? new IntersectionObserver(es => {
 function setPlaying(v, on){
   // The guard sits HERE, where every caller already routes, rather than at each
   // of them: one path that forgot to ask was all it took to undo a freeze.
-  if (on) on = mayAnimate(true, true);
+  if (on) on = v.isConnected && mayAnimate(true, true);
   if (on) attachVideo(v, true);      // playing implies a source, whichever observer spoke first
   try { if (on) { const q = v.play(); if (q) q.catch(()=>{}); } else { v.pause(); } }
   catch(_){}
@@ -560,8 +573,9 @@ function animatedNodes(){
 /** Hold every mounted card on frame 0. Costs no request: the still is the
  *  same immutable-cached URL the card was built with. */
 function freezeAll(){
-  grid.querySelectorAll('video[data-play]').forEach(v => setPlaying(v, false));
+  grid.querySelectorAll('video[data-play]').forEach(v => {setPlaying(v,false);if(document.hidden||!ANIM_ON)attachVideo(v,false);});
   grid.querySelectorAll('img[data-anim]').forEach(img => {
+    img.style.willChange='';
     if (img.getAttribute('src') !== img.dataset.still) img.src = img.dataset.still;
   });
 }
@@ -603,8 +617,8 @@ function applyAnim(){
   const may = mayAnimate(true);
   animatedNodes().forEach(n => {
     if (!may) {
-      if (n.dataset.play) setPlaying(n, false);
-      else if (n.getAttribute('src') !== n.dataset.still) n.src = n.dataset.still;
+      if (n.dataset.play){setPlaying(n,false);if(!ANIM_ON||document.hidden)attachVideo(n,false);}
+      else {n.style.willChange='';if(n.getAttribute('src')!==n.dataset.still)n.src=n.dataset.still;}
     } else if (animIO) { animIO.unobserve(n); animIO.observe(n); }  // re-evaluate
     else if (n.dataset.play) setPlaying(n, true);   // no observer: play what is mounted
   });

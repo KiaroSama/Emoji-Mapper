@@ -53,6 +53,49 @@ class PanelQueueCase(unittest.TestCase):
         return page.evaluate(f"window.__sent({kind!r})")
 
 
+class RefusalsBelongToTheSubmittedBody(PanelQueueCase):
+    def test_a_newer_order_outlives_an_older_permanent_refusal(self):
+        page = self.open(clock=True)
+        page.evaluate("__reorder(0, 3)")
+        page.clock.run_for(450)
+        page.evaluate("__reorder(0, 2)")
+        newer = page.evaluate("pendingOrder")
+        page.clock.run_for(450)  # the newer debounce expires while A still owns the flight
+        page.evaluate("__settle(0, 400)")
+        page.clock.run_for(1000)
+        requests = self.sent(page, "/api/order")
+        self.assertEqual(len(requests), 2, "old refusal blocked newer valid work")
+        self.assertEqual(requests[1]["body"]["order"], newer)
+        page.evaluate("__settle(1, 200)")
+        page.clock.run_for(50)
+        self.assertIsNone(page.evaluate("pendingOrder"))
+
+    def test_new_bodies_survive_old_refusals_and_keep_transient_retries(self):
+        for kind in ("order", "save"):
+            for rejection in (400, 409):
+                with self.subTest(queue=kind, status=rejection):
+                    page = self.open(clock=True)
+                    edit = "__reorder(0,3)" if kind == "order" else "__toggle(0);__save()"
+                    newer = "__reorder(0,2)" if kind == "order" else "__toggle(1);__save()"
+                    page.evaluate(edit)
+                    page.clock.run_for(450)
+                    page.evaluate(newer)
+                    page.clock.run_for(450)
+                    page.evaluate(f"__settle(0,{rejection})")
+                    page.clock.run_for(500)
+                    self.assertEqual(len(self.sent(page, f"/api/{kind}")), 2)
+                    page.evaluate("__settle(1,503)")
+                    page.clock.run_for(1100)
+                    requests = self.sent(page, f"/api/{kind}")
+                    self.assertEqual(len(requests), 3, "new work inherited the old stuck flag")
+                    self.assertEqual(requests[1]["body"], requests[2]["body"])
+                    page.evaluate("__settle(2,200)")
+                    page.clock.run_for(50)
+                    pending = "pendingOrder" if kind == "order" else "pendingSel"
+                    self.assertIsNone(page.evaluate(pending))
+                    page.close()
+
+
 class UnsavedSelectionIsProtected(PanelQueueCase):
     """R07. The question is always "does what I see match what was stored"."""
 

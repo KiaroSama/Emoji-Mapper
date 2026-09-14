@@ -35,8 +35,8 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image  # noqa: E402
 
 import build_pack as bp  # noqa: E402
-import telegram_api as tg_api  # noqa: E402
-import packstate as ps  # noqa: E402
+from emojikit import telegram_api as tg_api  # noqa: E402
+from emojikit import packstate as ps  # noqa: E402
 from coins import fetch_cmc, fetch_paprika as fp  # noqa: E402
 from coins import _dedup_plan as cfg  # noqa: E402
 

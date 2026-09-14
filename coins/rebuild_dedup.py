@@ -41,9 +41,9 @@ from pathlib import Path
 from PIL import Image
 
 from build_pack import (EXIT_OK, EXIT_PARTIAL, load_env)
-from announce import (announce_packs)
-from packstate import (exclusive_lock)
-from telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
+from emojikit.announce import (announce_packs)
+from emojikit.packstate import (exclusive_lock)
+from emojikit.telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
 from emojikit.identity import _dhash, hamming
 
 from coins._dedup_map import map_and_fill, send_final_links

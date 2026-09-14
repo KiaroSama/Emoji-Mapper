@@ -22,7 +22,7 @@ from pathlib import Path
 from build_pack import EXIT_FAILED, EXIT_OK, EXIT_PARTIAL
 from emojikit.catalog import Catalog
 from emojikit.logsetup import redact
-from telegram_api import BotApiError, Telegram
+from emojikit.telegram_api import BotApiError, Telegram
 
 log = logging.getLogger("build_collection")
 

@@ -32,20 +32,21 @@ import re
 import time
 from pathlib import Path
 
-import collection_preflight
+from emojikit import collection_preflight
 from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
-from announce import (announce_packs)
-from packstate import (LockBusy, exclusive_lock)
-from telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
+from emojikit.announce import (announce_packs)
+from emojikit.packstate import (LockBusy, exclusive_lock)
+from emojikit.maintenance import writer
+from emojikit.telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
 from emojikit import media
 from emojikit.catalog import Catalog
 from emojikit.logsetup import record_exit_code, redact, setup_logging
-from collection_reconcile import (_confirm_new_upload,
+from emojikit.collection_reconcile import (_confirm_new_upload,
                                   _file_is_permanently_rejected,
                                   _live_index, _manifest_mismatch, _probe,
                                   _set_is_open,
                                   reconcile_set)
-from collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
+from emojikit.collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
                               BRAND_LOGO_EMOJI, BRAND_LOGO_KW,
                               DEFAULT_EMOJI, FMT_TAG, MIXED, PER_SET, ROOT,
                               BrandLogo, SetDrift, StateError, _lock_path, _state_path,
@@ -660,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # One publisher per pack family: two runs would read the same state, see
         # the same items pending, and both upload them.
-        with exclusive_lock(_lock_path(data_dir, base)):
+        with writer(data_dir), exclusive_lock(_lock_path(data_dir, base)):
             return _publish(args, base=base, formats=formats, data_dir=data_dir,
                             db=db, capacity=capacity, logo_planned=logo_planned)
     except LockBusy as exc:

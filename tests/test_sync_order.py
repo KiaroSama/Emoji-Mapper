@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import collection_state as cs  # noqa: E402
+from emojikit import collection_state as cs  # noqa: E402
 import sync_order as so  # noqa: E402
 
 

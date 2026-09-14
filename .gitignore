@@ -12,6 +12,7 @@ reference.md
 
 # graphify knowledge-graph outputs (generated; contains machine-specific paths)
 graphify-out/
+/.codebase-memory/
 
 # Strictly local-only protected directories/files (any depth)
 .ignoreme

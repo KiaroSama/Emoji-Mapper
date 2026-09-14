@@ -40,9 +40,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from collection_state import BRAND_LOGO_DEFAULT, PER_SET
+from emojikit.collection_state import BRAND_LOGO_DEFAULT, PER_SET
 from emojikit import logsetup
-from packstate import write_json_atomic
+from emojikit.packstate import LockBusy, write_json_atomic
+from emojikit.maintenance import writer
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "collection"
@@ -214,7 +215,12 @@ def render_manifest_md(rec: dict, rows: list[dict], items: dict[str, dict]) -> s
 # Sync
 # --------------------------------------------------------------------------- #
 def sync(tg) -> int:
-    from telegram_api import Telegram  # noqa: F401  (typing only; tg is injected)
+    with writer(CATALOG.parent):
+        return _sync(tg)
+
+
+def _sync(tg) -> int:
+    from emojikit.telegram_api import Telegram  # noqa: F401  (typing only; tg is injected)
 
     items, by_set = _catalog()
     ck_of = {v["cid"]: k for k, v in items.items() if v["cid"]}
@@ -300,13 +306,17 @@ def main(argv: list[str] | None = None) -> int:
 
     logsetup.setup_logging("pack_archive")
     from build_pack import load_env
-    from telegram_api import Telegram
+    from emojikit.telegram_api import Telegram
     load_env()
     token = os.environ.get("GENERAL_BOT_TOKEN")
     if not token:
         log.error("GENERAL_BOT_TOKEN is not set; cannot read the live packs.")
         return EXIT_FAILED
-    return sync(Telegram(token))
+    try:
+        return sync(Telegram(token))
+    except LockBusy as exc:
+        log.error("%s", exc)
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

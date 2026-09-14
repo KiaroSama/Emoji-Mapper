@@ -12,7 +12,7 @@ import logging
 import re
 from pathlib import Path
 
-from collection_state import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
+from emojikit.collection_state import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
 from emojikit.catalog import PHASH_BITS, Catalog
 
 # Deliberately the panel's logger, not this module's: these messages are the
