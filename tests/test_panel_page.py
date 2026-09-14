@@ -1,11 +1,10 @@
 """Assertions against what the panel serves: the page (``panel.PAGE``) and its
-two scripts (``panel.SCRIPT``, the files concatenated in load order).
+scripts (``panel.SCRIPT``, the files concatenated in load order).
 
 Drag-and-drop, undo/redo, the virtual grid, zoom, the viewport observers and
 the pack separators all live in the page's own JavaScript, so there is no
-Python function to call -- the served document is the only level at which the
-behaviour exists. Every one of these pins a bug that was actually reported, or
-a measured cost that was actually paid.
+Python function to call. These served-text contracts supplement the browser
+tests, which verify the actual gestures, timing, layout and persisted results.
 """
 
 from __future__ import annotations
@@ -51,8 +50,9 @@ class DragAndDropOrdering(unittest.TestCase):
         for arithmetic in ("findIndex", "splice", "ITEMS.length"):
             self.assertNotIn(arithmetic, drop, f"the drop handler must not reach for {arithmetic}")
         commit = block(SCRIPT, "function commitDrag(){", "function endDrag")
-        self.assertIn("if(order.every((k,i)=>k===dragSnap.order[i])) return;", commit,
-                      "released where it started: nothing to record, nothing to save")
+        self.assertIn("order.every((k,i)=>k===dragSnap.order[i])", commit)
+        self.assertIn("selSig(dragSnap.included)) return;", commit,
+                      "a tray release changes inclusion even when its position stays the same")
         self.assertLess(commit.index("remember(dragSnap);"), commit.index("saveOrder();"))
 
     def test_a_cancelled_drag_restores_the_order_taken_at_dragstart(self):
@@ -62,7 +62,7 @@ class DragAndDropOrdering(unittest.TestCase):
         start = block(SCRIPT, "grid.addEventListener('dragstart'", "grid.addEventListener('dragover'")
         self.assertIn("dragSnap=snapshot();", start)
         end = block(SCRIPT, "function endDrag(committed){", "// --- Auto-scroll")
-        self.assertIn("if(!committed && dragKey !== null){ applyOrder(dragSnap.order); relayout(); }", end)
+        self.assertIn("if(!committed && dragKey !== null){ applySnapshot(dragSnap,false); }", end)
 
     def test_the_pointer_side_decides_before_or_after(self):
         """Without it the last slot of a row is unreachable: every hover would
@@ -112,7 +112,7 @@ class DragAndDropOrdering(unittest.TestCase):
         self.assertIn("hdr.appendChild(el('span','pos',''));", card)
         self.assertNotIn("el('span','pos', n", SCRIPT)   # never filled at build time
         render = block(SCRIPT, "function render(){", "function retire")
-        self.assertIn("if(pos.textContent !== String(k + 1)) pos.textContent = k + 1;", render)
+        self.assertIn("if(pos.textContent !== String(displayPos[k])) pos.textContent = displayPos[k];", render)
 
     def test_the_logo_IS_numbered_because_it_takes_a_real_slot(self):
         """It leads every set it is added to, so it costs one of the 200.
@@ -189,12 +189,13 @@ class UndoRedoAndFormatColours(unittest.TestCase):
         A missed site is invisible until someone undoes past it and gets the
         wrong state back, which is worse than having no undo at all.
         """
-        for label, marker, mutation, call in (
-            ("select all / invert", "function setAll(fn){", "it.included = fn(it)", "remember()"),
-            ("card toggle", "if(i < 0 || ITEMS[i].isLogo) return;", "ITEMS[i].included=!ITEMS[i].included", "remember()"),
-            ("drag reorder", "function commitDrag(){", "saveOrder();", "remember(dragSnap)"),
+        for label, marker, end, mutation, call in (
+            ("select all / invert", "function setAll(fn){", "// Reduced motion", "setIncluded(it, fn(it))", "remember()"),
+            ("card toggle", "grid.addEventListener('click'", "// --- Losing the server", "setIncluded(ITEMS[i], !ITEMS[i].included)", "remember()"),
+            ("drag reorder", "function commitDrag(){", "function endDrag", "saveOrder();", "remember(dragSnap)"),
         ):
-            self.assertIn(call, block(SCRIPT, marker, mutation), f"{label} does not record history first")
+            body = block(SCRIPT, marker, end)
+            self.assertLess(body.index(call), body.index(mutation), f"{label} does not record history first")
 
     def test_the_history_is_bounded(self):
         """A long curation session must not grow the stack without limit."""
@@ -295,9 +296,9 @@ class UndoRedoAndFormatColours(unittest.TestCase):
                     "all", "none", "inv", "bg", "anim", "selmode"):
             self.assertIn(f'id="{btn}"', actions, btn)
         self.assertNotIn('id="save"', actions, "Save writes; it stays out of the centre group")
-        # Centred by grid columns, not by flex spacers -- spacers only centre
-        # when both sides weigh the same, and the title is far wider.
-        self.assertIn("grid-template-columns:1fr auto 1fr", PAGE)
+        # The expanding toolbar must wrap rather than cover the title; the real
+        # rendered rectangles are checked in test_panel_curation.
+        self.assertIn("grid-template-columns:auto minmax(0,1fr) auto", PAGE)
 
 
 class OffScreenCostsNothing(unittest.TestCase):
@@ -340,8 +341,8 @@ class OffScreenCostsNothing(unittest.TestCase):
         self.assertIn("v.src = v.dataset.src", attach)
         self.assertIn("v.removeAttribute('src'); v.load();", attach,
                       "removing the attribute alone leaves the player alive")
-        self.assertIn("rootMargin: '300px'", block(SCRIPT, "const videoIO", "function attachVideo"),
-                      "attached one row early so a video is not blank when it arrives")
+        self.assertIn("rootMargin: '0px'", block(SCRIPT, "const videoIO", "function attachVideo"))
+        self.assertIn("v.poster=", video, "a still poster is visible before a decoder is attached")
         # Playing implies a source, whichever observer fired first.
         self.assertIn("if (on) attachVideo(v, true);", block(SCRIPT, "function setPlaying(v, on){", "}"))
 
@@ -402,7 +403,7 @@ class TheGridIsVirtual(unittest.TestCase):
         spacers would be wrong by one row for every pack."""
         layout = block(SCRIPT, "function layoutRows(){", "function measure")
         self.assertIn("if(sepAt.has(i)){", layout)
-        self.assertIn("const end = Math.min(i + G.cols, stop);", layout)
+        self.assertIn("indices.length < G.cols && !sepAt.has(visible[v])", layout)
 
     def test_scrolling_within_the_same_rows_costs_a_binary_search(self):
         """render() runs once per frame while scrolling. Between row
@@ -433,8 +434,8 @@ class ZoomFitsMoreOrLess(unittest.TestCase):
         # zoomReset is a typeable percentage (panel-holding.js), not a plain
         # reset button any more -- Enter applies it, double-click still resets.
         self.assertIn('<input id="zoomReset"', PAGE)
-        self.assertIn("if(e.key === 'Enter'){ e.preventDefault(); applyZoomInput(); }", SCRIPT)
-        self.assertIn("zoomInput.addEventListener('dblclick', ()=>setZoom(1));", SCRIPT)
+        self.assertIn("if(e.key==='Enter'){e.preventDefault();applyZoomInput();}", SCRIPT)
+        self.assertIn("zoomInput.addEventListener('dblclick',()=>setZoom(1));", SCRIPT)
 
     def test_ctrl_wheel_and_ctrl_keys_are_taken_over_from_the_browser(self):
         """Ctrl+wheel is the browser's own page zoom. Left alone, both would
@@ -543,7 +544,7 @@ class SelectionModeCarriesARun(unittest.TestCase):
     def test_arranging_never_changes_what_ships(self):
         """The card click toggles `included`. In selection mode a stray click
         while moving cards must not quietly drop an emoji from the pack."""
-        body = block(SCRIPT, "grid.addEventListener('click'", "// --- Undo / redo")
+        body = block(SCRIPT, "grid.addEventListener('click'", "// --- Losing the server")
         self.assertIn("if(selMode) return;", body)
         self.assertLess(body.index("if(selMode) return;"), body.index("remember();"),
                         "the guard has to come before anything mutates")

@@ -130,6 +130,7 @@ class F01OrderSavesAreRevisioned(PanelInABrowser):
         """The heartbeat and the debounce both flush, and they overlap."""
         page = self.open(clock=True)
         page.evaluate("__reorder(0, 5)")
+        page.clock.run_for(450)  # the unified eligibility gate also applies to direct flushes
         page.evaluate("(()=>{ flushOrder(pendingOrder); flushOrder(pendingOrder); })()")
         self.assertEqual(len(page.evaluate("__sent('/api/order')")), 1,
                          "two concurrent saves race for the same catalog rows")
