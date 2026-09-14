@@ -23,7 +23,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import EXIT_PARTIAL, load_env, safe_int_env
+from emojikit.build_pack import EXIT_PARTIAL, load_env, safe_int_env
 from emojikit import media
 from emojikit.packstate import (pack_family_lock_path, write_json_atomic)
 

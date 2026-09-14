@@ -27,7 +27,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_pack as bp  # noqa: E402
+from emojikit import build_pack as bp  # noqa: E402
 from emojikit import telegram_api as tg_api  # noqa: E402
 from emojikit import packstate as ps  # noqa: E402
 from emojikit import announce  # noqa: E402
@@ -328,7 +328,7 @@ class AddMediaExitCode(unittest.TestCase):
         self.tmp.cleanup()
 
     def _run(self):
-        import add_media
+        from emojikit import add_media
         argv = ["add_media.py", "--in", str(self.src),
                 "--data-dir", str(self.dir / "data")]
         with mock.patch.object(sys, "argv", argv):
@@ -383,7 +383,7 @@ class LinksDestination(unittest.TestCase):
         The two collector-side modules deliberately do not import
         ``links_chat_id`` any more: what they cannot reach, they cannot misuse.
         """
-        import build_collection
+        from emojikit import build_collection
         import coins.rebuild_dedup as rd
         for module in (bp, build_collection, rd):
             self.assertIs(module.announce_packs, announce.announce_packs,

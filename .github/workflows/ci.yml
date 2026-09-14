@@ -178,7 +178,7 @@ jobs:
           with tempfile.TemporaryDirectory(prefix="ci-smoke-", dir="logs") as folder:
               Image.new("RGBA", (100, 100), (0, 128, 255, 255)).save(Path(folder) / "a.png")
               os.environ["GENERAL_BOT_TOKEN"] = "dummy"
-              r = subprocess.run([sys.executable, "build_pack.py", "--base", "ci",
+              r = subprocess.run([sys.executable, "-m", "emojikit.build_pack", "--base", "ci",
                                   "--title", "CI", "--user-id", "1",
                                   "--source-dir", folder,
                                   "--token-env", "GENERAL_BOT_TOKEN", "--dry-run"],

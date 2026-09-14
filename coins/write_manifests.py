@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-from build_pack import (load_env)
+from emojikit.build_pack import (load_env)
 from emojikit.telegram_api import (Telegram)
 from emojikit.logsetup import setup_logging
 

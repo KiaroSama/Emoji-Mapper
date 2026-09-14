@@ -29,7 +29,7 @@ from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-import panel
+from emojikit import panel
 from emojikit import panel_view
 from emojikit.catalog import Catalog
 

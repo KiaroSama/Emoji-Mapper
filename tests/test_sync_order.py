@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from emojikit import collection_state as cs  # noqa: E402
-import sync_order as so  # noqa: E402
+from emojikit import sync_order as so  # noqa: E402
 
 
 def _live(*cids: str) -> list[dict]:

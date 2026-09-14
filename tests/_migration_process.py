@@ -33,19 +33,19 @@ def main():
             _hold()
         return 0
     if operation == "hold-publisher":
-        import build_collection as publisher
+        from emojikit import build_collection as publisher
         with mock.patch.object(publisher, "_publish", side_effect=lambda *a, **k: _hold() or 0):
             return publisher.main(["--base", "newfamily", "--title", "Fixture", "--dry-run",
                                    "--no-brand-logo", "--data-dir", str(data)])
     if operation == "hold-archive":
-        import pack_archive
+        from emojikit import pack_archive
         with mock.patch.object(pack_archive, "CATALOG", data / "catalog.db"), \
                 mock.patch.object(pack_archive, "_catalog", side_effect=lambda: _hold() or ({}, {})), \
                 mock.patch.object(pack_archive, "_sets", return_value=[]), \
                 mock.patch.object(pack_archive, "archive_root", return_value=data / "archive"):
             return pack_archive.sync(None)
     if operation == "hold-ingest":
-        import add_media
+        from emojikit import add_media
         from PIL import Image
         image = data / "incoming.png"
         Image.new("RGBA", (100, 100), "red").save(image)
@@ -56,7 +56,7 @@ def main():
         import threading
         from http.server import ThreadingHTTPServer
         from urllib import request
-        import panel
+        from emojikit import panel
 
         def opening(*args, **kwargs):
             catalog = Catalog(*args, **kwargs)

@@ -17,7 +17,7 @@ Duplicate-proof & resumable:
   never create a duplicate. ``pending = plan[fmt][live_total:]``.
 
 Usage:
-  python build_collection.py --base mypack --title "My Pack" \
+  python -m emojikit.build_collection --base mypack --title "My Pack" \
       [--token-env GENERAL_BOT_TOKEN] [--user-id N] [--emoji 😀] \
       [--formats static,video,animated] [--per-set 200] [--data-dir collection] \
       [--dry-run]
@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from emojikit import collection_preflight
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
+from emojikit.build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, ingest_exit_code, load_env, safe_int_env)
 from emojikit.announce import (announce_packs)
 from emojikit.packstate import (LockBusy, exclusive_lock)
 from emojikit.maintenance import writer

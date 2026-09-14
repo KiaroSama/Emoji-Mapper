@@ -34,18 +34,18 @@ Supported custom-emoji formats: **static** (PNG/WEBP, 100×100), **animated**
 ```
 Emoji Mapper/
   run.ps1                  Windows launcher (menu). Prefer this.
-  build_pack.py            core engine: upload a folder of media to emoji sets
-  make_emoji_pngs.py       image -> 100x100 PNG (static)
-  fetch_pack.py            collector: download a Telegram pack -> catalog
-  fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
-  add_media.py             collector: build emoji from local files -> catalog
-  build_collection.py      collector: publish the catalog into new packs
-  sync_order.py            reorder an already published pack (no re-upload)
-  pack_archive.py             # archived media reconciliation
-  pack_manifest.py            # pack roster and gallery CLI
-  panel.py                 web "Curate" panel: the server, the page, the APIs
-  emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
-  emojikit/                shared core library
+  emojikit/                command modules and shared toolkit
+    build_pack.py            core engine: upload a folder of media to emoji sets
+    make_emoji_pngs.py       image -> 100x100 PNG (static)
+    fetch_pack.py            collector: download a Telegram pack -> catalog
+    fetch_emoji_ids.py       collector: download specific emoji by ID -> catalog
+    add_media.py             collector: build emoji from local files -> catalog
+    build_collection.py      collector: publish the catalog into new packs
+    sync_order.py            reorder an already published pack (no re-upload)
+    pack_archive.py             # archived media reconciliation
+    pack_manifest.py            # pack roster and gallery CLI
+    panel.py                 web "Curate" panel: the server, the page, the APIs
+    emoji_bot.py             interactive bot: extract premium-emoji IDs (tap-to-copy)
     telegram_api.py           the Bot API client, its errors and Telegram's caps
     packstate.py              state-file shape + atomic write + pack-family lock
     announce.py               announce finished packs (Worker, or direct)
@@ -111,7 +111,7 @@ copy .env.example .env
 PACK_OWNER_USER_ID=<your numeric Telegram id>   # owns every created set; press Start on each bot once
 TELEGRAM_BOT_TOKEN=<coin bot token>
 GENERAL_BOT_TOKEN=<general bot token>
-BOT_ALLOWED_USER_IDS=<optional: extra ids allowed to use emoji_bot.py>
+BOT_ALLOWED_USER_IDS=<optional: extra ids allowed to use emojikit/emoji_bot.py>
 PACK_LINKS_CHAT_ID=<optional: channel that receives finished-pack links>
 WORKER_PUBLISH_URL=<optional: https://<worker>.workers.dev/publish — see §12.9>
 WORKER_PUBLISH_SECRET=<optional: bearer for that endpoint; both or neither>
@@ -123,7 +123,7 @@ CMC_API_KEY=<optional CoinMarketCap key, only for coins/fetch_cmc.py>
 That is the complete set of variables any code reads, plus two environment-only
 switches used for testing: `TELEGRAM_API_BASE` (Bot API endpoint override,
 default `https://api.telegram.org`) and `EMOJI_MAPPER_NO_DOTENV=1` (makes
-`build_pack.load_env()` a no-op; it is read *before* `.env`, so it only works
+`emojikit.build_pack.load_env()` a no-op; it is read *before* `.env`, so it only works
 from the real environment — the test suite sets it there). There is no
 `GENERAL_BOT_USERNAME` / `GENERAL_BOT_NAME`: every tool takes the bot's username
 from `getMe` at runtime, so a stale copy can never name the wrong bot in a set
@@ -243,7 +243,7 @@ It imports `media`; `media` never imports it.
 
 ```powershell
 # By pack short-name or t.me/addemoji/<name> link. Use the bot that can read it.
-.venv\Scripts\python.exe fetch_pack.py <pack_or_link> [<pack2> ...] `
+.venv\Scripts\python.exe -m emojikit.fetch_pack <pack_or_link> [<pack2> ...] `
     --token-env GENERAL_BOT_TOKEN [--data-dir collection] [--limit N] [--phash-threshold -1]
 ```
 
@@ -251,13 +251,13 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 
 ```powershell
 # getCustomEmojiStickers returns set_name + is_animated/is_video
-# (see emoji_bot.enrich_labels for the call; or a one-off snippet)
+# (see emojikit.emoji_bot.enrich_labels for the call; or a one-off snippet)
 ```
 
 ### 6.2 Build emoji from your own files
 
 ```powershell
-.venv\Scripts\python.exe add_media.py --in input\myset --emoji 😀 [--as auto|static|video|animated]
+.venv\Scripts\python.exe -m emojikit.add_media --in input\myset --emoji 😀 [--as auto|static|video|animated]
 # auto: still image -> static; animated GIF/MP4/WEBM -> video; Lottie .json/.tgs -> animated
 # (animated emoji are VECTOR only; a GIF/video becomes a VIDEO emoji, not animated)
 ```
@@ -265,11 +265,11 @@ Find which pack an emoji ID belongs to first (then fetch that pack):
 ### 6.3 Curate — pick what to publish (web panel)
 
 ```powershell
-.venv\Scripts\python.exe panel.py [--data-dir collection] [--port 9450] [--preview-fps 15] [--no-open]
+.venv\Scripts\python.exe -m emojikit.panel [--data-dir collection] [--port 9450] [--preview-fps 15] [--no-open]
                                    [--with-pack N ...] [--all]
 ```
 
-**An emoji already live in a pack is HIDDEN by default**, so a bare `panel.py`
+**An emoji already live in a pack is HIDDEN by default**, so a bare `emojikit/panel.py`
 shows the next pack's candidates and nothing else. `--with-pack N` un-hides one
 published set so it can be rearranged beside them; repeat the flag per pack.
 `--all` brings back every finished pack, which is usually hundreds of cards you
@@ -299,10 +299,10 @@ whatever candidates follow it, same as unticking one in place always has.
 
 ```powershell
 # Preview (no upload):
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN --dry-run
 # Publish for real (resumable, duplicate-proof, per-format sets):
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN [--formats static,video,animated] [--per-set 200]
 ```
 
@@ -319,7 +319,7 @@ pack even though it is not a catalog item.
 
 ## 7. Crypto-coin component (`coins/`)
 
-Self-contained tool that reuses `build_pack.py` and the coin bot.
+Self-contained tool that reuses `emojikit/build_pack.py` and the coin bot.
 
 ```powershell
 # Logos (data): fetch + keywords
@@ -330,8 +330,8 @@ Self-contained tool that reuses `build_pack.py` and the coin bot.
 .venv\Scripts\python.exe coins\build_keywords.py       # (re)build keywords.csv from logos
 
 # Convert logos to 100x100 emoji PNGs
-.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\svg --out coins\logos\emoji
-.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\png --out coins\logos\emoji
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in coins\logos\svg --out coins\logos\emoji
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in coins\logos\png --out coins\logos\emoji
 
 # Build / rebuild the packs (duplicate-proof, records upload order)
 .venv\Scripts\python.exe coins\rebuild_dedup.py        # build + map + send links
@@ -379,12 +379,12 @@ not from positions** (a historical position-based bug scrambled it):
 
 ---
 
-## 8. The Emoji Mapper bot (`emoji_bot.py`)
+## 8. The Emoji Mapper bot (`emojikit/emoji_bot.py`)
 
 Long-polling bot (run it and leave it running; only one instance at a time):
 
 ```powershell
-.venv\Scripts\python.exe emoji_bot.py    # uses GENERAL_BOT_TOKEN; or run.ps1 -> C1
+.venv\Scripts\python.exe -m emojikit.emoji_bot    # uses GENERAL_BOT_TOKEN; or run.ps1 -> C1
 ```
 
 - Send it **one or more premium emoji in a row** (spaces/newlines between them
@@ -516,7 +516,7 @@ Git: work is committed in small logical commits and pushed to `main` on
    order; never reintroduce position-offset resume logic. Never blind-retry a
    non-idempotent Bot API call: go through `Telegram.add_emoji`/`add_sticker`
    with `expected_before=<live count>` (verified retry) and let
-   `build_collection.reconcile_set` attribute anything ambiguous from the live
+   `emojikit.build_collection.reconcile_set` attribute anything ambiguous from the live
    set before uploading more.
 5. **Curation**: respect the `included` flag in any new publish path.
 6. **UI changes** (panel): keep the dark neon-blue style, Inter font, visible
@@ -540,7 +540,7 @@ Every entry point, every flag, with defaults and examples. All commands assume
 you run them from the project root with the venv Python
 (`.venv\Scripts\python.exe`). On macOS/Linux use `.venv/bin/python`.
 
-### 12.1 `make_emoji_pngs.py` — image → 100×100 PNG
+### 12.1 `emojikit/make_emoji_pngs.py` — image → 100×100 PNG
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -583,12 +583,12 @@ Behaviour:
 Examples:
 
 ```powershell
-.venv\Scripts\python.exe make_emoji_pngs.py --in input\myset --out build\myset
-.venv\Scripts\python.exe make_emoji_pngs.py --in input\myset --limit 50
-.venv\Scripts\python.exe make_emoji_pngs.py            # legacy coin mode
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in input\myset --out build\myset
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in input\myset --limit 50
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs            # legacy coin mode
 ```
 
-### 12.2 `build_pack.py` — upload a folder of PNGs to emoji sets
+### 12.2 `emojikit/build_pack.py` — upload a folder of PNGs to emoji sets
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -608,11 +608,11 @@ Resumable: progress is saved to `state_<base>.json`; an interrupted/flood-limite
 run continues without recreating existing sets. Use `--dry-run` first.
 
 ```powershell
-.venv\Scripts\python.exe build_pack.py --base myset --title "My Emojis" `
+.venv\Scripts\python.exe -m emojikit.build_pack --base myset --title "My Emojis" `
     --source-dir build\myset --token-env GENERAL_BOT_TOKEN --emoji 😀 --dry-run
 ```
 
-### 12.3 `fetch_pack.py` — download a Telegram pack into the catalog
+### 12.3 `emojikit/fetch_pack.py` — download a Telegram pack into the catalog
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -626,7 +626,7 @@ run continues without recreating existing sets. Use `--dry-run` first.
 Re-running is cheap: stickers whose `file_unique_id` was already ingested are
 skipped without downloading; identical media collapse to one catalog row.
 
-### 12.3b `fetch_emoji_ids.py` — download *specific* emoji by ID (not whole packs)
+### 12.3b `emojikit/fetch_emoji_ids.py` — download *specific* emoji by ID (not whole packs)
 
 Downloads only the individual premium custom-emoji you name — e.g. the
 `premium-id:<n>` entries inside bot inventory files — and nothing else from
@@ -660,7 +660,7 @@ within-file and cross-file duplicates, bare-ID lists).
 Example — pull only the emoji referenced by four bot inventory files:
 
 ```powershell
-.venv\Scripts\python.exe fetch_emoji_ids.py `
+.venv\Scripts\python.exe -m emojikit.fetch_emoji_ids `
   --ids-file "...\GV Swap bot\bot-emoji-inventory-user.md" `
   --ids-file "...\GV Swap bot\bot-emoji-inventory-admin.md" `
   --ids-file "...\YourBrand Payment Bot\bot-emoji-inventory-admin.md" `
@@ -669,7 +669,7 @@ Example — pull only the emoji referenced by four bot inventory files:
 # -> Done. unique_ids=101 new=100 dedup=1 failed=0 missing=0
 ```
 
-### 12.4 `add_media.py` — build emoji from local files into the catalog
+### 12.4 `emojikit/add_media.py` — build emoji from local files into the catalog
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -686,7 +686,7 @@ Auto format: still image → static; animated GIF/APNG/MP4/WEBM/MOV → **video*
 cannot become an *animated* emoji (those are vector-only) — it becomes a *video*
 emoji.
 
-### 12.5 `build_collection.py` — publish the catalog into new packs
+### 12.5 `emojikit/build_collection.py` — publish the catalog into new packs
 
 **`--mixed` publishes every format into ONE family**, named `<base><n>_by_<bot>`
 with no format letter, in the curate panel's order. Without it each format gets
@@ -791,7 +791,7 @@ published. Per-format sets, drift-proof resume, per-pack manifests.
 **Brand logo (first emoji of every set).** When publishing with the
 `@YourEmojiBot` bot, the YourBrand logo is inserted as the **first
 emoji of every set** (`--brand-logo`, default `BRAND_LOGO_DEFAULT` in
-`build_collection.py` = the repo's own `assets/yourbrand-emoji-logo.png`, so a
+`emojikit/build_collection.py` = the repo's own `assets/yourbrand-emoji-logo.png`, so a
 fresh clone works with no machine-specific path). Since Bot API 7.2
 (March 2024) a single custom-emoji set may contain **mixed formats**, so the
 logo is always a **static** 100x100 PNG and leads a static, video *or* animated
@@ -799,7 +799,7 @@ set alike (verified live). The `@YourCoinEmojiBot` coin bot is exempt.
 Disable with `--no-brand-logo`. The logo occupies position 0, so item
 `custom_emoji_id`s are read from position 1 onward (handled automatically).
 
-### 12.5b `sync_order.py` — reorder an ALREADY PUBLISHED pack
+### 12.5b `emojikit/sync_order.py` — reorder an ALREADY PUBLISHED pack
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -815,8 +815,8 @@ emoji keeps its `file_id` **and** its `custom_emoji_id`: nobody who already
 uses one is affected, and no upload happens.
 
 ```powershell
-$PY sync_order.py --base mypack             # what would move
-$PY sync_order.py --base mypack --apply
+$PY -m emojikit.sync_order --base mypack             # what would move
+$PY -m emojikit.sync_order --base mypack --apply
 ```
 
 It is the one set mutation in this project that is genuinely idempotent —
@@ -844,7 +844,7 @@ set, so a reorder that left the record behind made the family unpublishable:
 `position N now holds a sticker this publisher cannot identify`. A report-only
 run writes nothing.
 
-### 12.5c `pack_manifest.py` — the roster of what is in every published pack
+### 12.5c `emojikit/pack_manifest.py` — the roster of what is in every published pack
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -864,7 +864,7 @@ header: ↑ Top, ↓ Bottom, the four-way backdrop cycle and the animation switc
 What is absent is everything that writes — no `draggable`, no tick, no selection,
 no save, no form field at all.
 
-**It gates its media like the panel.** Every animated card inlines a still as
+**It gates its media like the emojikit.panel.** Every animated card inlines a still as
 well as the animation, starts frozen, and only what is on screen is swapped to
 the moving version; scrolling freezes everything until 180 ms after it settles,
 and `Animation: Off` freezes it permanently. Thumbnails are 88px at 9fps — fps
@@ -912,7 +912,7 @@ replaced or recoloured sticker, a reorder, a coin remap. It blocks once per
 distinct input state, so declining cannot loop, and re-arms on the next change.
 Clear it with `--refresh`, and say in the reply that the roster was updated.
 
-### 12.5d `pack_archive.py` — the finished pack's media leaves the project
+### 12.5d `emojikit/pack_archive.py` — the finished pack's media leaves the project
 
 Once a pack is FULL its media moves out to the owner's archive, one folder per
 pack, and the project keeps no copy. A pack still being filled is left alone on
@@ -945,7 +945,7 @@ never deletes: a file the live pack no longer knows is reported, not removed.
 The `Pack-Archive-Check` Stop hook runs `--check` and blocks the turn when the
 archive has fallen behind. Say in the reply whenever you cleared it.
 
-### 12.6 `panel.py` — curate web panel
+### 12.6 `emojikit/panel.py` — curate web panel
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -986,7 +986,7 @@ the whole catalog in one motion. Releasing anywhere that is not a card cancels
 Two separate reasons a reload used to appear to do nothing:
 
 * the page served a snapshot of the catalog taken at start-up, so an emoji
-  added by `fetch_emoji_ids.py` afterwards was invisible until a restart. The
+  added by `emojikit/fetch_emoji_ids.py` afterwards was invisible until a restart. The
   view is now re-read from the database on every page load (200 rows, a few
   milliseconds), replacing the shared list **in place** — rebinding it would
   leave every route closed over the old object;
@@ -995,10 +995,10 @@ Two separate reasons a reload used to appear to do nothing:
   then ran, both logging `Panel at …`, the browser reached whichever socket the
   OS picked, and the older process kept serving its own start-up snapshot —
   which is why only closing the launcher (killing every instance) made a change
-  appear. `allow_reuse_address` is now off, so a second panel exits 2 with what
-  to do about it instead of quietly sharing the port.
+  appear. `allow_reuse_address` stays off. B4 identifies an existing panel and
+  reopens its session without replacing it; an unrelated port holder is refused.
 
-Editing `panel.py` itself still needs the process restarted — a refresh asks the
+Editing `emojikit/panel.py` itself still needs the process restarted — a refresh asks the
 running server for a page, and that server holds the old code.
 
 **Losing the panel process is never silent.** The page polls `GET /api/ping`
@@ -1014,7 +1014,7 @@ triggers the browser's "leave site?" prompt.
 panel does, so a synthetic drag event *is* a write — there is no careful way to
 test it against real data. `scripts/panel_sandbox.py` clones the catalog to a
 temp directory, serves it on the real panel's port + 1 (imported from
-`panel.DEFAULT_PORT`, never typed again), and deletes the clone
+`emojikit.panel.DEFAULT_PORT`, never typed again), and deletes the clone
 on exit:
 
 ```powershell
@@ -1050,12 +1050,12 @@ viewport, zoom and warm-cache state; desktop load and browser configuration matt
 **Brand logo preview.** `--bot-username YourEmojiBot` selects branding
 without a Telegram lookup. Otherwise, if `GENERAL_BOT_TOKEN` resolves to
 `@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
-`build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
+`emojikit/build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
 first card** labelled "Brand logo (auto-added on publish)" so you can see where
 it will land *before* publishing. This card is preview-only: it's not clickable,
 not counted in the included/excluded totals, and never sent to `/api/save` — the
 logo itself is never part of the catalog and is only actually inserted by
-`build_collection.py` at publish time (see §12.5). For the coin bot, or if the
+`emojikit/build_collection.py` at publish time (see §12.5). For the coin bot, or if the
 logo file is missing, the card is simply not shown.
 
 **Emoji already live in a pack are hidden.** The panel arranges the pack being
@@ -1089,7 +1089,7 @@ is unchanged: there the logo is not live yet.
 
 **`--with-pack N` is the narrow version of `--all`.** It un-hides one published
 set so a half-full pack can be arranged beside the new candidates going into
-it — `panel.py --with-pack 5` shows pack 5's emoji and the unpublished ones
+it — `emojikit/panel.py --with-pack 5` shows pack 5's emoji and the unpublished ones
 together, and nothing else. `--all` is the wrong tool for that job: it also
 returns every finished pack, which on a grown catalog is hundreds of cards that
 cannot change. The index is resolved through the publisher's own
@@ -1156,7 +1156,7 @@ says "this moves with the others" — and while selection mode is on, clicking a
 card no longer toggles the tick, so arranging can never quietly drop an emoji
 from the pack. A cancelled group drag puts every carried card back where it was.
 
-### 12.7 `emoji_bot.py` — premium-emoji ID extractor bot
+### 12.7 `emojikit/emoji_bot.py` — premium-emoji ID extractor bot
 
 No flags. Uses `GENERAL_BOT_TOKEN` + `PACK_OWNER_USER_ID` from `.env`. One
 instance at a time (two pollers cause Telegram 409 Conflict). Each reply is a
@@ -1206,10 +1206,10 @@ apart, and one shared secret would let a leak from either forge the other's
 updates.
 
 **A token can use `getUpdates` or a webhook, never both.** Registering a webhook
-stops `emoji_bot.py` (§12.7, §19) receiving anything on that token;
+stops `emojikit/emoji_bot.py` (§12.7, §19) receiving anything on that token;
 `deleteWebhook` hands it back. Run one or the other per token.
 
-`ADMIN_USER_IDS` **fails closed**, exactly like `emoji_bot.allowed_user_ids()`:
+`ADMIN_USER_IDS` **fails closed**, exactly like `emojikit.emoji_bot.allowed_user_ids()`:
 unset, empty or all-invalid means the bots answer nobody. Only plain positive
 integers count — `Number()` would have accepted `0x10`, `12.5` and `1e3`.
 A stranger gets one reply in private and **silence in a group**, so the bot
@@ -1221,7 +1221,7 @@ partial success posts the reply twice; failures are logged instead. Nothing is
 retried internally, for the same reason as the Python client (§5).
 
 Local side: set `WORKER_PUBLISH_URL` **and** `WORKER_PUBLISH_SECRET` and
-`build_collection.notify()` routes links through the Worker; leave either unset
+`emojikit.build_collection.notify()` routes links through the Worker; leave either unset
 and the original direct `sendMessage` path runs unchanged. The duplicate guard
 does not move — the per-milestone lists still decide, and a *failed* announcement
 is deliberately not recorded as sent, or the guard would skip it forever.
@@ -1261,7 +1261,7 @@ credential; it is a secret only because `wrangler.toml` is public and both
 forms arrive as `env.PACK_LINKS_CHAT_ID` anyway.
 
 `scripts\put-secrets.ps1` reads `.env` with the same parse as
-`build_pack.load_env` and pipes each value to `wrangler secret put` **through
+`emojikit.build_pack.load_env` and pipes each value to `wrangler secret put` **through
 stdin** — never an argument (arguments are visible in the process list), never
 printed. It composes `ADMIN_USER_IDS` from `PACK_OWNER_USER_ID` +
 `BOT_ALLOWED_USER_IDS` (deduped, integers only), because that list fails closed
@@ -1603,7 +1603,7 @@ print(redact(some_text))        # mask before any manual print
 Secret handling is covered by `tests/test_logsetup.py`, which also fails the
 build if any value from `.env` appears in a git-tracked file.
 
-### 14.7 `build_pack.Telegram`
+### 14.7 `emojikit.build_pack.Telegram`
 
 Thin Bot API client (used everywhere). Key methods: `get_me`, `send_message`,
 `get_sticker_set`, `download_file`, `create_emoji_set`/`add_emoji` (format-aware,
@@ -1617,7 +1617,7 @@ for static/animated/video), and the legacy static `create_set`/`add_sticker`.
 ### 15.1 Static (`static`)
 
 - File: PNG or WEBP, **exactly 100×100**, RGBA (transparent background).
-- Built by `make_emoji_pngs._fit_100` / `media.to_static_png`: trim fully
+- Built by `emojikit.make_emoji_pngs._fit_100` / `media.to_static_png`: trim fully
   transparent borders, scale to fit 100×100 with LANCZOS, center on a
   transparent canvas. SVG sources are rasterized by resvg straight to RGBA
   (gradients included).
@@ -1759,7 +1759,7 @@ it is drifted too, and scores the same as the map it was meant to repair.
 
 ### 17.3 Preventing drift in new builds
 
-Both `coins/rebuild_dedup.py` and `build_collection.py` now record the **actual
+Both `coins/rebuild_dedup.py` and `emojikit/build_collection.py` now record the **actual
 upload order** and mark each item uploaded as they go, then assign real
 `custom_emoji_id`s from that recorded order — never from positions. `verify_logos
 --fix` is the safe tool for individual wrong logos.
@@ -1779,20 +1779,20 @@ the base coin's id. This filled the NOWPayments inventory to 354/354.
 
 ```powershell
 # 1) Download the source pack (all distinct stickers kept; near-dup merge off):
-.venv\Scripts\python.exe fetch_pack.py https://t.me/addemoji/SomePack_by_bot --token-env GENERAL_BOT_TOKEN
+.venv\Scripts\python.exe -m emojikit.fetch_pack https://t.me/addemoji/SomePack_by_bot --token-env GENERAL_BOT_TOKEN
 #    -> "Pack SomePack (...): 80 stickers -> new=80 dedup=0 failed=0"
 
 # 2) Open the curate panel and untick anything you don't want, then Save:
-.venv\Scripts\python.exe panel.py
+.venv\Scripts\python.exe -m emojikit.panel
 #    (browser opens http://127.0.0.1:9450/ ; click cards / Shift+click ranges / Save)
 
 # 3) Preview the publish plan:
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN --dry-run
 #    -> "static: 76 emoji -> 1 set(s) named mypacks1_by_<bot> ..."
 
 # 4) Publish (resumable). Each finished pack DMs you its addemoji link:
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN
 #    -> manifests written to collection/manifests/mypacks1_by_<bot>.md
 ```
@@ -1801,16 +1801,16 @@ the base coin's id. This filled the NOWPayments inventory to 354/354.
 
 ```powershell
 # Resolve id -> set_name (uses getCustomEmojiStickers), then fetch that set:
-.venv\Scripts\python.exe -c "import os,sys,json;sys.path.insert(0,'.');from build_pack import Telegram,load_env;load_env();tg=Telegram(os.environ['GENERAL_BOT_TOKEN']);print(tg._call('getCustomEmojiStickers',data={'custom_emoji_ids':json.dumps(['<ID>'])})[0]['set_name'])"
-.venv\Scripts\python.exe fetch_pack.py <set_name> --token-env GENERAL_BOT_TOKEN
+.venv\Scripts\python.exe -c "import os,sys,json;sys.path.insert(0,'.');from emojikit.build_pack import Telegram,load_env;load_env();tg=Telegram(os.environ['GENERAL_BOT_TOKEN']);print(tg._call('getCustomEmojiStickers',data={'custom_emoji_ids':json.dumps(['<ID>'])})[0]['set_name'])"
+.venv\Scripts\python.exe -m emojikit.fetch_pack <set_name> --token-env GENERAL_BOT_TOKEN
 ```
 
 ### 18.3 Build a video emoji pack from GIFs
 
 ```powershell
 # ffmpeg must be installed. GIFs become VP9 .webm video emoji.
-.venv\Scripts\python.exe add_media.py --in input\my-gifs --emoji 🔥
-.venv\Scripts\python.exe build_collection.py --base myvid --title "My Animations" `
+.venv\Scripts\python.exe -m emojikit.add_media --in input\my-gifs --emoji 🔥
+.venv\Scripts\python.exe -m emojikit.build_collection --base myvid --title "My Animations" `
     --token-env GENERAL_BOT_TOKEN --formats video
 ```
 
@@ -1824,7 +1824,7 @@ the base coin's id. This filled the NOWPayments inventory to 354/354.
 ```
 ---
 
-## 19. The Emoji Mapper bot internals (`emoji_bot.py`)
+## 19. The Emoji Mapper bot internals (`emojikit/emoji_bot.py`)
 
 Long-polling loop: `getUpdates(offset, timeout=50, allowed_updates=[message,
 channel_post, edited_channel_post, my_chat_member])`. Each update is dispatched
@@ -1886,7 +1886,7 @@ messages; for channels it must be an admin to receive `channel_post`.
 
 ---
 
-## 20. The Curate panel internals (`panel.py`)
+## 20. The Curate panel internals (`emojikit/panel.py`)
 
 A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 
@@ -1895,7 +1895,7 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 | `GET /` | The page (`assets/panel.html`: markup, CSS, items embedded as JSON, the per-run values). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
 | `GET /preview/<key>?fps=N&size=S` | Cached animated WebP for TGS; `still=1` returns a still for static/video/TGS. Sizes: 52, 72 or 104; rates: 1–30, bounded by `--preview-fps`. |
-| `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
+| `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `emojikit.panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`emojikit.panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
 | `POST /api/save` | Body `{"excluded":[keys], "known":[keys]}` → `catalog.set_inclusion(...)`, **restricted to `known`**. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 | `POST /api/client-log` | Up to 32 whitelisted events, 16KiB per batch; counts/revisions/status/error type and location only. No token, label, media ID or arbitrary message fields. |
@@ -1907,7 +1907,7 @@ the order, a content-type check and a body cap (`tests/test_panel.py`).
 **`known` is the save's scope, and it is mandatory.** A save carries the FULL
 selection — every key it does not name becomes *included* — so a request with no
 notion of scope speaks for the whole catalog. The panel re-reads the catalog on
-every page load, so a tab opened before `fetch_emoji_ids.py` added an emoji, or
+every page load, so a tab opened before `emojikit/fetch_emoji_ids.py` added an emoji, or
 before the owner deselected one in a second tab, held a stale snapshot; saving
 from it silently re-included rows it had never seen and answered `{"ok": true}`.
 The request now states which keys it was showing, and the decision is applied
@@ -1921,7 +1921,7 @@ Ordering: `emojikit.panel_view.order_by_similarity` groups items by format (stat
 video, then animated) and within each runs a greedy nearest-neighbour walk on
 the perceptual hash so look-alikes are adjacent. Items without a hash (animated)
 keep content order. The view model lives in `emojikit/panel_view.py` — `build_view`,
-`order_by_similarity`, `packs_named`, `copy_id_for` — with `panel.py` left
+`order_by_similarity`, `packs_named`, `copy_id_for` — with `emojikit/panel.py` left
 holding the server. Pure functions on one side, sockets on the other.
 
 Front-end:
@@ -2042,7 +2042,7 @@ offline.
 | Fetch reports `dedup` on a pack with no real duplicates | Near-dup merging was on. | It's **off by default** now (`--phash-threshold -1`); pull latest or pass `-1`. |
 | Panel images 404 | `/img/<key>` not URL-decoded. | Fixed; pull latest. |
 | Bot replies nothing in a group | Privacy mode on / not admin. | Make the bot admin or disable privacy mode in BotFather. |
-| Bot stops with **409 Conflict** | Two `getUpdates` consumers. | Run only one `emoji_bot.py` instance. |
+| Bot stops with **409 Conflict** | Two `getUpdates` consumers. | Run only one `emojikit/emoji_bot.py` instance. |
 | `STICKERSET_INVALID` right after deleting a set | Telegram locks a freed set name ~2 min. | The client auto-waits and retries; just let it run. |
 | `flood wait Ns` | Telegram rate limit. | The client honors `retry_after` automatically; let it continue. |
 | Animated card shows ▶ but never plays | Bad/non-standard `.tgs`, or JS blocked. | Other cards still work; that single TGS just won't render. |
@@ -2101,7 +2101,7 @@ set regardless of the set's format.
 - **TGS** — gzip-compressed Lottie JSON = an animated sticker/emoji.
 - **set / pack** — a Telegram sticker set (≤200 custom emoji).
 - **plan** — the frozen, ordered list of items to upload (resume is deterministic).
-- **included flag** — per-item publish toggle set by the Curate panel.
+- **included flag** — per-item publish toggle set by the Curate emojikit.panel.
 - **drift** — when live sticker order ≠ assumed order, scrambling a position map.
 
 ---
@@ -2294,27 +2294,27 @@ copy .env.example .env            # then edit tokens + owner id
 .\scripts\check.ps1               # byte-compile + full unit suite
 
 # --- single pack (general) ---
-$PY make_emoji_pngs.py --in input\set --out build\set
-$PY build_pack.py --base set --title "Set" --source-dir build\set --token-env GENERAL_BOT_TOKEN --dry-run
-$PY build_pack.py --base set --title "Set" --source-dir build\set --token-env GENERAL_BOT_TOKEN
+$PY -m emojikit.make_emoji_pngs --in input\set --out build\set
+$PY -m emojikit.build_pack --base set --title "Set" --source-dir build\set --token-env GENERAL_BOT_TOKEN --dry-run
+$PY -m emojikit.build_pack --base set --title "Set" --source-dir build\set --token-env GENERAL_BOT_TOKEN
 
 # --- collector ---
-$PY fetch_pack.py <pack-or-link> --token-env GENERAL_BOT_TOKEN
-$PY fetch_emoji_ids.py --ids-file <file-with-premium-ids> [--id <n>]
-$PY add_media.py --in input\set --emoji 😀
-$PY panel.py                                            # curate, then Save
-$PY build_collection.py --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN --dry-run
-$PY build_collection.py --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN
-$PY sync_order.py --base mypack                          # reorder a LIVE pack
-$PY sync_order.py --base mypack --apply
+$PY -m emojikit.fetch_pack <pack-or-link> --token-env GENERAL_BOT_TOKEN
+$PY -m emojikit.fetch_emoji_ids --ids-file <file-with-premium-ids> [--id <n>]
+$PY -m emojikit.add_media --in input\set --emoji 😀
+$PY -m emojikit.panel                                            # curate, then Save
+$PY -m emojikit.build_collection --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN --dry-run
+$PY -m emojikit.build_collection --base mypack --title "My Pack" --token-env GENERAL_BOT_TOKEN
+$PY -m emojikit.sync_order --base mypack                          # reorder a LIVE pack
+$PY -m emojikit.sync_order --base mypack --apply
 
 # --- bot ---
-$PY emoji_bot.py
+$PY -m emojikit.emoji_bot
 
 # --- coins ---
 $PY coins\fetch_logos.py
-$PY make_emoji_pngs.py --in coins\logos\svg --out coins\logos\emoji
-$PY make_emoji_pngs.py --in coins\logos\png --out coins\logos\emoji
+$PY -m emojikit.make_emoji_pngs --in coins\logos\svg --out coins\logos\emoji
+$PY -m emojikit.make_emoji_pngs --in coins\logos\png --out coins\logos\emoji
 $PY coins\rebuild_dedup.py
 $PY coins\remap_ids.py --emoji-dir "F:\...\emoji" --max-distance 200 --apply
 $PY coins\enhance_map.py
@@ -2328,7 +2328,7 @@ $PY coins\write_manifests.py --out-dir "F:\...\@YourBrand Crypto Emoji"
 .\scripts\check.ps1                                     # what CI runs (compile + suite)
 $PY -m unittest discover -s tests -t . -p "test_*.py"   # -t . is REQUIRED (see §10)
 $PY -m compileall -q .
-$PY -c "import build_pack, make_emoji_pngs, fetch_pack, fetch_emoji_ids, add_media, build_collection, emoji_bot, panel"
+$PY -c "from emojikit import build_pack, make_emoji_pngs, fetch_pack, fetch_emoji_ids, add_media, build_collection, emoji_bot, panel"
 
 # --- git ---
 git add -A; git commit -m "..."; git push origin main
@@ -2342,17 +2342,17 @@ gh run list --repo KiaroSama/Emoji-Mapper --limit 1 --json status,conclusion
 ### B.1 Fetch + curate + publish
 
 ```
-> python fetch_pack.py https://t.me/addemoji/RMaccs --token-env GENERAL_BOT_TOKEN
+> python -m emojikit.fetch_pack https://t.me/addemoji/RMaccs --token-env GENERAL_BOT_TOKEN
 [..] Authenticated bot: @YourEmojiBot
 [..] Pack RMaccs (Accounts store — @RMaccs): 80 stickers -> new=80 dedup=0 failed=0
 Done. new=80 dedup=0 failed=0
   catalog static: 80 total (80 pending upload)
 
-> python panel.py
+> python -m emojikit.panel
 Emoji curate panel: http://127.0.0.1:9450/
 # (open browser, untick a few, click Save -> "Saved ✓  76 included · 4 excluded")
 
-> python build_collection.py --base accts --title "Accounts" --token-env GENERAL_BOT_TOKEN --dry-run
+> python -m emojikit.build_collection --base accts --title "Accounts" --token-env GENERAL_BOT_TOKEN --dry-run
 DRY RUN: nothing uploaded.
   static: 76 emoji -> 1 set(s) named acctss1_by_<bot> ...
   video: 0 emoji -> 0 set(s) ...
@@ -2364,7 +2364,7 @@ DRY RUN: nothing uploaded.
 ```
 > python -c "...getCustomEmojiStickers(['5283254221590787816'])..."
 set_name: RMaccs | format: static
-> python fetch_pack.py RMaccs --token-env GENERAL_BOT_TOKEN
+> python -m emojikit.fetch_pack RMaccs --token-env GENERAL_BOT_TOKEN
 ```
 
 ### B.3 Audit the coin packs
@@ -2410,12 +2410,12 @@ prevented by code or answerable in seconds if you know to look.
 ### The order that works
 
 ```powershell
-$PY fetch_emoji_ids.py --ids-file ids.txt      # or fetch_pack.py / add_media.py
-$PY panel.py                                   # curate + order, then Save selection
+$PY -m emojikit.fetch_emoji_ids --ids-file ids.txt      # or emojikit/fetch_pack.py / emojikit/add_media.py
+$PY -m emojikit.panel                                   # curate + order, then Save selection
 # check the header: it warns when the total exceeds one pack
-$PY build_collection.py --base <Base> --title "<Title>" --mixed --dry-run
-$PY build_collection.py --base <Base> --title "<Title>" --mixed
-$PY sync_order.py --base <Base>                # report; --apply to place them
+$PY -m emojikit.build_collection --base <Base> --title "<Title>" --mixed --dry-run
+$PY -m emojikit.build_collection --base <Base> --title "<Title>" --mixed
+$PY -m emojikit.sync_order --base <Base>                # report; --apply to place them
 ```
 
 ### Count the brand logo
@@ -2431,7 +2431,7 @@ Launcher **B3** now runs `--preflight` between the dry run and the upload: every
 queued file is offered to Telegram's validator first, and a refusal stops the
 run before a single sticker is published. About a minute for a 200-emoji queue,
 against the 46 it cost to discover the same file mid-publish. Run it by hand
-with `$PY build_collection.py --base <Base> --title "<T>" --preflight`.
+with `$PY -m emojikit.build_collection --base <Base> --title "<T>" --preflight`.
 
 ### Probe a suspect file before a 45-minute run
 
@@ -2484,7 +2484,7 @@ one is withheld, the log says so, and the next clean run posts it.
 
 ### Order is not frozen at publish time
 
-`sync_order.py` moves stickers with `setStickerPositionInSet`: no re-upload, and
+`emojikit/sync_order.py` moves stickers with `setStickerPositionInSet`: no re-upload, and
 `file_id` **and** `custom_emoji_id` survive, so nobody using the emoji is
 affected. Run it report-only first; it refuses a set holding any sticker the
 catalog cannot identify.

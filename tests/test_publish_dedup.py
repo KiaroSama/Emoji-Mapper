@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 import requests  # noqa: E402
 from PIL import Image  # noqa: E402
 
-import build_collection as bc  # noqa: E402
+from emojikit import build_collection as bc  # noqa: E402
 from emojikit.telegram_api import (AmbiguousUploadError, Telegram)  # noqa: E402
 from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
@@ -158,7 +158,7 @@ class _FakeServer:
         return _FileResp(self.files.get(url.rsplit("/", 1)[1], b""))
 
 
-@mock.patch("build_pack.time.sleep", lambda s: None)
+@mock.patch("emojikit.build_pack.time.sleep", lambda s: None)
 class VerifiedRetryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

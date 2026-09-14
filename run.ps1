@@ -340,13 +340,13 @@ function Action-BuildGeneral ($py) {
           if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
           $build = Join-Path 'build' $st.base
           Write-Step "Converting images -> $build ..."
-          if ((Invoke-Py $py @('make_emoji_pngs.py','--in',$st.inDir,'--out',$build)) -ne 0) {
+          if ((Invoke-Py $py @('-m','emojikit.make_emoji_pngs','--in',$st.inDir,'--out',$build)) -ne 0) {
               Write-Err "Conversion failed."; return 'ok' }
           Write-Step "Dry-run preview ..."
-          if ((Invoke-Py $py @('build_pack.py','--base',$st.base,'--title',$st.title,'--source-dir',$build,
+          if ((Invoke-Py $py @('-m','emojikit.build_pack','--base',$st.base,'--title',$st.title,'--source-dir',$build,
                                '--token-env','GENERAL_BOT_TOKEN','--emoji',$st.emoji,'--dry-run')) -ne 0) {
               Write-Err "Dry-run failed (check .env / source)."; return 'ok' }
-          if ((Invoke-Py $py @('build_pack.py','--base',$st.base,'--title',$st.title,'--source-dir',$build,
+          if ((Invoke-Py $py @('-m','emojikit.build_pack','--base',$st.base,'--title',$st.title,'--source-dir',$build,
                                '--token-env','GENERAL_BOT_TOKEN','--emoji',$st.emoji)) -eq 0) {
               Write-Ok "Pack build finished." } else { Write-Err "Build failed." }
           'ok' }.GetNewClosure()
@@ -363,7 +363,7 @@ function Action-ConvertOnly ($py) {
           $st.inDir = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Output folder (blank = <folder>_emoji)"; if ($v -eq '0') { return 'back' }
           $st.outDir = $v
-          $argv = @('make_emoji_pngs.py','--in',$st.inDir)
+          $argv = @('-m','emojikit.make_emoji_pngs','--in',$st.inDir)
           if (-not [string]::IsNullOrWhiteSpace($st.outDir)) { $argv += @('--out',$st.outDir) }
           Invoke-PyReport $py $argv "Conversion"
           'ok' }.GetNewClosure()
@@ -398,7 +398,7 @@ function Action-CollectPacks ($py) {
           $st.packs += $line.Trim(); return 'stay' }.GetNewClosure(),
         { $v = Ask "Token env var (default GENERAL_BOT_TOKEN)"; if ($v -eq '0') { return 'back' }
           $tokenEnv = if ([string]::IsNullOrWhiteSpace($v)) { 'GENERAL_BOT_TOKEN' } else { $v }
-          Invoke-PyReport $py (@('fetch_pack.py') + $st.packs + @('--token-env',$tokenEnv)) "Collect"
+          Invoke-PyReport $py (@('-m','emojikit.fetch_pack') + $st.packs + @('--token-env',$tokenEnv)) "Collect"
           'ok' }.GetNewClosure()
     )
     Run-Wizard $steps | Out-Null
@@ -417,7 +417,7 @@ function Action-AddMedia ($py) {
           $st.inDir = $v; 'ok' }.GetNewClosure(),
         { $v = Ask "Associated standard emoji (default 😀)"; if ($v -eq '0') { return 'back' }
           if (-not [string]::IsNullOrWhiteSpace($v)) { $st.emoji = $v }
-          Invoke-PyReport $py @('add_media.py','--in',$st.inDir,'--emoji',$st.emoji) "Add media"
+          Invoke-PyReport $py @('-m','emojikit.add_media','--in',$st.inDir,'--emoji',$st.emoji) "Add media"
           'ok' }.GetNewClosure()
     )
     Run-Wizard $steps | Out-Null
@@ -438,17 +438,17 @@ function Action-PublishCollection ($py) {
         { $yn = Ask-YesNo "Dry-run then upload now?"; if ($yn -is [string]) { return 'back' }
           if (-not $yn) { Write-Info "Cancelled."; return 'ok' }
           Write-Step "Dry-run preview ..."
-          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+          if ((Invoke-Py $py @('-m','emojikit.build_collection','--base',$st.base,'--title',$st.title,
                                '--token-env',$st.tokenEnv,'--dry-run')) -ne 0) {
               Write-Err "Dry-run failed (run a collect/add step first?)."; return 'ok' }
           # Ask Telegram about every queued file BEFORE the upload starts. A
           # single file it refuses used to surface at whatever minute of a
           # 45-minute publish it happened to reach; this finds it in about one.
           Write-Step "Preflight: asking Telegram to validate every queued file ..."
-          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+          if ((Invoke-Py $py @('-m','emojikit.build_collection','--base',$st.base,'--title',$st.title,
                                '--token-env',$st.tokenEnv,'--preflight')) -ne 0) {
               Write-Err "Preflight refused a file. Nothing was published."; return 'ok' }
-          if ((Invoke-Py $py @('build_collection.py','--base',$st.base,'--title',$st.title,
+          if ((Invoke-Py $py @('-m','emojikit.build_collection','--base',$st.base,'--title',$st.title,
                                '--token-env',$st.tokenEnv)) -eq 0) {
               Write-Ok "Collection published." } else { Write-Err "Publish failed." }
           'ok' }.GetNewClosure()
@@ -458,7 +458,7 @@ function Action-PublishCollection ($py) {
 
 function Action-Panel ($py) {
     Write-Title "Curate panel (pick which emoji go into the pack)"
-    # The panel hides emoji that are already live, so a bare `panel.py` shows the
+    # The panel hides emoji that are already live, so its default view shows the
     # NEXT pack's candidates and nothing else. Arranging a published pack needs
     # --with-pack per set, and opening the menu entry without it looked like the
     # packs had vanished. Read the sets from the publisher's own state file.
@@ -471,7 +471,7 @@ function Action-Panel ($py) {
         } catch { }
     }
     $packs = $packs | Sort-Object -Unique
-    $panelArgs = @('panel.py')
+    $panelArgs = @('-m','emojikit.panel')
     if ($packs.Count -gt 0) {
         $answer = Ask-YesNo ("Also show the " + $packs.Count + " pack(s) already published, so they can be rearranged?")
         # NOTE: compare by type, not -eq 'back' -- Ask-YesNo can return a bare
@@ -484,7 +484,7 @@ function Action-Panel ($py) {
         if ($answer -is [string]) { return }
         if ($answer) { foreach ($n in $packs) { $panelArgs += @('--with-pack', "$n") } }
     }
-    Write-Info "Opening the web panel in your browser... (Ctrl+C here to stop it)"
+    Write-Info "Opening the curation panel in your browser..."
     Invoke-PyReport $py $panelArgs "Web panel"
 }
 
@@ -492,7 +492,7 @@ function Action-RunBot ($py) {
     Write-Title "Run the Emoji Mapper bot (premium-emoji ID extractor)"
     Write-Info "Send the bot a premium emoji or a post with emoji, or add it to a channel/group."
     Write-Info "Press Ctrl+C to stop the bot."
-    Invoke-PyReport $py @('emoji_bot.py') "Bot"
+    Invoke-PyReport $py @('-m','emojikit.emoji_bot') "Bot"
 }
 
 function Action-Check ($py) {

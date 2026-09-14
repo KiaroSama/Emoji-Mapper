@@ -8,7 +8,7 @@
 # WHAT IT REFUSES TO DO SILENTLY: a token that already has a DIFFERENT webhook,
 # or one currently being polled, is reported and skipped unless -Force. A token
 # can serve getUpdates OR a webhook, never both: registering one here makes
-# emoji_bot.py go deaf on that token, and that must be a decision, not a
+# emojikit/emoji_bot.py go deaf on that token, and that must be a decision, not a
 # surprise.
 #
 # Usage:
@@ -24,7 +24,7 @@ param(
     [string]$EnvFile,
     # Report getWebhookInfo for each bot and exit. No change.
     [switch]$Status,
-    # deleteWebhook: hand the token back to emoji_bot.py's poller.
+    # deleteWebhook: hand the token back to emojikit/emoji_bot.py's poller.
     [switch]$Delete,
     # Replace a webhook that already points somewhere else.
     [switch]$Force
@@ -83,7 +83,7 @@ foreach ($b in $bots) {
 
     if ($Delete) {
         $r = Invoke-Bot -Token $b.token -Method 'deleteWebhook'
-        Write-Host "  $($b.name): deleteWebhook -> $($r.ok)  (emoji_bot.py can poll this token again)"
+        Write-Host "  $($b.name): deleteWebhook -> $($r.ok)  (emojikit/emoji_bot.py can poll this token again)"
         continue
     }
 
@@ -96,7 +96,7 @@ foreach ($b in $bots) {
         continue
     }
 
-    # allowed_updates mirrors emoji_bot.py: nothing else is acted on, and every
+    # allowed_updates mirrors emojikit/emoji_bot.py: nothing else is acted on, and every
     # extra type is an update Telegram delivers for the Worker to discard.
     $r = Invoke-Bot -Token $b.token -Method 'setWebhook' -Body @{
         url                  = $target
@@ -107,7 +107,7 @@ foreach ($b in $bots) {
     if ($r.ok) {
         Write-Host "  $($b.name): -> $target"
         if ($current -eq '(none - polling)') {
-            Write-Host "      note: this token is no longer pollable. emoji_bot.py will receive nothing on it."
+            Write-Host "      note: this token is no longer pollable. emojikit/emoji_bot.py will receive nothing on it."
         }
     } else {
         throw "$($b.name): setWebhook failed - $($r.description)"

@@ -29,7 +29,7 @@ from tests._bc_fixtures import ROOT, FakeTG, _make_png, _sticker
 
 sys.path.insert(0, str(ROOT))
 
-import build_collection as bc
+from emojikit import build_collection as bc
 from emojikit.collection_state import MIXED, SetDrift
 from emojikit import identity
 from emojikit.catalog import Catalog

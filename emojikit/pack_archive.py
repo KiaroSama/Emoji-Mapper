@@ -45,7 +45,7 @@ from emojikit import logsetup
 from emojikit.packstate import LockBusy, write_json_atomic
 from emojikit.maintenance import writer
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "collection"
 CATALOG = DATA_DIR / "catalog.db"
 BASE = "YourBrand_Emoji_Packs"
@@ -305,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_STALE if stale else EXIT_OK
 
     logsetup.setup_logging("pack_archive")
-    from build_pack import load_env
+    from emojikit.build_pack import load_env
     from emojikit.telegram_api import Telegram
     load_env()
     token = os.environ.get("GENERAL_BOT_TOKEN")

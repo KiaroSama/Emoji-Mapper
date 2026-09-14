@@ -24,7 +24,7 @@ from tests._panel_fixtures import ROOT
 
 sys.path.insert(0, str(ROOT))
 
-import make_emoji_pngs as mp
+from emojikit import make_emoji_pngs as mp
 from emojikit import media
 
 

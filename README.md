@@ -20,7 +20,7 @@ It ships with two independent workflows that share the same engine:
 | <img src="assets/coin-emoji-mapper-logo.png" alt="" width="42"> | **Crypto coins** | `TELEGRAM_BOT_TOKEN` | CoinGecko / CoinPaprika / CoinMarketCap logos | the original coin-logo packs |
 | <img src="assets/emoji-mapper-logo.png" alt="" width="42"> | **General** | `GENERAL_BOT_TOKEN` (`@YourEmojiBot`) | any folder of images you provide | any non-coin emoji pack |
 
-The same scripts (`make_emoji_pngs.py` + `build_pack.py`) power both; only the
+The same scripts (`emojikit/make_emoji_pngs.py` + `emojikit/build_pack.py`) power both; only the
 source folder and the selected bot token differ.
 
 > 📘 **[Full Guide (0 → 100) — docs/GUIDE.md](docs/GUIDE.md)** — complete
@@ -28,9 +28,9 @@ source folder and the selected bot token differ.
 
 ## How it works
 
-1. **Prepare PNGs** — `make_emoji_pngs.py` converts your images (SVG, PNG, JPG,
+1. **Prepare PNGs** — `emojikit/make_emoji_pngs.py` converts your images (SVG, PNG, JPG,
    WEBP, GIF) into transparent 100×100 PNGs.
-2. **Build the pack** — `build_pack.py` uploads those PNGs into Telegram
+2. **Build the pack** — `emojikit/build_pack.py` uploads those PNGs into Telegram
    custom-emoji sets (max 200 per set), naming them `<base><n>_by_<botusername>`
    and sending you each finished pack's `https://t.me/addemoji/...` link.
 
@@ -73,23 +73,25 @@ CMC_API_KEY=<optional CoinMarketCap key>
 
 ## Quick start — general emoji pack (new bot)
 
+Run module commands from the project root; `run.ps1` sets that directory for you.
+
 ```powershell
 # Put your source images in a folder, e.g. input/myset/
-.venv\Scripts\python.exe make_emoji_pngs.py --in input\myset --out build\myset
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in input\myset --out build\myset
 
 # Validate without calling Telegram
-.venv\Scripts\python.exe build_pack.py --base myset --title "My Emojis" `
+.venv\Scripts\python.exe -m emojikit.build_pack --base myset --title "My Emojis" `
     --source-dir build\myset --token-env GENERAL_BOT_TOKEN --emoji "😀" --dry-run
 
 # Build for real
-.venv\Scripts\python.exe build_pack.py --base myset --title "My Emojis" `
+.venv\Scripts\python.exe -m emojikit.build_pack --base myset --title "My Emojis" `
     --source-dir build\myset --token-env GENERAL_BOT_TOKEN --emoji "😀"
 ```
 
 Optional: pass `--keywords path\to\keywords.csv` (columns `ticker,...,keywords`)
 to attach searchable keywords to each emoji. Without it, the file name is used.
 
-## `build_pack.py` options
+## `emojikit/build_pack.py` options
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -156,16 +158,16 @@ deduplicates at **ingest** time, not after publishing:
 
 ```powershell
 # 1. Download from one or more existing packs into the catalog
-.venv\Scripts\python.exe fetch_pack.py https://t.me/addemoji/somepack_by_bot `
+.venv\Scripts\python.exe -m emojikit.fetch_pack https://t.me/addemoji/somepack_by_bot `
     --token-env GENERAL_BOT_TOKEN
 
 # 2. (optional) Build extra emoji from your own files (auto static/video/animated)
-.venv\Scripts\python.exe add_media.py --in input\myset --emoji 😀
+.venv\Scripts\python.exe -m emojikit.add_media --in input\myset --emoji 😀
 
 # 3. Preview, then publish into new per-format packs (resumable)
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN --dry-run
-.venv\Scripts\python.exe build_collection.py --base mypack --title "My Pack" `
+.venv\Scripts\python.exe -m emojikit.build_collection --base mypack --title "My Pack" `
     --token-env GENERAL_BOT_TOKEN
 ```
 
@@ -178,7 +180,7 @@ Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>_by_<bot>` (video) and
 
 ## Emoji Mapper bot (premium-emoji ID extractor)
 
-`emoji_bot.py` runs the general bot interactively (long-polling) and extracts
+`emojikit/emoji_bot.py` runs the general bot interactively (long-polling) and extracts
 premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
 
 - Send the bot a **premium emoji** → it replies with the ID on a copy button.
@@ -188,7 +190,7 @@ premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
   from new posts. (Bots cannot read past channel history, only new posts.)
 
 ```powershell
-.venv\Scripts\python.exe emoji_bot.py     # or run.ps1 -> C1
+.venv\Scripts\python.exe -m emojikit.emoji_bot     # or run.ps1 -> C1
 ```
 
 ## Cloudflare Worker (both bots, hosted)
@@ -198,8 +200,8 @@ both bots in one Worker, each on its own path (`/tg/general`, `/tg/coin`) with
 its own webhook secret, answering only the ids in `ADMIN_USER_IDS`. It also
 exposes `POST /publish`, so a finished pack is announced **by the bot** in your
 channel rather than by this machine: set `WORKER_PUBLISH_URL` and
-`WORKER_PUBLISH_SECRET` in `.env` and **all three publishers** — `build_pack.py`,
-`build_collection.py` and `coins/rebuild_dedup.py` — route their links through
+`WORKER_PUBLISH_SECRET` in `.env` and **all three publishers** — `emojikit/build_pack.py`,
+`emojikit/build_collection.py` and `coins/rebuild_dedup.py` — route their links through
 it. Leave either unset and the existing direct path is used, unchanged.
 
 It keeps its own log: a D1 table capped at 10 MB (oldest evicted first) plus an
@@ -207,7 +209,7 @@ errors-only Telegram channel. Every line starts with the bot that wrote it,
 because both bots share the Worker, the table and the channel.
 
 > **A Telegram bot token can use `getUpdates` (polling) or a webhook — never
-> both.** Registering a webhook for a token stops `emoji_bot.py` receiving
+> both.** Registering a webhook for a token stops `emojikit/emoji_bot.py` receiving
 > anything on it; `deleteWebhook` hands it back. Run one or the other per token.
 
 Setup, secrets and deployment: [`worker/README.md`](worker/README.md).
@@ -222,7 +224,7 @@ npx wrangler deploy
 
 ## Curate panel (pick which emoji go into the pack)
 
-`panel.py` opens a local dark neon-blue web panel showing every emoji in the
+`emojikit/panel.py` opens a local dark neon-blue web panel showing every emoji in the
 catalog as a large labelled card. All cards are selected by default; click one
 to toggle it (deselected = excluded from the next publish), Shift+click for a
 range, **drag** to set the publish order — each card shows its position,
@@ -230,7 +232,7 @@ and dragging to the top or bottom edge scrolls the page so you can move an
 item across the whole catalog in one go. **Click the `premium-id:` label
 to copy that id** to the clipboard — it does not toggle the card. Visually similar emoji start out next
 to each other so look-alikes are quick to deselect. Click **Save**, then
-`build_collection.py` only publishes the included items.
+`emojikit/build_collection.py` only publishes the included items.
 
 **The grid is virtual**: only the rows near the viewport exist in the page,
 whatever the catalog holds, so a thousand cards scroll and drag like a
@@ -265,16 +267,20 @@ tokens, labels, media IDs and arbitrary error text are excluded. Log delivery
 is bounded and does not block saving.
 
 ```powershell
-.venv\Scripts\python.exe panel.py        # or run.ps1 -> B4
-.venv\Scripts\python.exe panel.py --preview-fps 12
+.venv\Scripts\python.exe -m emojikit.panel        # or run.ps1 -> B4
+.venv\Scripts\python.exe -m emojikit.panel --preview-fps 12
 # Branding without a Telegram username lookup:
-.venv\Scripts\python.exe panel.py --bot-username YourEmojiBot
+.venv\Scripts\python.exe -m emojikit.panel --bot-username YourEmojiBot
 ```
+
+B4 reopens an existing panel on the requested port instead of starting a second
+server. Its current session and unsaved work stay active. A different service
+on that port is refused; use another port for a separate panel session.
 
 ## Crypto-coin workflow (one component: `coins/`)
 
 The crypto-coin tool is now a self-contained component under `coins/`. It reuses
-the shared engine at the project root (`build_pack.py`) and the coin bot
+the shared engine in the package (`emojikit/build_pack.py`) and the coin bot
 (`TELEGRAM_BOT_TOKEN`). Its data, scripts and images all live under `coins/`:
 
 - `coins/fetch_logos.py` — download coin logos from CoinGecko + write `coins/keywords.csv`
@@ -296,8 +302,8 @@ Convert coin logos to 100×100 PNGs (images live in `coins/logos/{svg,png}` →
 `coins/logos/emoji`):
 
 ```powershell
-.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\svg --out coins\logos\emoji
-.venv\Scripts\python.exe make_emoji_pngs.py --in coins\logos\png --out coins\logos\emoji
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in coins\logos\svg --out coins\logos\emoji
+.venv\Scripts\python.exe -m emojikit.make_emoji_pngs --in coins\logos\png --out coins\logos\emoji
 ```
 
 Then build/rebuild with the coin bot:
@@ -312,18 +318,18 @@ Then build/rebuild with the coin bot:
 
 ```
 Emoji Mapper/                  # the whole project
-  build_pack.py                # core engine: upload any source dir with any bot
-  make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
-  fetch_pack.py                # collector: download Telegram packs -> catalog
-  fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
-  add_media.py                 # collector: build emoji from scratch -> catalog
-  build_collection.py          # collector: publish catalog -> new packs
-  sync_order.py                # reorder a LIVE pack to match the panel
-  pack_archive.py             # archived media reconciliation
-  pack_manifest.py            # pack roster and gallery CLI
-  panel.py                     # curate panel: the server, the page, the APIs
-  emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
-  emojikit/                    # shared core toolkit
+  emojikit/                    # command modules and shared toolkit
+    build_pack.py                # core engine: upload any source dir with any bot
+    make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
+    fetch_pack.py                # collector: download Telegram packs -> catalog
+    fetch_emoji_ids.py           # collector: download specific emoji by id -> catalog
+    add_media.py                 # collector: build emoji from scratch -> catalog
+    build_collection.py          # collector: publish catalog -> new packs
+    sync_order.py                # reorder a LIVE pack to match the panel
+    pack_archive.py             # archived media reconciliation
+    pack_manifest.py            # pack roster and gallery CLI
+    panel.py                     # curate panel: the server, the page, the APIs
+    emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
     telegram_api.py           # the Bot API client + Telegram's caps
     packstate.py              # state-file shape + atomic write + pack lock
     announce.py               # announce finished packs (Worker, or direct)

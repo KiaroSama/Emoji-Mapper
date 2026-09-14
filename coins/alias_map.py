@@ -18,7 +18,7 @@ import json
 import re
 from pathlib import Path
 
-from build_pack import (EXIT_FAILED)
+from emojikit.build_pack import (EXIT_FAILED)
 from emojikit.packstate import (LockBusy, canonical_map_lock, write_json_atomic)
 from coins._inventory import parse_missing, refill_inventory
 

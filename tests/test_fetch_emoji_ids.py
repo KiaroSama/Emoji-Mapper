@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fetch_emoji_ids import (
+from emojikit.fetch_emoji_ids import (
     collect_ids,
     extract_real_ids,
     within_file_duplicates,

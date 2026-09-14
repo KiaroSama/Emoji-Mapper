@@ -24,9 +24,9 @@ explicitly.
 
 Usage::
 
-    python pack_manifest.py --refresh              # read live, rewrite packs/
-    python pack_manifest.py --refresh --family coins
-    python pack_manifest.py --check                # stale? exit 3. No network.
+    python -m emojikit.pack_manifest --refresh              # read live, rewrite packs/
+    python -m emojikit.pack_manifest --refresh --family coins
+    python -m emojikit.pack_manifest --check                # stale? exit 3. No network.
 """
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from emojikit import pack_gallery
-from build_pack import EXIT_FAILED, EXIT_OK, Telegram, load_env
+from emojikit.build_pack import EXIT_FAILED, EXIT_OK, Telegram, load_env
 from emojikit.collection_state import BRAND_LOGO_DEFAULT
 from emojikit import media
 from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.packstate import write_json_atomic
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "packs"
 DATA_DIR = ROOT / "collection"
 COINS_DIR = ROOT / "coins"

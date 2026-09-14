@@ -18,10 +18,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_collection as bc  # noqa: E402
+from emojikit import build_collection as bc  # noqa: E402
 from emojikit import collection_state as cs  # noqa: E402
 from emojikit import telegram_api as tg_api  # noqa: E402
-from build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE)  # noqa: E402
+from emojikit.build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE)  # noqa: E402
 from emojikit.packstate import (exclusive_lock)  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 

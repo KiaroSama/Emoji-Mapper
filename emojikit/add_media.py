@@ -15,9 +15,9 @@ emoji -- it becomes a *video* emoji. Only Lottie JSON/TGS can be packaged as
 animated.
 
 Usage:
-  python add_media.py --in input/myset [--as auto] [--emoji 😀]
+  python -m emojikit.add_media --in input/myset [--as auto] [--emoji 😀]
                       [--keywords "tag1,tag2"] [--data-dir collection]
-  python add_media.py file1.png clip.gif anim.json --emoji 🔥
+  python -m emojikit.add_media file1.png clip.gif anim.json --emoji 🔥
 """
 
 from __future__ import annotations
@@ -30,13 +30,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_pack import ingest_exit_code
+from emojikit.build_pack import ingest_exit_code
 from emojikit import identity, media
 from emojikit.catalog import Catalog, DEFAULT_PHASH_THRESHOLD, phash_threshold_arg
 from emojikit.ingest import store_media
 from emojikit.logsetup import record_exit_code, setup_logging
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("add_media")
 
 _STILL_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".svg"}
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     # the ffmpeg timeout it leans on more than any other tool, the log retention
     # window, the secret values the logger masks -- was invisible to it. Before
     # setup_logging, so the masking sweep sees a loaded environment.
-    from build_pack import load_env
+    from emojikit.build_pack import load_env
     load_env()
     setup_logging("add_media")
     ap = argparse.ArgumentParser(description="Build emoji media from local files into the catalog.")

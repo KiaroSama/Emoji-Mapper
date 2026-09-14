@@ -14,7 +14,7 @@ local build (Python)  ──POST /publish (bearer)──►  Worker  ──Bot A
 ## Read this before deploying
 
 **A Telegram bot token can use `getUpdates` (polling) or a webhook — never
-both.** The moment you register a webhook for a token, `emoji_bot.py` stops
+both.** The moment you register a webhook for a token, `emojikit/emoji_bot.py` stops
 receiving anything on it. That is not a bug and it is not this Worker's choice;
 it is how the Bot API works. Run one or the other per token.
 
@@ -60,7 +60,7 @@ the custom emoji cannot be rendered - notification previews, copied-out text,
 older clients - and better there than a column of identical stars. Viewing
 custom emoji does not require Premium; only sending them does.
 
-`emoji_bot.py` carries the same behaviour (`parse_id_list`, `answer_typed_ids`)
+`emojikit/emoji_bot.py` carries the same behaviour (`parse_id_list`, `answer_typed_ids`)
 so the poller and the Worker do not drift.
 
 ## Logs
@@ -212,8 +212,8 @@ Leave either unset and the old direct path is used, unchanged. Both or neither:
 a URL without a secret is a half-finished setup that would 401 every
 announcement, so it takes the direct path rather than pretending to work.
 
-**All three publishers** go through one `build_pack.announce_packs` —
-`build_pack.py` (single pack), `build_collection.py` (collector) and
+**All three publishers** go through one `emojikit.build_pack.announce_packs` —
+`emojikit/build_pack.py` (single pack), `emojikit/build_collection.py` (collector) and
 `coins/rebuild_dedup.py` (coin family). They used to carry three copies of
 "format the link and sendMessage", and when this Worker arrived only the
 collector learned about it, so a coin rebuild kept talking to Telegram from the

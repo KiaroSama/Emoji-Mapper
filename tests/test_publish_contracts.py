@@ -25,9 +25,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import build_collection as bc  # noqa: E402
+from emojikit import build_collection as bc  # noqa: E402
 from emojikit import collection_state as cs  # noqa: E402
-import build_pack as bp  # noqa: E402
+from emojikit import build_pack as bp  # noqa: E402
 from emojikit import announce  # noqa: E402
 from emojikit.announce import (announce_packs)  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
@@ -336,7 +336,7 @@ class AFilledPackAnnouncesAgain(unittest.TestCase):
 
     def test_the_capacity_call_site_asks_for_the_full_milestone(self):
         """The in-run "this set just hit per_set" branch is the whole point."""
-        src = Path("build_collection.py").read_text(encoding="utf-8")
+        src = Path(bc.__file__).read_text(encoding="utf-8")
         head = src[src.index("if in_set >= per_set:"):]
         self.assertIn("full=True", head[:head.index("in_set = 0")])
 

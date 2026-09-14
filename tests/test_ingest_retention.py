@@ -13,8 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import fetch_emoji_ids
-import fetch_pack
+from emojikit import fetch_emoji_ids
+from emojikit import fetch_pack
 from emojikit import identity, media
 from emojikit.catalog import Catalog
 from emojikit.ingest import store_media
