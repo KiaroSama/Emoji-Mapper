@@ -8,4 +8,4 @@
 # ticker -> custom-emoji-id map from live sticker images. Everyone building
 # ordinary emoji packs was installing it for a tool they never run.
 
-numpy>=1.26             # blocked-matrix image signature matching (coins/remap_ids.py)
+numpy>=2.5.3             # blocked-matrix image signature matching (coins/remap_ids.py)
