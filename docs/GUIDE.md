@@ -2171,15 +2171,15 @@ added, counts as the first of those 200).
 | `collection/manifests/<set>.md` | no | Per-pack manifest (name + id). |
 | `collection/publish_<base>.json` | no | Publish state (sets, sent links, keys, skipped). |
 | `collection/publish_plan_<base>.json` | no | Frozen per-format upload plan. |
-| `coins/ticker_to_id.json` | **yes** | Canonical ticker → custom_emoji_id map. |
+| `coins/ticker_to_id.json` | no | Canonical ticker → custom_emoji_id map. The owner's own pack data, not part of the tool. |
 | `coins/keywords.csv` | **yes** | ticker → name/keywords. |
-| `coins/currency-emoji-inventory.md` | **yes** | Inventory source. |
+| `coins/currency-emoji-inventory.md` | no | Inventory source. Names live custom-emoji ids, so it stays local. |
 | `coins/currency-emoji-inventory.filled.md` | no | Generated, id-filled inventory. |
-| `coins/rebuild_dedup_state.json` | **yes** | Live coin pack set names/order. Written by `rebuild_dedup.py` **and** by the providers when they top the family up — they add their own `provider_in_flight` intent and `provider_added` tally beside the rebuild's keys, under the same pack-family lock. |
+| `coins/rebuild_dedup_state.json` | no | Live coin pack set names/order. Written by `rebuild_dedup.py` **and** by the providers when they top the family up — they add their own `provider_in_flight` intent and `provider_added` tally beside the rebuild's keys, under the same pack-family lock. |
 | `coins/rebuild_dedup_plan.json` | no | Frozen coin upload plan. |
 | `coins/remap_live_cache.json` | no | remap signature cache. |
-| `coins/ticker_to_id.<date>.bak.json` | **yes** | Dated snapshot taken before a remap. **This is the revert target.** |
-| `coins/unresolved_logos.json` | **yes** | Tickers deliberately left unmapped because their source PNG is not their own logo. |
+| `coins/ticker_to_id.<date>.bak.json` | no | Dated snapshot taken before a remap. **This is the revert target.** |
+| `coins/unresolved_logos.json` | no | Tickers deliberately left unmapped because their source PNG is not their own logo. |
 | `coins/ticker_to_id.prebroken.json` | no | Historic, and **not** a usable restore point despite the name — measured against the live stickers it scores the same as the map it was supposed to repair. |
 | `logs/*.log` | no | Per-run UTC logs. |
 | `state_<base>.json` | no | `build_pack` resume state. |
