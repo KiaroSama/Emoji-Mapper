@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - the holding tray, cross-pack drops and cold previews
+
+- **Several held emoji can be picked at once.** The pick box lives on a grid
+  card and a held emoji has none, so the tray was the one place selection mode
+  could not reach and held emoji moved one Unhold at a time. Held cards now
+  carry the same pick box: click plus shift-click takes a run, dragging one
+  picked card carries every picked held emoji, and Unhold on a picked card
+  returns the whole set.
+- **A published emoji dragged into another pack now says why it cannot go.**
+  Telegram has no move-between-sets call — it would be a delete plus a re-add,
+  minting a new `custom_emoji_id` and breaking every stored reference — so the
+  drop is refused with the reason named and the emoji stays held. It used to be
+  accepted and then silently re-grouped by the card's own pack field, which read
+  as the drag being broken. Unpublished candidates still move freely, and a move
+  inside one pack is untouched.
+- **Previews are warmed in the background and render wider.** One animation
+  costs ~155 ms and one video poster ~613 ms, and the render bound was a
+  hard-coded 2, so a cold tier arrived in visible chunks while the owner
+  scrolled. The bound is resource-aware now (24 cold animations: 2.92 s to
+  1.55 s on 16 cores) and a daemon thread renders the page's previews in grid
+  order ahead of the scroll.
+
 ### Fixed - curation and coordinated identity recovery
 
 - Held cards leave the grid and pack counts; Unhold/Unhold all restore positions

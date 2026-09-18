@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
+import os
 from pathlib import Path
 import threading
 from urllib.parse import parse_qs
@@ -11,11 +13,19 @@ from PIL import Image
 
 from emojikit import media, video_decode
 
+log = logging.getLogger("panel")
+
 _locks: dict[str, threading.Lock] = {}
 _guard = threading.Lock()
 # A viewport can request a hundred uncached animations at once. Limit expensive
 # raster/codec work while the independent HTTP save handlers remain responsive.
-_renders = threading.BoundedSemaphore(2)
+#
+# The bound was a hard-coded 2, which on any real machine is the drip that made
+# a cold tier arrive in visible chunks: measured here, one animation costs
+# ~155 ms and one video poster ~613 ms, so 442 animations at two-at-a-time is
+# ~34 s of rendering. Resource-aware instead, and still leaving most of the
+# machine to the OS, the save handlers and whatever else the owner is running.
+_renders = threading.BoundedSemaphore(max(2, min(6, (os.cpu_count() or 4) - 2)))
 
 
 def parameters(query: str, maximum_fps: int) -> tuple[bool, int, int]:
@@ -25,6 +35,36 @@ def parameters(query: str, maximum_fps: int) -> tuple[bool, int, int]:
     if size not in {52, 72, 104} or not 1 <= fps <= 30:
         raise ValueError("invalid preview size or frame rate")
     return values.get("still") == ["1"], min(fps, maximum_fps), size
+
+
+def warm(view: list[dict], by_key: dict, db_path: Path, fps: int,
+         size: int = 104, stop: threading.Event | None = None) -> int:
+    """Render, in grid order, the previews the page is about to ask for.
+
+    Every miss used to be paid at scroll time, one viewport at a time, behind
+    the render bound -- which is what "the animations arrive in pieces" was.
+    Warming in grid order means the top of the list is ready first and the rest
+    lands before the owner scrolls that far. Rendering is best effort: a failure
+    here must never take the panel down, because the request path renders the
+    same file again anyway and reports its own error.
+    """
+    done = 0
+    for card in view:
+        if stop is not None and stop.is_set():
+            break
+        key, src = card.get("key"), by_key.get(card.get("key"))
+        if not key or src is None or card.get("isLogo"):
+            continue
+        wanted = [(True, fps)] if card.get("fmt") != "animated" else [(True, fps), (False, fps)]
+        for still, rate in wanted:
+            if stop is not None and stop.is_set():
+                break
+            try:
+                preview_bytes(key, Path(src), db_path, rate, still, size)
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - one bad file must not stop the warm-up
+                log.debug("preview warm-up skipped %s (still=%s): %s", key, still, exc)
+    return done
 
 
 def preview_bytes(key: str, src: Path, db_path: Path, fps: int,

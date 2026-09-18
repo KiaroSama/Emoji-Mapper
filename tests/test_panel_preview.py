@@ -16,6 +16,7 @@ from PIL import Image
 
 from emojikit import panel
 from emojikit import media
+from emojikit import panel_preview
 
 
 class PreviewResponses(unittest.TestCase):
@@ -78,6 +79,62 @@ class PreviewResponses(unittest.TestCase):
         with self.assertRaises(error.HTTPError) as refused:
             get("animated?fps=1000&size=10000")
         self.assertEqual(refused.exception.code, 400)
+
+
+class TheWarmUpRendersBeforeTheScroll(unittest.TestCase):
+    """Every preview miss used to be paid at scroll time, behind a bound of 2.
+
+    Measured on the owner's catalog: one animation costs ~155 ms and one video
+    poster ~613 ms, so a cold tier arrived two files at a time -- which is what
+    "the animations load in pieces" was. The warm-up renders what the page is
+    about to ask for, in grid order, so the scroll meets a warm cache.
+    """
+
+    def test_it_renders_grid_order_and_a_bad_file_cannot_stop_it(self):
+        temp_root = Path(__file__).resolve().parent.parent / "logs" / "test-temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp = tempfile.TemporaryDirectory(dir=temp_root)
+        self.addCleanup(temp.cleanup)
+        data = Path(temp.name)
+        png, broken = data / "source.png", data / "broken.png"
+        with Image.new("RGBA", (100, 100), (10, 200, 90, 255)) as img:
+            img.save(png, "PNG")
+        broken.write_bytes(b"not an image at all")
+        view = [{"key": "logo", "fmt": "static", "isLogo": True},
+                {"key": "bad", "fmt": "static"},
+                {"key": "good", "fmt": "static"}]
+        by_key = {"logo": png, "bad": broken, "good": png}
+
+        rendered = panel_preview.warm(view, by_key, data / "catalog.db", 15)
+
+        cached = sorted(p.name for p in (data / "preview").iterdir())
+        # The unreadable file is skipped, the one after it is still rendered:
+        # a warm-up that dies on the first bad row warms nothing.
+        self.assertEqual(rendered, 1, cached)
+        self.assertEqual(len(cached), 1, cached)
+        # The logo is a preview-only card with no catalog media; asking for it
+        # would 404 the same way the page never does.
+        self.assertNotIn("logo", "".join(cached))
+
+    def test_a_set_stop_event_ends_it_without_finishing_the_catalog(self):
+        temp_root = Path(__file__).resolve().parent.parent / "logs" / "test-temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp = tempfile.TemporaryDirectory(dir=temp_root)
+        self.addCleanup(temp.cleanup)
+        data = Path(temp.name)
+        png = data / "source.png"
+        with Image.new("RGBA", (100, 100), (10, 200, 90, 255)) as img:
+            img.save(png, "PNG")
+        stop = threading.Event()
+        stop.set()
+
+        # Ctrl+C must not wait for a thousand renders to finish.
+        rendered = panel_preview.warm(
+            [{"key": f"k{i}", "fmt": "static"} for i in range(50)],
+            {f"k{i}": png for i in range(50)}, data / "catalog.db", 15, stop=stop)
+
+        self.assertEqual(rendered, 0)
+        self.assertFalse((data / "preview").exists())
 
 
 if __name__ == "__main__":

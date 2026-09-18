@@ -172,9 +172,15 @@ body.bg-gray  .thumb{background:#808a96}
   padding-right:10px;border-right:1px solid var(--line)}
 #holding .hcards{display:flex;gap:6px;flex-wrap:nowrap}
 #holding .hempty{color:var(--muted);font-size:12px;font-style:italic}
-.hcard{flex:none;width:64px;border-radius:.5em;cursor:grab;
+.hcard{flex:none;position:relative;width:64px;border-radius:.5em;cursor:grab;
   border:1px solid var(--line);background:var(--panel);overflow:hidden}
 .hcard:hover{border-color:var(--neon2)}
+/* The tray joins selection mode: several held emoji move, or come back,
+   in one gesture instead of one Unhold click each. Same pick box as a card,
+   sized for a 64px tile. */
+.hcard .pick{width:1.3em;height:1.3em;font-size:.95em;border-radius:.4em}
+.hcard.picked{outline:2px solid #f0abfc;outline-offset:-2px}
+.hcard.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
 .hcard img,.hcard video{width:100%;height:42px;object-fit:contain;display:block}
 .hcard button{width:100%;padding:3px 2px;border-radius:0;font-size:11px}
 #unholdAll{flex:none;font-size:12px;padding:6px 8px}

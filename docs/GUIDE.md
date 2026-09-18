@@ -1037,8 +1037,21 @@ is fixed first and is never reordered/counted/saved.
 Animated previews are native WebP images, with no browser animation library.
 Compact zoom caps playback at 10fps and uses 72px previews on ordinary-density
 screens; other previews are 104px. `--preview-fps` (1–30, default 15) limits the
-server rate. The cache key includes content identity, size and rate, and at most
-two uncached raster/codec jobs run concurrently so Save remains responsive.
+server rate. The cache key includes content identity, size and rate, so a tier
+the owner has not used yet (compact zoom's 72px, say) starts cold.
+
+**The cache is warmed in the background, and the render bound is resource-aware.**
+Measured on this catalog, one animation costs ~155 ms and one video poster
+~613 ms; the bound was a hard-coded 2, so a cold tier of 442 animations arrived
+two files at a time — about 34 s of rendering delivered in visible chunks while
+the owner scrolled. The bound is now `max(2, min(6, cpu_count - 2))`, which on a
+16-core machine cut one viewport of 24 cold animations from 2.92 s to 1.55 s
+(1.9×) while still leaving most of the machine to the OS and the save handlers.
+A daemon thread then renders what the page is about to ask for, in grid order,
+so the top of the list is ready first and the scroll meets a warm cache: on a
+cold sandbox clone of this catalog it rendered 1505 files in ~2.5 minutes with
+the panel fully usable throughout. It is best effort — an unreadable file is
+skipped rather than ending the pass, and Ctrl+C never waits for it.
 
 Only genuinely visible animations play: the sticky header's covered region,
 hidden tabs and scrolling are excluded. Switching animation off clears moving
@@ -1957,6 +1970,21 @@ Front-end:
   capacity message. The grid drop commits a tray card's inclusion before
   recording history; `dragend.dropEffect` is not used as proof of a successful
   drop. Tray thumbnails are still images and are reused across updates.
+  The tray joins **selection mode**: each held card carries the same pick box a
+  grid card does, click plus shift-click takes a run of them, dragging one
+  picked card carries every picked held emoji, and **Unhold** on a picked card
+  returns the whole picked set. Without it a held emoji was pickable nowhere —
+  the pick box lives on a grid card and a held emoji has none — so the tray was
+  the one place selection mode could not reach.
+- **A published emoji cannot be dragged into another pack.** Telegram has no
+  move-between-sets call: it would be a delete plus a re-add, which mints a NEW
+  `custom_emoji_id` and breaks every stored reference to the old one, so
+  `sync_order` only ever reorders WITHIN a set. Such a drop is refused with the
+  reason named, and the emoji stays held; Unhold returns it to its own pack. It
+  used to be accepted and then re-grouped by the card's own `pack` field, so it
+  snapped back silently and read as a broken drag. A candidate that is not yet
+  published carries no `pack` and still moves freely, and a move INSIDE one
+  pack is unaffected — only a positively identified different pack refuses.
 - **Pack boundaries and numbers** count included cards and the brand logos.
   Holding four entries from a full pack changes `#1–#200` to `#1–#196`, including
   when that pack is followed by other published packs. The same visible-index

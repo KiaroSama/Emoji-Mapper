@@ -35,7 +35,8 @@ from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.panel_logging import ClientEventLog
 from emojikit.panel_instance import reopen_existing, session_identity
 from emojikit.media import PREVIEW_FPS
-from emojikit.panel_preview import parameters as preview_parameters, preview_bytes as _preview_bytes
+from emojikit.panel_preview import (parameters as preview_parameters,
+                                    preview_bytes as _preview_bytes, warm as preview_warm)
 from emojikit.panel_view import build_view, packs_named
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -591,11 +592,21 @@ def main() -> int:
     print(f"Emoji curate panel: {url}", flush=True)
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    # Warm the previews the page is about to request, in grid order, while the
+    # owner is still looking at the first screen. A daemon thread: it shares the
+    # render bound with live requests, and Ctrl+C must not wait for it.
+    warming = threading.Event()
+    threading.Thread(
+        target=lambda: log.info("preview warm-up rendered %d file(s)",
+                                preview_warm(view, by_key, db_path, args.preview_fps,
+                                             stop=warming)),
+        name="preview-warm", daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.", flush=True)
     finally:
+        warming.set()
         httpd.server_close()
     return 0
 
