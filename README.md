@@ -369,13 +369,17 @@ Emoji Mapper/                  # the whole project
     rebuild_dedup.py           # duplicate-proof rebuild + inventory fill
     check_all_packs.py         # pack integrity audit
     run_convert.ps1 run_rebuild_loop.ps1
-    keywords.csv               # coin ticker -> keywords (data)
-    currency-emoji-inventory.md         # coin inventory (source)
-    ticker_to_id.json shared_logo_groups.json
+    keywords.csv               # coin ticker -> keywords (curated input)
 ```
 
 Generated/local-only (gitignored): `logos/` (and `coins/logos/`), `build/`,
-`input/`, `collection/`, `*_state.json`, `*.filled.md`, `.env`, `secrets.md`.
+`input/`, `collection/`, `packs/`, `*_state.json`, `*.filled.md`, `.env`,
+`secrets.md`. The coin component's own map and inventory
+(`coins/ticker_to_id.json`, `coins/currency-emoji-inventory.md`,
+`coins/shared_logo_groups.json`, `coins/unresolved_logos.json`) are local-only
+too: this repository ships the tool that builds emoji packs, not anybody's
+published packs, and those files name live custom-emoji ids. They are rebuilt
+from Telegram by `coins/rebuild_dedup.py map`.
 
 ## Checks
 
