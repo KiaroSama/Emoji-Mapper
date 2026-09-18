@@ -155,3 +155,8 @@ worker/.wrangler/
 /coins/currency-emoji-inventory.md
 /coins/shared_logo_groups.json
 /coins/unresolved_logos.json
+
+# Local safety copies taken before an irreversible operation (a history
+# rewrite, a migration). They hold the very data the repository must not
+# publish, so they are local-only and never leave this machine.
+/.backups/
