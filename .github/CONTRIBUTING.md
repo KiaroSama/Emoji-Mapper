@@ -1,16 +1,13 @@
 # Contributing
 
-Emoji Mapper is **proprietary** software released under an All Rights Reserved
-license (see [LICENSE](LICENSE)). It is published for reference and authorized
-use only.
+Emoji Mapper is free software under the **GNU General Public License v3 or
+later** (see [LICENSE](LICENSE)).
 
 ## External contributions
 
-This is not an open-source project. Pull requests from outside contributors are
-generally **not accepted** unless arranged in advance through a written
-agreement with the copyright holder. By submitting any contribution you confirm
-that you have the right to do so and you assign all rights in that contribution
-to the copyright holder.
+Pull requests are welcome. By submitting one you confirm that you have the right
+to contribute the code and that it is offered under the same GPL-3.0-or-later
+terms as the rest of the project; contributors keep their own copyright.
 
 ## Reporting issues
 

@@ -427,11 +427,22 @@ and update `.env`.
 
 ## License
 
-Emoji Mapper is **proprietary** software — **All Rights Reserved**.
-See [LICENSE](LICENSE). No use, copying, modification or distribution is
-permitted without prior written permission from the copyright holder. Viewing
-the source here does not grant any license. Third-party logos and data remain
-subject to their own providers' licenses (see below).
+Emoji Mapper — builds Telegram premium custom-emoji packs.
+Copyright (C) 2026 GodVerify
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License** as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details. If you
+did not receive a copy along with this program, see
+<https://www.gnu.org/licenses/>.
+
+The GPL covers this project's own source. Third-party logos and data keep their
+own providers' licenses, which the GPL does not and cannot change (see below).
 
 ## Sources & attribution
 

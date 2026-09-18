@@ -6,7 +6,7 @@ how to perform every workflow and the next steps correctly. Keep this file in
 sync with the code: whenever a command, flag, file, or workflow changes, update
 the matching section here.
 
-> Proprietary software — All Rights Reserved (see [`LICENSE`](../LICENSE)).
+> Free software under the GNU GPL v3 or later (see [`LICENSE`](../LICENSE)).
 > Telegram bot tokens and the owner id live only in `.env` / `secrets.md`
 > (never committed). Never print or commit secrets.
 
@@ -2196,7 +2196,7 @@ added, counts as the first of those 200).
   `redact()` masks token-shaped strings in any message it does log.
 - A leaked bot token must be revoked via @BotFather (`/revoke`) and replaced in
   `.env`.
-- The repository is **private** and **All Rights Reserved** (`LICENSE`).
+- The repository is **public** and licensed **GPL-3.0-or-later** (`LICENSE`).
 
 ---
 
