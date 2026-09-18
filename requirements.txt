@@ -11,4 +11,4 @@ numpy>=1.26             # SVG alpha recovery (make_emoji_pngs.py)
 # rasterizing SVGs. Pin to the 1.x/3.x line which ships the built-in renderPM
 # backend so SVG -> PNG works out of the box (no system cairo needed).
 svglib>=1.5,<2         # SVG -> ReportLab drawing
-reportlab>=3.6,<4      # rasterize SVG drawings to pixels (bundled backend)
+reportlab>=5.0.1,<6      # rasterize SVG drawings to pixels (bundled backend)
