@@ -175,12 +175,7 @@ body.bg-gray  .thumb{background:#808a96}
 .hcard{flex:none;position:relative;width:64px;border-radius:.5em;cursor:grab;
   border:1px solid var(--line);background:var(--panel);overflow:hidden}
 .hcard:hover{border-color:var(--neon2)}
-/* The tray joins selection mode: several held emoji move, or come back,
-   in one gesture instead of one Unhold click each. Same pick box as a card,
-   sized for a 64px tile. */
-.hcard .pick{width:1.3em;height:1.3em;font-size:.95em;border-radius:.4em}
 .hcard.picked{outline:2px solid #f0abfc;outline-offset:-2px}
-.hcard.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
 .hcard img,.hcard video{width:100%;height:42px;object-fit:contain;display:block}
 .hcard button{width:100%;padding:3px 2px;border-radius:0;font-size:11px}
 #unholdAll{flex:none;font-size:12px;padding:6px 8px}
@@ -234,6 +229,11 @@ body.selmode .tick{display:none}
 body.selmode .card{cursor:default}
 .card.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
 .card.picked{outline:2px solid #f0abfc;outline-offset:-2px}
+/* The tray joins selection mode, so a held emoji is pickable too. These
+   override the box above and belong after it -- a `.pick{` rule placed
+   EARLIER also becomes the first one a source-text probe reads. */
+.hcard .pick{width:1.3em;height:1.3em;font-size:.95em;border-radius:.4em}
+.hcard.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .glyph{font-size:1.67em;line-height:1.1;margin:.3em 0 0;user-select:text}

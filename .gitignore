@@ -143,3 +143,15 @@ worker/.wrangler/
 # `pack_manifest.py --refresh`, so it is derived data, and a refresh rewrites
 # ~79 MB of pages and thumbnails that would otherwise land in the history.
 /packs/
+
+# The owner's OWN published pack contents. LOCAL-ONLY by owner decision: this
+# repository ships the TOOL that builds emoji packs, not anybody's packs. These
+# name the live custom-emoji ids of a real published family, so they are the
+# owner's data rather than part of the tool, and they are rebuilt from Telegram
+# by `coins/rebuild_dedup.py map`. `coins/keywords.csv` deliberately stays
+# tracked: it is curated input the tool needs, and it carries no emoji ids.
+/coins/ticker_to_id.json
+/coins/ticker_to_id.*.bak.json
+/coins/currency-emoji-inventory.md
+/coins/shared_logo_groups.json
+/coins/unresolved_logos.json
