@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - CI runs on GitHub-hosted runners
+
+- **The workflow moved from a self-hosted WSL runner to `ubuntu-latest`.** The
+  self-hosted runner existed because this account's hosted minutes are blocked
+  for private repositories; they are free for public ones, so publishing the
+  repository removed the reason. A self-hosted runner is also incompatible with
+  a public repository on purpose: a public repo accepts pull requests from
+  anyone, and a fork's workflow would execute that code on the owner's own
+  machine, so the runner was deregistered before publication.
+- Consequences now baked into the jobs: ffmpeg and Chromium's system libraries
+  are **installed** by the jobs rather than assumed from a global setup, and the
+  ffmpeg step verifies the binaries actually resolve afterwards — apt can answer
+  a mirror outage by installing nothing and still exiting 0, which surfaces
+  three steps later as an application error naming the wrong component.
+  Dependency caching is on, and the timeouts are ceilings sized for the smaller
+  two-core hosted machines.
+
 ### Fixed - the holding tray, cross-pack drops and cold previews
 
 - **Several held emoji can be picked at once.** The pick box lives on a grid
