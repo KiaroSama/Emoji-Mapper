@@ -147,11 +147,19 @@ function renderHolding(){
       const img=el('img');
       img.alt=it.label||'';img.loading='lazy';img.decoding='async';
       img.src='/preview/'+encodeURIComponent(it.key)+'?still=1&size=72';
+      const pick=el('span','pick','✓');
       const button=el('button','','Unhold'); button.type='button'; button.draggable=false;
       button.setAttribute('aria-label','Unhold '+(it.label||it.key));
-      button.onclick=e=>{e.stopPropagation();unholdKeys([it.key]);};
-      c.append(img,button);
+      // Picked held emoji come back together; an unpicked one is still the
+      // single-card gesture that has always been here.
+      button.onclick=e=>{
+        e.stopPropagation();
+        const many=heldPicked();
+        unholdKeys(many.includes(it.key)&&many.length>1?many:[it.key]);
+      };
+      c.append(img,pick,button);
     }
+    c.classList.toggle('picked',picked.has(it.key));
     desired.push(c); existing.delete(it.key);
   }
   for(const c of existing.values()){
@@ -170,6 +178,36 @@ function renderHolding(){
 }
 const originalUpdateCount=updateCount;
 updateCount=function(){originalUpdateCount();renderHolding();};
+
+// --- The tray joins selection mode ---------------------------------------
+// Held emoji were pickable nowhere: the pick box lives on a grid card, and a
+// held one has no grid card, so they could only be moved one Unhold at a time.
+function heldOrder(){return ITEMS.filter(x=>!x.isLogo&&!x.included).map(x=>x.key);}
+function heldPicked(){return heldOrder().filter(k=>picked.has(k));}
+// markPicked paints cards.get(key) -- the GRID node, which a held emoji lacks.
+const originalMarkPicked=markPicked;
+markPicked=function(key,on){
+  originalMarkPicked(key,on);
+  for(const c of holdCards.children)
+    if(c.dataset&&c.dataset.key===key)c.classList.toggle('picked',on);
+};
+// Pointer events, not click: the card's own draggable owns dragging, and one
+// element cannot run both gestures. Starting on the box is what tells them apart.
+let lastHeldPick=null;
+holdCards.addEventListener('pointerdown',e=>{
+  if(!selMode)return;
+  const box=e.target.closest('.pick'); if(!box)return;
+  const card=box.closest('.hcard'); if(!card)return;
+  e.preventDefault();e.stopPropagation();
+  const order=heldOrder(), i=order.indexOf(card.dataset.key);
+  if(i<0)return;
+  const anchor=order.indexOf(lastHeldPick);
+  const on=!picked.has(order[i]);
+  const [a,b]=e.shiftKey&&anchor>=0?[Math.min(anchor,i),Math.max(anchor,i)]:[i,i];
+  for(let k=a;k<=b;k++)markPicked(order[k],on);
+  if(!e.shiftKey||anchor<0)lastHeldPick=order[i];
+  paintSelLabel();
+});
 
 function canUnhold(keys,atDrop=false){
   const counts=new Map(), assignments=assignedPacks();
@@ -242,17 +280,44 @@ holding.addEventListener('drop',e=>{
 });
 holdCards.addEventListener('dragstart',e=>{
   const card=e.target.closest('.hcard');
-  if(!card||e.target.closest('button')){e.preventDefault();return;}
-  dragKey=card.dataset.key;dragSnap=snapshot();holdDragKeys=new Set([dragKey]);
-  carried.clear();carried.add(dragKey);
+  if(!card||e.target.closest('button')||e.target.closest('.pick')){e.preventDefault();return;}
+  dragKey=card.dataset.key;dragSnap=snapshot();
+  // Dragging a PICKED held card carries every picked held emoji, the same way
+  // the grid carries a picked run; an unpicked one stays the single gesture.
+  const many=heldPicked();
+  holdDragKeys=new Set(many.includes(dragKey)&&many.length>1?many:[dragKey]);
+  carried.clear();for(const k of holdDragKeys)carried.add(k);
   e.dataTransfer.effectAllowed='move';
   try{e.dataTransfer.setData('text/plain',dragKey);}catch(_){}
 });
 // The actual grid drop commits inclusion BEFORE recording history. dropEffect
 // at dragend is not evidence of a committed drop and previously lost the undo.
+/** The pack whose run covers this array index, ignoring the item's own field. */
+function runPackAt(index){
+  const run=packStarts().starts.filter(s=>s.index<=index).pop();
+  return run?run.pack:null;
+}
 function acceptHeldDrop(){
   if(!holdDragKeys)return true;
-  if(!canUnhold([...holdDragKeys],true))return false;
+  const keys=[...holdDragKeys];
+  // A PUBLISHED emoji cannot change packs by being dragged. Telegram has no
+  // move-between-sets call: it would be delete + re-add, which mints a NEW
+  // custom_emoji_id and breaks every stored reference to the old one. The drop
+  // used to be accepted and then re-grouped by the item's own pack field, so
+  // the card snapped back with no explanation and read as a broken drag.
+  // Only a POSITIVELY identified different pack refuses -- an undetermined
+  // run must never block a working same-pack move.
+  for(const k of keys){
+    const it=ITEMS.find(x=>x.key===k);
+    if(!it||it.pack==null)continue;
+    const target=runPackAt(ITEMS.indexOf(it));
+    if(target!=null&&target!==it.pack){
+      toast(`Pack ${it.pack} is live on Telegram, so this emoji cannot move to pack ${target} `
+            +`(that would re-add it under a new id). Unhold puts it back in pack ${it.pack}.`);
+      return false;
+    }
+  }
+  if(!canUnhold(keys,true))return false;
   for(const k of holdDragKeys)setIncluded(ITEMS.find(x=>x.key===k),true);
   holdDragKeys=null;relayout();updateCount();markSelDirty();return true;
 }
