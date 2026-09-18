@@ -1,6 +1,7 @@
 {
   "name": "emoji-mapper-worker",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

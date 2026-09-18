@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - relicensed under the GNU GPL v3 or later
+
+- **`LICENSE` is now the GNU General Public License v3**, replacing the previous
+  proprietary All Rights Reserved terms. Everyone may use, study, modify and
+  redistribute this project, provided derivative works carry the same freedoms.
+  The licence text is the canonical one, verbatim and unedited.
+- The declaration was corrected everywhere it appeared, not just in `LICENSE`:
+  `README.md` carries the standard notice, `docs/GUIDE.md` no longer calls the
+  repository private or All Rights Reserved, `worker/package.json` gained
+  `"license": "GPL-3.0-or-later"`, and the contributing guide and pull-request
+  template now welcome outside contributions under the same terms instead of
+  requiring a written agreement and a copyright assignment.
+- Every runtime dependency was checked for compatibility first: requests
+  (Apache-2.0), Pillow (MIT-CMU), resvg-py (MIT), numpy (BSD-3/0BSD/MIT/Zlib/
+  CC0) and rlottie-python (LGPL-2.1, upgradeable to the GPL by its own terms).
+  Third-party logos and provider data keep their own licences, which this change
+  does not and cannot alter.
+
 ### Changed - CI runs on GitHub-hosted runners
 
 - **The workflow moved from a self-hosted WSL runner to `ubuntu-latest`.** The

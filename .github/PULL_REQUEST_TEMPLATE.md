@@ -1,6 +1,6 @@
 <!--
-  Emoji Mapper is proprietary (All Rights Reserved). External pull requests are
-  accepted only by prior written agreement with the copyright holder.
+  Emoji Mapper is free software under the GNU GPL v3 or later. Contributions are
+  accepted under those same terms; you keep the copyright in what you write.
 -->
 
 ## Summary
@@ -20,7 +20,7 @@ Closes #
 
 ## Checklist
 
-- [ ] I have the right to submit this change and agree to the project's LICENSE terms.
+- [ ] I have the right to submit this change and offer it under GPL-3.0-or-later.
 - [ ] No secrets, tokens, API keys, or `.env` values are included.
 - [ ] Code comments and docs are in English and match the existing style.
 - [ ] `python -m compileall -q .` passes.
