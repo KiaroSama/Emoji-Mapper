@@ -34,11 +34,12 @@ graphify-out/
 # Portable AI working memory (local-only)
 /.ai/
 
-# Spec Kit splits in two on purpose: the INFRASTRUCTURE (scripts, templates,
-# the constitution) is local tooling and stays out, while the feature artifacts
-# under specs/<feature>/ -- spec.md, plan.md, tasks.md -- are tracked and
-# committed with the code they specify.
+# Spec Kit's working artifacts, both halves: the infrastructure (scripts,
+# templates, the constitution) and each feature's documents. They are this
+# checkout's scratch -- the chain rebuilds them wherever they are needed -- and
+# the repository ships the tool, not the planning trail behind it.
 /.specify/
+/specs/
 
 # Local working notes: correction orders, advisor plans, repair records. The
 # agent's scratch for this repository, never part of the shipped tool.
