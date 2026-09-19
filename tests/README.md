@@ -41,6 +41,15 @@ Chromium twice to prove the same thing. That job names its modules explicitly
 rather than globbing, so `test_ci_coverage.py` fails if a new browser suite is
 added without being listed there.
 
+A third job, `windows-safety:`, runs the suites whose behaviour Linux and WSL
+cannot exercise — native file-handle locks, migration replay and rollback over
+real paths, atomic plan writes, the decoder subprocess and the CLI entry points
+— on an ephemeral `windows-latest` runner. Which suites those are is a
+judgement rather than a property of the code, so each one declares it with a
+module-level `RUNS_ON_NATIVE_WINDOWS = True`, and `test_ci_coverage.py`
+enforces the match in both directions: a marked suite missing from the job, and
+a name in the job that no longer marks itself, each fail.
+
 ## The suite never touches the real network
 
 `tests/__init__.py` runs before any test module and scrubs every
@@ -74,6 +83,8 @@ rather than adding an opt-out.
 | `test_ingest_retention.py` | Both fake-Telegram CLI paths preserve complete refused VP9 downloads and provenance after scratch cleanup, without replacing sentinels or binding identifiers |
 | `test_video_collision_ingest.py` | Native-frame video identity through all ingest paths, exact/near merge and recovery, including brief/VFR differences, extra tails, remux/re-encode, reopen/resume and occupied destinations |
 | `test_identity_migration.py` | `emojikit/collection_migrate.py` + `scripts/identity_repair.py`: moving EVERY durable reference to a content key when the decoder changes what that key IS — three tables, the derived `phash`, the publisher state and plan files, and the archived filenames that embed `key[:12]`. The properties under test are the refusals and the recoveries: a collision stops it rather than merging two rows, an unreadable row stops it rather than half-converting, the backup is taken through SQLite's online API (a `copy2` of a WAL database opens as `no such table: items`), a crash between any two stages resumes because every stage is idempotent, and a second run is a verified no-op |
+| `test_state_artifacts.py` | a curation plan is live state, not an expendable sidecar: one inventory decides which JSON migration and rollback must carry, and only schema-defined ID fields are remapped — free-text labels are left alone even when they look like keys |
+| `test_sqlite_snapshot.py` | real BUSY/LOCKED contention: a snapshot refuses inside its budget instead of waiting forever, the destination's original data survives that refusal, and a retry succeeds once the lock is released |
 | `test_migration_lifecycle.py` | A03-A06: native actual-writer exclusion, pending-journal refusal, destination collisions, CLI replay after SQLite/JSON/media faults and real process death, complete rollback with unchanged-pack reconciliation, and final missing/decode/reference refusals. Decoder values are injected only for bookkeeping; SQLite, files, native processes and HTTP saves remain real. |
 | `test_video_identity_fidelity.py` | identity-grade decoding either carries a video's alpha or refuses. A missing `libvpx-vp9`, a failed codec probe and a container naming no codec all used to answer "no decoder needed", which drops the alpha layer — two clips differing only in opacity then share one key, and `Catalog.add` merges them and deletes the file it merged away. Real VP9 and VP8 encodes |
 | `test_video_timeline_comparison.py` | `same_image` on video compares the whole timeline, not frame zero. Two clips sharing ten opening frames used to compare equal; so did two differing in exactly one frame, because the identity stream is sampled at 10 fps and the content-key shortcut answered from that. Ends at `_resolve_sticker_key`, asserting no foreign id is written |
@@ -116,6 +127,9 @@ rather than adding an opt-out.
 | `test_panel_save_scope.py` | `POST /api/save` carries the FULL selection, so a request with no notion of scope speaks for rows the page never saw. The request now states what it was showing, the server applies the decision only inside that scope, and a page too old to say is refused with 409. Driven through the real handler on a real socket |
 | `test_panel_queues.py` | what the panel still owes the server, on a fake clock: unsaved ticks are dirty even when no Save is in flight, an older acknowledgement cannot clear newer unsaved work, a permanent 400/409 stops resubmitting (its own comment said retrying could not fix it, and it retried anyway), the 5-second heartbeat obeys the backoff instead of walking past it, and a fetch that never resolves is released by a raced deadline rather than claiming the queue forever |
 | `test_panel_curation.py` | Real browser controls: Shift picks, held-card removal/counts, per-card/all release, full-pack refusal, drag Undo/Redo, original-slot restoration, explicit Save checkpoints, Reset history and real SQLite reload |
+| `test_panel_instance.py` | reopening a panel reuses its own server instead of failing a second bind, and tells an unrelated listener on the port apart from one of ours |
+| `test_panel_plan.py` | the move plan as a pure function: what counts as a move, what is merely held, what is absent because the page had no opinion, and the merge that keeps out-of-scope decisions while dropping the ones about emoji the catalog no longer has |
+| `test_panel_intent_persistence.py` | the saved layout survives, through the real HTTP handler and SQLite: repeated Save/reload/Save, a partial view that merges instead of overwriting, an older client that sends no `packs`, a legacy plan carrying only `moves`, invalid/duplicate/out-of-scope targets, and a malformed plan that is preserved rather than replaced with an empty one |
 | `test_panel_logging.py` | Bounded UI event schema accepts diagnostics and rejects private/arbitrary fields or invalid numeric values before writing any log |
 | `test_panel_preview.py` | Real HTTP previews: requested size/rate, cache reuse, single-frame posters for all formats, VP9 alpha preservation and invalid-resource-budget refusal |
 | `test_ci_coverage.py` | the browser job runs from a hand-maintained list of module names, so this fails when a suite imports the harness without being named there — and asserts none is run twice |
