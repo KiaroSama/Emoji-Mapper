@@ -1015,7 +1015,16 @@ panel does, so a synthetic drag event *is* a write — there is no careful way t
 test it against real data. `scripts/panel_sandbox.py` clones the catalog to a
 temp directory, serves it on the real panel's port + 1 (imported from
 `emojikit.panel.DEFAULT_PORT`, never typed again), and deletes the clone
-on exit:
+on exit.
+
+It isolates the account as well as the data. The child runs with
+`EMOJI_MAPPER_NO_DOTENV=1` -- the same flag `load_env()` already honours for the
+test suite -- and with every key `.env.example` names, plus anything
+credential-shaped, stripped from its inherited environment. Without both, a
+sandbox that had carefully cloned the catalog still called `getMe` against live
+Telegram with the real token, because the panel detects its bot username at
+start-up and an already-exported token needs no dotenv file. This is cooperative
+test-data isolation, not an OS boundary against hostile code running as you:
 
 ```powershell
 .venv\Scripts\python.exe scripts\panel_sandbox.py
