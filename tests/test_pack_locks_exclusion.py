@@ -35,6 +35,11 @@ sys.path.insert(0, str(ROOT))
 
 from emojikit import packstate as ps  # noqa: E402
 
+
+# Claimed by the `windows-safety` CI job: writer exclusion depends on native handle semantics.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 PY = sys.executable
 
 # Long enough that two overlapping owners cannot miss each other, short enough

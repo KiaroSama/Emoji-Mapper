@@ -24,6 +24,11 @@ from emojikit.catalog import Catalog
 from emojikit.ingest import store_media
 
 
+
+# Claimed by the `windows-safety` CI job: the decoder is a native subprocess with native paths.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 RED = bytes((220, 20, 20, 255)) * (100 * 100)
 BLUE = bytes((20, 20, 220, 255)) * (100 * 100)
 TEST_ROOT = Path(__file__).resolve().parents[1] / "logs"

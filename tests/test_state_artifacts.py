@@ -8,6 +8,11 @@ from scripts import identity_repair as ir
 from tests.test_identity_migration import MigrationCase
 
 
+
+# Claimed by the `windows-safety` CI job: symlink and path refusals differ on Windows.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class CurationPlanMigration(MigrationCase):
     def setup_plan(self):
         src = self.media("007_video_aaaaaaaaaaaa.webm")

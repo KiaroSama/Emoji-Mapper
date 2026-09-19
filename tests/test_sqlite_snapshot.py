@@ -11,6 +11,11 @@ from emojikit import sqlite_snapshot as snapshot
 from tests.test_identity_migration import _Catalog
 
 
+
+# Claimed by the `windows-safety` CI job: lock contention and busy waits are platform behaviour.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class BoundedSnapshot(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

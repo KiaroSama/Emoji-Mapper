@@ -12,6 +12,11 @@ from scripts import identity_repair as ir
 from tests.test_identity_migration import MigrationCase, _Catalog
 
 
+
+# Claimed by the `windows-safety` CI job: provenance records canonical native paths.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class LegacyRecoveryRequiresProvenance(MigrationCase):
     def snapshots(self, *, same_path=False, old_ids=("OLD-CID", "OLD-FUID"),
                   current_ids=("OTHER-CID", "OTHER-FUID")):
