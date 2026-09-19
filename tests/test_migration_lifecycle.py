@@ -29,6 +29,11 @@ from emojikit.catalog import Catalog
 from emojikit.maintenance import maintenance
 
 
+
+# Claimed by the `windows-safety` CI job: replay and rollback move real files under native path rules.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class MigrationCannotCertifyDamage(MigrationCase):
     def pending(self):
         src = self.media("007_video_aaaaaaaaaaaa.webm")

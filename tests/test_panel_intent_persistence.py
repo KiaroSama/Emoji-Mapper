@@ -20,6 +20,11 @@ from emojikit.packstate import LockBusy
 from emojikit.panel_plan import PLAN_NAME, merge_plan
 
 
+
+# Claimed by the `windows-safety` CI job: the plan is written atomically through native replace.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class PanelIntentPersistence(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

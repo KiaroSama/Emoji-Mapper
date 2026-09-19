@@ -39,6 +39,11 @@ from emojikit.build_pack import EXIT_FAILED, EXIT_OK, EXIT_USAGE  # noqa: E402
 from emojikit.media import TGS_MAX_UNPACKED  # noqa: E402
 from tests._cli_fixtures import DeadTelegram  # noqa: E402
 
+
+# Claimed by the `windows-safety` CI job: the CLI entry points are what run.ps1 invokes.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 RED = (240, 20, 20, 255)
 EMPTY_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"></svg>'
 

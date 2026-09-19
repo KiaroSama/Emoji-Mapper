@@ -27,6 +27,11 @@ from emojikit import build_pack as bp  # noqa: E402
 from emojikit import packstate as ps  # noqa: E402
 
 
+
+# Claimed by the `windows-safety` CI job: advisory locks are a native file-handle contract, not a POSIX one.
+# tests/test_ci_coverage.py enforces the match both ways.
+RUNS_ON_NATIVE_WINDOWS = True
+
 class PublisherLock(unittest.TestCase):
     """Two publishers must not mutate one pack family at the same time."""
 

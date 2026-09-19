@@ -29,6 +29,15 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 # What marks a suite as needing the browser job: it IMPORTS the harness.
 BROWSER_FIXTURE = "_panel_browser_fixtures"
 
+# What marks a suite as needing the native-Windows job: it SAYS SO. There is no
+# import to key on -- the nine suites share no module that the rest of the tree
+# does not also import -- because "Linux cannot exercise this" is a judgement
+# about the behaviour under test, not a property of the code. So the judgement
+# is written down in the suite it belongs to and enforced from here, both ways:
+# a marked suite missing from the job, and a job entry that no longer marks
+# itself, are each a silent hole.
+WINDOWS_MARKER = "RUNS_ON_NATIVE_WINDOWS"
+
 
 def _imports_harness(path: Path) -> bool:
     """An import, not a mention.
@@ -54,6 +63,33 @@ def _imports_harness(path: Path) -> bool:
 def _browser_suites() -> list[str]:
     return [f"tests.{p.stem}" for p in sorted(TESTS.glob("test_*.py"))
             if _imports_harness(p)]
+
+
+def _declares_windows(path: Path) -> bool:
+    """A module-level assignment, not a substring.
+
+    The same lesson the browser scan learned: a substring matches this file,
+    which names the marker in a constant and claims nothing.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == WINDOWS_MARKER
+                for t in node.targets):
+            return isinstance(node.value, ast.Constant) and node.value.value is True
+    return False
+
+
+def _windows_suites() -> list[str]:
+    return [f"tests.{p.stem}" for p in sorted(TESTS.glob("test_*.py"))
+            if _declares_windows(p)]
+
+
+def _windows_step(workflow: str) -> str:
+    """Only the windows-safety job's own run block, so a name that appears in
+    another job cannot make this guard pass."""
+    head = workflow.find("windows-safety:")
+    return workflow[head:] if head >= 0 else ""
 
 
 class EveryBrowserSuiteIsClaimedByCi(unittest.TestCase):
@@ -88,6 +124,42 @@ class EveryBrowserSuiteIsClaimedByCi(unittest.TestCase):
         for module in _browser_suites():
             self.assertEqual(self.workflow.count(module), 1,
                              f"{module} is named more than once in CI")
+
+
+class EveryNativeWindowsSuiteIsClaimedByCi(unittest.TestCase):
+    """The Windows job runs a hand-written list, the same shape of hole the
+    browser job had. Nothing fails when a new native-safety suite is added and
+    forgotten: it runs green on Linux and never executes on Windows."""
+
+    def setUp(self):
+        if not WORKFLOW.is_file():
+            self.skipTest(f"no workflow at {WORKFLOW}")
+        self.step = _windows_step(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_the_job_exists(self):
+        self.assertTrue(self.step, "the windows-safety job is gone from ci.yml")
+
+    def test_the_scan_finds_the_marked_suites(self):
+        """A guard that matches nothing passes forever and proves nothing."""
+        self.assertGreaterEqual(len(_windows_suites()), 5,
+                                "the native-Windows marker scan stopped finding them")
+
+    def test_each_marked_suite_is_named_in_the_job(self):
+        missing = [m for m in _windows_suites() if m not in self.step]
+        self.assertEqual(missing, [],
+                         f"native-Windows suite(s) run nowhere on Windows: {missing}. "
+                         f"Add them to the windows-safety step in ci.yml.")
+
+    def test_every_name_in_the_job_still_claims_windows(self):
+        """The other direction: a renamed or repurposed suite leaves a name in
+        the job that quietly matches nothing."""
+        named = [w for w in self.step.split()
+                 if w.startswith("tests.test_")]
+        self.assertTrue(named, "the windows-safety step names no suites")
+        stale = [m for m in named if m not in _windows_suites()]
+        self.assertEqual(stale, [],
+                         f"windows-safety names suite(s) that do not declare "
+                         f"{WINDOWS_MARKER}: {stale}")
 
 
 if __name__ == "__main__":
