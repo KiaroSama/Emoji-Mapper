@@ -530,7 +530,15 @@ def _port_holder(port: int) -> int | None:
     return None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, reuse_existing: bool = True) -> int:
+    """Serve the panel. ``argv`` of None reads sys.argv, as it always did.
+
+    ``reuse_existing=False`` is for the sandbox wrapper, which runs this
+    function IN its own process so that killing the wrapper stops the server
+    and drops its lease together. Adopting whatever already listens on the port
+    would defeat that: the sandbox would hand out its clone's URL for a listener
+    it never identified, possibly one serving the owner's real catalog.
+    """
     # BEFORE setup_logging: the logger registers the literal values of
     # SECRET_ENV_KEYS so they can be masked wherever they appear, and it can only
     # register what is already in the environment. Loading .env afterwards -- as
@@ -558,7 +566,7 @@ def main() -> int:
                     help="Also show the emoji already live in pack N, so a "
                          "half-full pack can be arranged beside the new "
                          "candidates going into it. Repeatable.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if not 1 <= args.port <= 65535:
         ap.error("--port must be between 1 and 65535")
 
@@ -569,7 +577,8 @@ def main() -> int:
         return 2
 
     session_info = session_identity(db_path, args.all, args.with_pack)
-    existing = reopen_existing(args.port, session_info, no_open=args.no_open)
+    existing = (reopen_existing(args.port, session_info, no_open=args.no_open)
+                if reuse_existing else None)
     if existing is not None:
         return existing
 
@@ -622,7 +631,8 @@ def main() -> int:
         httpd = QuietServer(("127.0.0.1", args.port), handler)
     except OSError as exc:
         # Another launch can win the bind after the first readiness probe.
-        existing = reopen_existing(args.port, session_info, no_open=args.no_open)
+        existing = (reopen_existing(args.port, session_info, no_open=args.no_open)
+                    if reuse_existing else None)
         if existing is not None:
             return existing
         log.error("cannot listen on port %d: %s", args.port, exc)
