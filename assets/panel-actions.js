@@ -181,6 +181,14 @@ const orderSig = keys => keys.join('\0');
 // snapshot it carried and nothing newer.
 const selSig = (keys) => keys.slice().sort().join('\0');
 // Scope, exclusions AND intended packs are one Save, never a live-model retry.
+//   `excluded` is full-state -- every key it does not name becomes included --
+//   so `known` has to say WHAT THIS PAGE CAN SEE, or the server must assume the
+//   tab speaks for the whole catalog. A page opened before an ingest, or before
+//   the owner deselected something in another tab, would then silently
+//   re-include emoji it has never heard of and be told "Saved".
+//   `packs` is the pack each emoji is INTENDED to end up in, which is the whole
+//   point of the panel: the server holds what is live, so the difference
+//   between the two IS the move plan it writes out.
 function selectionBody(){
   const real = ITEMS.filter(x=>!x.isLogo);
   return {excluded: real.filter(x=>!x.included).map(x=>x.key),

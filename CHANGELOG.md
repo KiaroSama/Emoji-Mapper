@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - saved curation survives, and the writes that carry it are bounded
+
+- **A saved pack move now survives a reload.** The page rebuilt its layout from
+  live Telegram membership alone, so an emoji moved to another pack reappeared
+  at its old one and the next save erased the move. Intent is read back from
+  `pack_plan.json` and overlaid on the render; the server's own view of what is
+  live is unchanged, so `from_pack` still means what it says.
+- **A partial view no longer discards decisions it cannot see.** A page showing
+  part of the catalog replaces only its own scope and merges the rest. The plan
+  gained `targets` (the authoritative intent), `known` and `excluded` (the scope
+  those decisions were made in) and `logo_slots`; `moves` is now derived from
+  `targets`. Plans written by an older panel are still read. See
+  `docs/GUIDE.md` § "The move plan" for the full shape.
+- **A Save carries one immutable body.** The request used to be rebuilt from the
+  live model on every attempt, so a failed save for pack 1 could retry as pack 2
+  after an unsaved edit. Pack-only edits now count as unsaved work for the dirty
+  marker and the close warning, and a refusal is matched to the body it refused.
+- **An HTTP 200 is no longer taken as proof on its own.** A success status with a
+  malformed, null or never-finishing body cleared pending work and said "Saved".
+  The client now requires a complete acknowledgement and retries otherwise.
+- **The inclusion write and the plan write share one catalog lease.** Releasing
+  it between them let maintenance re-key the database and then receive a fresh
+  plan full of obsolete keys. Keys are validated against the database while it
+  is owned; a plan I/O failure answers 503 instead of acknowledging.
+- **Migration and rollback now cover the curation plan.** Their inventory
+  enumerated `publish_*.json` only, so a re-key left the plan naming keys that
+  no longer existed and the rollback bundle contained no plan at all. One shared
+  inventory remaps only schema-defined ID fields; free text is left alone.
+- **SQLite backups stop waiting forever.** `sqlite3.connect(timeout=...)` does
+  not bound `Connection.backup`'s own BUSY retry loop, so a locked database
+  could block a snapshot indefinitely. Capture is bounded at 30 s. Rollback
+  writes onto the live catalog and is bounded far higher, because abandoning a
+  restore half-written is worse than waiting out a competing reader.
+- **A video sample cache could return another file's pixels.** Its key used a
+  relative filename plus size and mtime, so two `clip.webm` files with matching
+  metadata in different working directories collided. Keys now use the resolved
+  path and include the FFmpeg identity the samples were decoded with.
+- **Native Windows now has its own CI job**, covering locks, migration and
+  restore, HTTP persistence, video identity and the CLI contracts — paths that
+  Linux and WSL do not exercise.
+
 ### Changed - relicensed under the GNU GPL v3 or later
 
 - **`LICENSE` is now the GNU General Public License v3**, replacing the previous

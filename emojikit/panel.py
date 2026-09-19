@@ -374,7 +374,18 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                         or not set(target_keys) <= set(scope_raw)):
                     self._send(400, b'{"error":"pack targets must be unique and inside known scope"}')
                     return
+                # `scope_raw` MUST be narrowed under the lock: /api/order sorts
+                # `view` in place and CPython empties a list for the duration of
+                # list.sort(), so a save landing in that window saw no known
+                # keys, intersected the request down to nothing, and
+                # set_inclusion(set()) re-included every row -- discarding the
+                # whole de-selection while still answering {"ok": true}.
                 with lock:
+                    # Two narrowings, for two different reasons. `live` is what
+                    # the server currently has; the tab's `known` is what this
+                    # particular page was actually looking at. Only their
+                    # intersection is a decision this request is entitled to
+                    # make -- everything else keeps whatever the catalog says.
                     live = {v["key"] for v in view if not v.get("isLogo")}
                     scope = set(scope_raw) & live
                     excluded = set(raw) & scope
@@ -397,6 +408,11 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                                    {k: n for k, n in target_map(previous).items() if k in scope})
                         plan = (merge_plan(previous, staged, targets, scope, PER_SET)
                                 if "packs" in payload or previous is not None else None)
+                        # Outside the scope, carry the CURRENT state through.
+                        # set_inclusion re-includes every key it is not given,
+                        # so a grid that hides finished packs -- or a tab that
+                        # predates an ingest -- would otherwise re-include every
+                        # deselected item it cannot see.
                         outside_excluded = {key for key, item in current.items()
                                             if not item.included and key not in scope}
                         inc, exc = cat.set_inclusion(excluded | outside_excluded)
