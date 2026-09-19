@@ -2109,10 +2109,17 @@ later is a decision nobody made.
 | `over_capacity` | Packs whose `counts` plus `logo_slots` exceed `per_set`. Normally empty, because a drop over the cap is refused while curating — but a plan read back later must be able to say so rather than look healthy and fail at publish. |
 
 A **partial save merges**: a page that can see only some of the catalog replaces
-the decisions inside its own scope and leaves every other decision in the file
-untouched. That is why `targets`, `known` and `excluded` are whole-catalog while
-`moves` and `held` read as a to-do list. A plan written by an older panel that
-carries only `moves` is still understood — its moves are read as the intent.
+the decisions inside its own scope and keeps every other decision in the file.
+That is why `targets`, `known` and `excluded` are whole-catalog while `moves`
+and `held` read as a to-do list. A plan written by an older panel that carries
+only `moves` is still understood — its moves are read as the intent.
+
+The one thing a save does drop is a decision about an emoji the catalog no
+longer holds. The keys are checked against the database under the same lease
+that writes the plan, so a deleted emoji stops being counted and stops
+reserving a slot; without that the file would only ever grow, and a pack could
+report itself over capacity because of emoji that are gone. A pack nobody
+targets any more loses its `logo_slots` entry for the same reason.
 
 An unreadable `pack_plan.json` is never silently replaced with an empty one: the
 panel refuses to load and names the file, because discarding saved intent to
