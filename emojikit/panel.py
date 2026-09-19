@@ -29,6 +29,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from emojikit.collection_state import PER_SET
+from emojikit.panel_plan import build_plan, write_plan
 from emojikit.catalog import Catalog
 from emojikit.packstate import LockBusy
 from emojikit.logsetup import record_exit_code, setup_logging
@@ -325,7 +326,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 return
 
             if self.path == "/api/save":
-                if set(payload) - {"excluded", "known"}:
+                if set(payload) - {"excluded", "known", "packs"}:
                     self._send(400, b'{"error":"unknown keys"}')
                     return
                 raw = payload.get("excluded", [])
@@ -338,6 +339,18 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 # `fetch_emoji_ids.py` added an item, or before the owner
                 # deselected one in another tab, would silently re-include it
                 # and answer {"ok": true}.
+                # The panel's INTENDED pack per emoji. Optional: an older page
+                # does not send it, and a save that carries no opinion must
+                # still save the inclusion rather than be refused.
+                targets_raw = payload.get("packs", [])
+                if not isinstance(targets_raw, list) or not all(
+                        isinstance(p, list) and len(p) == 2
+                        and isinstance(p[0], str) and isinstance(p[1], int)
+                        and not isinstance(p[1], bool)
+                        for p in targets_raw):
+                    self._send(400, b'{"error":"packs must be [key, pack] pairs"}')
+                    return
+
                 scope_raw = payload.get("known")
                 if not isinstance(scope_raw, list) or not all(
                         isinstance(k, str) for k in scope_raw):
@@ -380,7 +393,24 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                     for v in view:
                         if v["key"] in scope:
                             v["included"] = v["key"] not in excluded
-                self._send(200, json.dumps({"ok": True, "included": inc, "excluded": exc}).encode())
+                    # The layout the owner just saved, written where the step
+                    # that rearranges the real packs can read it. Inside the
+                    # lock and after the inclusion write, so the plan describes
+                    # the state that was actually persisted, never a half of it.
+                    #
+                    # Only when the page actually SENT an opinion. A tab that
+                    # carries no `packs` has said nothing about the layout, and
+                    # treating that as "no moves" would let one stale save
+                    # overwrite a good plan with an empty one.
+                    plan = None
+                    if "packs" in payload:
+                        plan = build_plan(view, dict(targets_raw), PER_SET)
+                        write_plan(db_path.parent, plan)
+                body = {"ok": True, "included": inc, "excluded": exc}
+                if plan is not None:
+                    body["moves"] = len(plan["moves"])
+                    body["held"] = len(plan["held"])
+                self._send(200, json.dumps(body).encode())
                 return
 
             if self.path == "/api/order":

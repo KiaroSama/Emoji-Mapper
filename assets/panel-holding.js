@@ -8,6 +8,7 @@ let savedSnapshot = null, pendingSaveSnapshot = null;
 
 function snapshot(){
   return {order: ITEMS.map(x=>x.key), included: ITEMS.filter(x=>x.included).map(x=>x.key),
+    packs: ITEMS.filter(x=>x.pack!=null).map(x=>[x.key,x.pack]),
     picked: [...picked], selMode, lastPick, lastIdx, holds: [...holdOrigins],
     zoom, anim: ANIM_ON, bg: BGS.find(x=>document.body.classList.contains('bg-'+x)) || 'checker'};
 }
@@ -30,6 +31,12 @@ function applySnapshot(snap, persist=true){
     applyOrder(snap.order);
     const inc = new Set(snap.included);
     for(const it of ITEMS) if(!it.isLogo){ it.included=inc.has(it.key); setCard(it); }
+    // Before relayout: the stamp decides the runs, so restoring order without
+    // it would undo the move on screen and keep the new pack number underneath.
+    if(snap.packs){
+      const want=new Map(snap.packs);
+      for(const it of ITEMS) if(want.has(it.key)) it.pack=want.get(it.key);
+    }
     holdOrigins.clear();
     for(const [k,v] of snap.holds || []) holdOrigins.set(k,v);
     clearPicked();
@@ -219,11 +226,19 @@ function canUnhold(keys,atDrop=false){
   for(const key of keys){
     const it=ITEMS.find(x=>x.key===key);
     if(!it||it.isLogo||it.included)continue;
-    const origin=atDrop?{pack:assignments.get(key)}:holdOrigins.get(key)||{pack:assignments.get(key)};
+    // At a DROP the destination is the run the card was dragged into, which is
+    // the whole point of the gesture. Reading `assignments` here instead asked
+    // whether the emoji's OWN pack had room -- so moving one out of a full pack
+    // into a roomy one was refused, and moving into a full one was allowed.
+    const destination=atDrop?runPackAt(ITEMS.indexOf(it),new Set(keys)):null;
+    const origin=atDrop?{pack:destination??assignments.get(key)}
+                       :holdOrigins.get(key)||{pack:assignments.get(key)};
     const count=(counts.get(origin.pack)||0)+1;
     if(count>PER_SET){
-      const label=typeof origin.pack==='number'?'Pack '+origin.pack:'The original pack';
-      toast(`${label} is full (${PER_SET}/${PER_SET}). Its original place is occupied; hold or move another emoji before Unhold.`);
+      const label=typeof origin.pack==='number'?'Pack '+origin.pack:'That pack';
+      toast(atDrop
+        ? `${label} is full (${PER_SET}/${PER_SET}). Hold one of its emoji first, then bring this one in.`
+        : `${label} is full (${PER_SET}/${PER_SET}). Its original place is occupied; hold or move another emoji before Unhold.`);
       return false;
     }
     counts.set(origin.pack,count);
@@ -292,32 +307,47 @@ holdCards.addEventListener('dragstart',e=>{
 });
 // The actual grid drop commits inclusion BEFORE recording history. dropEffect
 // at dragend is not evidence of a committed drop and previously lost the undo.
-/** The pack whose run covers this array index, ignoring the item's own field. */
-function runPackAt(index){
-  const run=packStarts().starts.filter(s=>s.index<=index).pop();
-  return run?run.pack:null;
+/** The pack of the run a card at `index` has landed in.
+ *
+ *  `ignore` is the set being dragged, and leaving it out is a real bug, not a
+ *  refinement: a dropped card still carries the pack it came FROM, so
+ *  `packStarts()` cuts a fresh one-card run at it and any "which run covers
+ *  this index" answer is that island -- the card's own old pack. Reading the
+ *  nearest settled neighbour instead gives the pack the owner actually dropped
+ *  it into. Backwards first (a drop belongs to the run above it), then forwards
+ *  for a drop above every live card. */
+function runPackAt(index,ignore){
+  const settled=i=>{
+    const it=ITEMS[i];
+    if(!it||ignore&&ignore.has(it.key))return null;
+    if(!it.included&&!it.isLogo)return null;
+    return it.pack??null;
+  };
+  for(let i=index-1;i>=0;i--){const p=settled(i);if(p!=null)return p;}
+  for(let i=index+1;i<ITEMS.length;i++){const p=settled(i);if(p!=null)return p;}
+  return null;
 }
 function acceptHeldDrop(){
   if(!holdDragKeys)return true;
   const keys=[...holdDragKeys];
-  // A PUBLISHED emoji cannot change packs by being dragged. Telegram has no
-  // move-between-sets call: it would be delete + re-add, which mints a NEW
-  // custom_emoji_id and breaks every stored reference to the old one. The drop
-  // used to be accepted and then re-grouped by the item's own pack field, so
-  // the card snapped back with no explanation and read as a broken drag.
-  // Only a POSITIVELY identified different pack refuses -- an undetermined
-  // run must never block a working same-pack move.
+  if(!canUnhold(keys,true))return false;
+  // THE PANEL STATES THE INTENDED LAYOUT. It is not a mirror of what is live
+  // on Telegram: the owner drags an emoji into the pack they want it to end up
+  // in, saves, and the publish step performs the real move afterwards. So a
+  // cross-pack drop is accepted -- and the emoji must be RE-STAMPED into the
+  // destination pack. Without the stamp `packStarts()` re-groups it by its old
+  // pack number, it becomes a one-card run still labelled with the pack it came
+  // from, and the drag reads as having snapped back. Capacity is the only thing
+  // a drop refuses, above; that is what the holding tray is for -- park one,
+  // then bring the replacement in.
+  const restamp=[], dropped=new Set(keys);
   for(const k of keys){
     const it=ITEMS.find(x=>x.key===k);
-    if(!it||it.pack==null)continue;
-    const target=runPackAt(ITEMS.indexOf(it));
-    if(target!=null&&target!==it.pack){
-      toast(`Pack ${it.pack} is live on Telegram, so this emoji cannot move to pack ${target} `
-            +`(that would re-add it under a new id). Unhold puts it back in pack ${it.pack}.`);
-      return false;
-    }
+    if(!it||it.isLogo||it.included)continue;
+    const target=runPackAt(ITEMS.indexOf(it),dropped);
+    if(typeof target==='number'&&target!==it.pack)restamp.push([it,target]);
   }
-  if(!canUnhold(keys,true))return false;
+  for(const [it,target] of restamp)it.pack=target;
   for(const k of holdDragKeys)setIncluded(ITEMS.find(x=>x.key===k),true);
   holdDragKeys=null;relayout();updateCount();markSelDirty();return true;
 }
