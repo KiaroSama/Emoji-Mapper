@@ -81,3 +81,86 @@ def write_plan(data_dir: Path, plan: dict) -> Path:
     path = Path(data_dir) / PLAN_NAME
     write_json_atomic(path, plan)
     return path
+
+
+class PlanError(ValueError):
+    """A saved intent is unreadable; never replace it with an empty plan."""
+
+
+def read_plan(data_dir: Path) -> dict | None:
+    import json
+    from emojikit.state_artifacts import plan_keys
+
+    path = Path(data_dir) / PLAN_NAME
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("unsupported plan path")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        plan_keys(doc)
+        targets = target_map(doc)
+        if any(not isinstance(n, int) or isinstance(n, bool) or n < 1
+               for n in targets.values()):
+            raise ValueError("pack numbers must be positive integers")
+        return doc
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PlanError(f"cannot read {PLAN_NAME}; preserve and repair it: {exc}") from exc
+
+
+def target_map(plan: dict | None) -> dict[str, int]:
+    """Read complete current intent, or explicit moves from a legacy plan."""
+    if plan is None:
+        return {}
+    pairs = plan.get("targets")
+    if pairs is None:
+        pairs = [[row["key"], row["to_pack"]] for row in plan["moves"]]
+    targets = dict(pairs)
+    if len(targets) != len(pairs):
+        raise PlanError("duplicate pack target keys")
+    return targets
+
+
+def overlay_targets(view: list[dict], plan: dict | None) -> list[dict]:
+    """Render intent without changing the authoritative LIVE membership."""
+    targets = target_map(plan)
+    return [dict(card, pack=targets[card["key"]])
+            if not card.get("isLogo") and card["key"] in targets else dict(card)
+            for card in view]
+
+
+def merge_plan(previous: dict | None, view: list[dict], targets: dict[str, int],
+               scope: set[str], per_set: int) -> dict:
+    """Replace only this page's scope; preserve decisions it could not see."""
+    old = previous or {}
+    scoped = [card for card in view if card.get("isLogo") or card["key"] in scope]
+    plan = build_plan(scoped, targets, per_set)
+    combined = {key: value for key, value in target_map(previous).items() if key not in scope}
+    combined.update(targets)
+    for field in ("moves", "held"):
+        plan[field] = ([dict(row) for row in old.get(field, []) if row["key"] not in scope]
+                       + plan[field])
+    old_excluded = set(old.get("excluded", [])) | {row["key"] for row in old.get("held", [])}
+    excluded = (old_excluded - scope) | {c["key"] for c in scoped
+                                         if not c.get("isLogo") and not c["included"]}
+    known = (set(old.get("known", [])) | set(combined) | old_excluded | scope)
+    plan["targets"] = [[key, combined[key]] for key in sorted(combined)]
+    plan["known"] = sorted(known)
+    plan["excluded"] = sorted(excluded)
+    counts: dict[int, int] = {}
+    for key, number in combined.items():
+        if key not in excluded:
+            counts[number] = counts.get(number, 0) + 1
+    # A brand logo consumes a slot in each pack, not once in the whole family.
+    logos = dict(old.get("logo_slots", {}))
+    for card in view:
+        if card.get("isLogo"):
+            packs = [card["pack"]] if card.get("pack") is not None else counts
+            for number in packs:
+                logos[str(number)] = 1
+    plan["logo_slots"] = logos
+    plan["counts"] = {str(number): count for number, count in sorted(counts.items())}
+    plan["over_capacity"] = {str(number): count + logos.get(str(number), 0)
+                             for number, count in sorted(counts.items())
+                             if count + logos.get(str(number), 0) > per_set}
+    return plan

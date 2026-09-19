@@ -35,7 +35,10 @@ function applySnapshot(snap, persist=true){
     // it would undo the move on screen and keep the new pack number underneath.
     if(snap.packs){
       const want=new Map(snap.packs);
-      for(const it of ITEMS) if(want.has(it.key)) it.pack=want.get(it.key);
+      for(const it of ITEMS){
+        if(want.has(it.key)) it.pack=want.get(it.key);
+        else delete it.pack;  // Absence is part of the snapshot, too.
+      }
     }
     holdOrigins.clear();
     for(const [k,v] of snap.holds || []) holdOrigins.set(k,v);
