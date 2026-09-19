@@ -227,3 +227,65 @@ class PanelIntentPersistence(unittest.TestCase):
         plan = merge_plan(None, view, {"a": 1, "b": 1}, {"a", "b"}, 2)
         self.assertEqual(plan["counts"], {"1": 2})
         self.assertEqual(plan["over_capacity"], {"1": 3})
+
+    def _refuse_stale_scope(self, change, *, refresh):
+        from emojikit.migration_bundle import signature
+
+        self.assertEqual(self.save()[0], 200)
+        old_page = self.page()
+        subject = self.keys[-1]
+        with Catalog(self.db) as cat:
+            if change == "rekey":
+                cat.db.execute("UPDATE items SET content_key='s:new-identity' WHERE content_key=?", (subject,))
+                cat.db.commit()
+            elif change == "delete":
+                cat.db.execute("DELETE FROM items WHERE content_key=?", (subject,))
+                cat.db.commit()
+            else:
+                cat.mark_uploaded(subject, "NEW-CID", base="fixture", set_name="hidden-finished-pack")
+        if refresh:
+            fresh = self.page()  # Another tab refreshes the server's shared view.
+            self.assertNotIn(subject, {card["key"] for card in fresh})
+        before_db, before_plan = signature(self.db), self.plan.read_bytes()
+        # Include a still-valid edit to prove that a refusal cannot partially apply.
+        status, response = self.save(known=[card["key"] for card in old_page],
+                                     excluded=[subject, self.keys[1]], targets=[])
+        self.assertEqual(status, 409, response)
+        self.assertIn("reload", json.loads(response)["error"].lower())
+        self.assertEqual(signature(self.db), before_db)
+        self.assertEqual(self.plan.read_bytes(), before_plan)
+        fresh = self.page()
+        self.assertEqual(self.save(known=[card["key"] for card in fresh],
+                                   excluded=[self.keys[1]], targets=[])[0], 200)
+        with Catalog(self.db) as cat:
+            self.assertFalse(cat.get(self.keys[1]).included)
+
+    def test_refresh_does_not_hide_stale_identity_from_save_validation(self):
+        self._refuse_stale_scope("rekey", refresh=True)
+
+    def test_refresh_does_not_acknowledge_a_draft_for_a_deleted_item(self):
+        self._refuse_stale_scope("delete", refresh=True)
+
+    def test_newly_hidden_item_is_not_intersected_out_of_a_save(self):
+        self._refuse_stale_scope("published", refresh=True)
+
+    def test_save_revalidates_visibility_even_without_another_page_load(self):
+        self._refuse_stale_scope("published", refresh=False)
+
+    def test_save_uses_current_live_pack_not_the_page_load_snapshot(self):
+        key = self.keys[0]
+        self.page()
+        with Catalog(self.db) as cat:
+            cat.mark_uploaded(key, "MOVED-CID", base="fixture", set_name="two")
+        self.assertEqual(self.save(targets=[[key, 1]])[0], 200)
+        self.assertEqual([(row["from_pack"], row["to_pack"]) for row in self.load_plan()["moves"]],
+                         [(2, 1)], "a cached source pack erased the requested reverse move")
+
+    def test_explicit_exclusion_outside_known_scope_refuses_without_writes(self):
+        self.assertEqual(self.save()[0], 200)
+        before = self.plan.read_bytes()
+        status, _ = self.save(known=[self.keys[0]], excluded=[self.keys[1]], targets=[])
+        self.assertEqual(status, 400)
+        self.assertEqual(self.plan.read_bytes(), before)
+        with Catalog(self.db) as cat:
+            self.assertTrue(cat.get(self.keys[1]).included)
