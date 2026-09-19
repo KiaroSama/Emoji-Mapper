@@ -1017,14 +1017,50 @@ temp directory, serves it on the real panel's port + 1 (imported from
 `emojikit.panel.DEFAULT_PORT`, never typed again), and deletes the clone
 on exit.
 
-It isolates the account as well as the data. The child runs with
-`EMOJI_MAPPER_NO_DOTENV=1` -- the same flag `load_env()` already honours for the
+It isolates four things, because cloning the data turned out to be only one of
+them.
+
+**The arguments are an allowlist.** `--source`, `--port`, `--all`,
+`--with-pack N` and `--bot-username` are accepted; everything else is refused,
+including abbreviations (`allow_abbrev=False`). Nothing is forwarded: the
+panel's argument list is built inside the wrapper. It used to forward unknown
+options straight through, appended AFTER its own `--data-dir`, so
+`panel_sandbox.py --data-dir collection` served the live catalog while the
+wrapper printed that the live catalog was not served.
+
+**The clone shares no bytes.** The database is an online snapshot through
+`emojikit.sqlite_snapshot`, so committed rows still sitting in the WAL come too
+-- a plain file copy never copied the `-wal` at all. Media is COPIED, never
+hard-linked, into `media/<content key>.<ext>` with the colons replaced (on NTFS
+a colon opens an alternate data stream rather than a file), and every
+`file_path` is rewritten, including rows pointing at the owner's archive outside
+the collection. `pack_plan.json` travels with it, so the sandbox shows the
+layout you actually saved.
+
+**It refuses rather than half-succeeds.** Another writer, an interrupted
+migration, an occupied or overlapping destination, or a media file it cannot
+read: each aborts and removes only what that attempt created. A sandbox finished
+with one row still pointing at production is worse than no sandbox.
+
+**One sandbox never destroys another.** Each carries a `.sandbox-owner.json`
+naming its own directory, and the start-up sweep reclaims a directory only when
+that marker is valid AND it can take that directory's lock. Unmarked, foreign,
+symlinked or still-served directories are left alone; a reclaimed directory
+keeps its lock file. The previous sweep matched the name prefix and deleted
+every hit, so starting a second sandbox removed the first one's catalog.
+
+**And it isolates the account.** The panel runs in the wrapper's own process
+with `EMOJI_MAPPER_NO_DOTENV=1` -- the flag `load_env()` already honours for the
 test suite -- and with every key `.env.example` names, plus anything
-credential-shaped, stripped from its inherited environment. Without both, a
-sandbox that had carefully cloned the catalog still called `getMe` against live
-Telegram with the real token, because the panel detects its bot username at
-start-up and an already-exported token needs no dotenv file. This is cooperative
-test-data isolation, not an OS boundary against hostile code running as you:
+credential-shaped, stripped from the environment and restored afterwards.
+Without it, a sandbox that had carefully cloned the catalog still called `getMe`
+against live Telegram with the real token, because the panel detects its bot
+username at start-up and an already-exported token needs no dotenv file. Running
+in-process also means killing the wrapper stops the server and drops its lease
+together, and no unidentified listener is ever adopted as the sandbox.
+
+This is cooperative test-data isolation, not an OS boundary against hostile code
+running as you:
 
 ```powershell
 .venv\Scripts\python.exe scripts\panel_sandbox.py

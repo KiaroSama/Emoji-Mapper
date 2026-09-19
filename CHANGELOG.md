@@ -19,10 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body was JSON, never that it was an update, so a malformed authenticated body
   reached the dispatcher. Only `update_id` is required, so unknown future update
   types stay valid.
-- **The test sandbox no longer hands the child real credentials.** It cloned the
+- **The test sandbox no longer hands the panel real credentials.** It cloned the
   catalog and then passed its own environment through untouched, so a sandboxed
-  panel still reached live Telegram as the real bot. The child now runs with
-  dotenv reading off and every credential-shaped variable stripped.
+  panel still reached live Telegram as the real bot. It now runs with dotenv
+  reading off and every credential-shaped variable stripped.
+- **The test sandbox can no longer be argued into serving the real catalog.**
+  Unknown options were forwarded to the panel AFTER the wrapper's own
+  `--data-dir`, so one passed through won. Arguments are an allowlist now, with
+  abbreviations refused and nothing forwarded.
+- **The sandbox clone shares no bytes with the original.** Media was
+  hard-linked, a path outside the collection was left pointing at the owner's
+  archive, and the database was copied as a file, which skips an uncheckpointed
+  WAL. It is now an online snapshot plus per-file copies with every path
+  rewritten, `pack_plan.json` included, and it refuses rather than finishing a
+  clone it cannot make faithfully.
+- **Starting a sandbox no longer deletes another one that is running.** The
+  start-up sweep removed every directory matching its name prefix. It now
+  requires both a directory-bound `.sandbox-owner.json` and the ability to take
+  that directory's lock, and it keeps the lock file when it reclaims.
 
 
 ### Fixed - saved curation survives, and the writes that carry it are bounded

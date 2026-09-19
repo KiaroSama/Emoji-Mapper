@@ -7,14 +7,22 @@ rewrote `items.position` in the live catalog, on top of an afternoon of manual
 ordering. Reordering is exactly what the panel is for, so there is no way to
 "test carefully" against real data -- the test IS the mutation.
 
-So automated UI checks get their own catalog and their own port:
+So automated UI checks get their own catalog, their own port, and their own
+credentials-free environment:
 
-* the catalog is copied to a temp directory, media is symlinked or copied, and
-  the copy is deleted on exit;
-* its port is the real panel's + 1, taken from `panel.DEFAULT_PORT` rather
-  than typed again, so a sandbox can never take the port a real panel is on
-  and a real panel is never mistaken for the sandbox;
-* it refuses to start if `--data-dir` points anywhere inside the project.
+* the catalog is CLONED by `emojikit.sandbox_clone` -- its own database bytes,
+  its own media bytes, every path repointed -- and the clone is deleted on exit;
+* its port is the real panel's + 1, taken from `panel.DEFAULT_PORT` rather than
+  typed again, so a sandbox can never take the port a real panel is on and a
+  real panel is never mistaken for the sandbox;
+* the arguments are an ALLOWLIST. This used to forward unknown options straight
+  to the panel, after its own `--data-dir`, so `panel_sandbox.py --data-dir
+  collection` served the owner's live catalog while this file printed that the
+  live catalog was not served. Nothing is forwarded now; the panel's argument
+  list is built here, explicitly;
+* the panel runs IN THIS PROCESS with session reuse off, so killing the wrapper
+  stops the server and drops its lease together, and no unidentified listener is
+  ever adopted as the sandbox.
 
 Usage (this is what `.claude/launch.json` runs):
 
@@ -26,92 +34,27 @@ Usage (this is what `.claude/launch.json` runs):
 from __future__ import annotations
 
 import argparse
-import atexit
+import contextlib
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from emojikit.panel import DEFAULT_PORT as PANEL_PORT  # noqa: E402 - needs ROOT on the path
+from emojikit import panel  # noqa: E402 - needs ROOT on the path
+from emojikit.maintenance import lock_path  # noqa: E402
+from emojikit.packstate import exclusive_lock  # noqa: E402
+from emojikit.sandbox_clone import (  # noqa: E402
+    TMP_PREFIX, clone_catalog, sweep_stale)
 
 # IMPORTED, never re-typed: the sandbox's whole job is to stay off the port a
 # real panel uses, and two copies of that number would drift the day one moves.
+PANEL_PORT = panel.DEFAULT_PORT
 DEFAULT_PORT = PANEL_PORT + 1
-TMP_PREFIX = "panel-sandbox-"
-
-
-def clone_catalog(source: Path, dest: Path) -> int:
-    """Copy the catalog and its media into ``dest``. Returns the item count."""
-    db = source / "catalog.db"
-    if not db.is_file():
-        raise SystemExit(f"no catalog at {db} -- nothing to sandbox")
-    dest.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(db, dest / "catalog.db")
-    # The publisher's state too: `--with-pack N` resolves pack numbers through
-    # it, and without a copy the sandbox could only ever show candidates.
-    for state in source.glob("publish_*.json"):
-        shutil.copy2(state, dest / state.name)
-
-    # Media is read-only to the panel, so hard-link it where the filesystem
-    # allows: 200 emoji is ~20 MB and copying it on every launch is waste.
-    # A link failure is not fatal -- fall back to copying.
-    media_src, media_dst = source / "media", dest / "media"
-    for src in media_src.rglob("*"):
-        if not src.is_file():
-            continue
-        out = media_dst / src.relative_to(media_src)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(src, out)
-        except OSError:
-            shutil.copy2(src, out)
-
-    import sqlite3
-    with sqlite3.connect(dest / "catalog.db") as con:
-        n = con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-    # The copied rows still hold absolute/relative paths into the SOURCE tree.
-    # Repoint them at the clone, or the sandbox would serve -- and a future
-    # writer could touch -- the real files.
-    with sqlite3.connect(dest / "catalog.db") as con:
-        for key, path in con.execute("SELECT content_key, file_path FROM items").fetchall():
-            p = Path(path)
-            try:
-                rel = p.relative_to(source) if p.is_absolute() else Path(path).relative_to(source.name)
-            except ValueError:
-                continue
-            con.execute("UPDATE items SET file_path=? WHERE content_key=?",
-                        (str(dest / rel).replace("\\", "/"), key))
-        con.commit()
-    return n
-
-
-def sweep_stale() -> int:
-    """Delete clones a previous run left behind, before making another.
-
-    ``atexit`` does not run when the process is killed, and this server is
-    normally ended by killing it. Seven abandoned clones at ~2.4 MB each were
-    found in one session. Cleaning at START rather than only at exit is the
-    only cleanup that survives the way the thing is actually stopped.
-
-    A clone in use is protected by its own lock: a directory that is still
-    being served refuses to delete on Windows, and that failure is ignored.
-    """
-    removed = 0
-    for old in Path(tempfile.gettempdir()).glob(f"{TMP_PREFIX}*"):
-        if not old.is_dir():
-            continue
-        before = old.exists()
-        shutil.rmtree(old, ignore_errors=True)
-        removed += before and not old.exists()
-    if removed:
-        print(f"cleaned {removed} abandoned sandbox clone(s)", flush=True)
-    return removed
-
 
 # Names that never belong in a sandbox child, beyond whatever `.env.example`
 # lists: an owner may export a credential by hand, and an exported value needs
@@ -120,7 +63,7 @@ _SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|_KEY$|^OWNER_ID$", re.IGNORECASE
 
 
 def scrubbed_environment() -> dict[str, str]:
-    """The child's environment, with this project's credentials removed.
+    """The panel's environment, with this project's credentials removed.
 
     The sandbox isolated the CATALOG and not the ACCOUNT. `emojikit.panel`
     calls `_detect_bot_username()`, which calls `load_env()` and then `getMe` --
@@ -128,10 +71,10 @@ def scrubbed_environment() -> dict[str, str]:
     reached live Telegram as the real bot, with the real token.
 
     Two leaks, two plugs. `EMOJI_MAPPER_NO_DOTENV` is the flag `load_env()`
-    already honours for the test suite, so the child never reads `.env`; the
-    inherited copies have to go with it, because an already-exported token does
-    not need the file. `.env.example` is the authoritative key list and holds no
-    values, so this stays correct as the project's credentials change.
+    already honours for the test suite, so `.env` is never read; the inherited
+    copies have to go with it, because an already-exported token does not need
+    the file. `.env.example` is the authoritative key list and holds no values,
+    so this stays correct as the project's credentials change.
     """
     template = ROOT / ".env.example"
     listed: set[str] = set()
@@ -145,31 +88,85 @@ def scrubbed_environment() -> dict[str, str]:
     return child
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+@contextlib.contextmanager
+def scrubbed_process_environment():
+    """Apply the scrub to THIS process, then put the environment back.
+
+    In-process is what makes the wrapper's death stop the server, so the scrub
+    has to be applied here rather than handed to a child. Restoring matters
+    because a caller that imported this module keeps running afterwards.
+    """
+    saved = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(scrubbed_environment())
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """An allowlist, deliberately.
+
+    `allow_abbrev=False` because an abbreviation that is unambiguous today
+    becomes a different option the day another is added, and this parser's whole
+    job is that no argument can change what gets served. There is no
+    `parse_known_args` and no forwarding: `--data-dir` reaches the panel from
+    exactly one place, below.
+    """
+    ap = argparse.ArgumentParser(
+        prog="panel_sandbox.py", allow_abbrev=False,
+        description="Serve a THROWAWAY clone of the catalog. Never the real one.")
     ap.add_argument("--source", default="collection",
                     help="Catalog to CLONE (never served directly).")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    # Anything else goes to the panel itself (`--all`, `--with-pack N`, ...):
-    # once every emoji is published, a sandbox without them shows an empty grid.
-    args, panel_args = ap.parse_known_args(argv)
+    ap.add_argument("--all", action="store_true",
+                    help="Show already-published emoji too.")
+    ap.add_argument("--with-pack", type=int, action="append", default=[],
+                    metavar="N", help="Include published pack N (repeatable).")
+    ap.add_argument("--bot-username", default="",
+                    help="Branding only; supplied so nothing contacts Telegram.")
+    return ap
+
+
+def panel_arguments(args: argparse.Namespace, data_dir: Path) -> list[str]:
+    """The panel's argument list, built here rather than forwarded."""
+    argv = ["--data-dir", str(data_dir), "--port", str(args.port), "--no-open"]
+    if args.all:
+        argv.append("--all")
+    for number in args.with_pack:
+        argv += ["--with-pack", str(number)]
+    if args.bot_username:
+        argv += ["--bot-username", args.bot_username]
+    return argv
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.port == PANEL_PORT:
         raise SystemExit(f"refusing port {PANEL_PORT}: that is the real panel's port")
+    if not 1 <= args.port <= 65535:
+        raise SystemExit(f"refusing port {args.port}: not a port")
 
     source = (ROOT / args.source).resolve()
     sweep_stale()
-    tmp = Path(tempfile.mkdtemp(prefix=TMP_PREFIX))
-    atexit.register(shutil.rmtree, tmp, True)
+    tmp = Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{uuid.uuid4().hex[:8]}"
 
     n = clone_catalog(source, tmp)
     print(f"sandbox catalog: {n} items cloned from {source} -> {tmp}", flush=True)
     print(f"the real catalog at {source} is NOT served and cannot be modified",
           flush=True)
 
-    cmd = [sys.executable, "-m", "emojikit.panel", "--data-dir", str(tmp),
-           "--port", str(args.port), "--no-open", *panel_args]
-    return subprocess.call(cmd, cwd=ROOT, env=scrubbed_environment())
+    try:
+        # Held for the whole life of the server, and released when this process
+        # ends however it ends. That is what lets the next run's sweep tell an
+        # abandoned clone from one that is still being served.
+        with exclusive_lock(lock_path(tmp)), scrubbed_process_environment():
+            return panel.main(panel_arguments(args, tmp), reuse_existing=False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
