@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - a save is answered for what it actually submitted
+
+- **A stale Save is refused instead of quietly shrunk.** The panel intersected
+  the tab's scope with the server's shared view and applied whatever was left,
+  answering `{"ok": true}` for a decision it had silently narrowed. The whole
+  submitted scope is now validated against the live catalog under the writer
+  lease: it applies completely or returns 409 with nothing written, and the
+  draft can be exported before reloading.
+- **The webhook validates its envelope before dispatching.** Parsing proved the
+  body was JSON, never that it was an update, so a malformed authenticated body
+  reached the dispatcher. Only `update_id` is required, so unknown future update
+  types stay valid.
+- **The test sandbox no longer hands the child real credentials.** It cloned the
+  catalog and then passed its own environment through untouched, so a sandboxed
+  panel still reached live Telegram as the real bot. The child now runs with
+  dotenv reading off and every credential-shaped variable stripped.
+
+
 ### Fixed - saved curation survives, and the writes that carry it are bounded
 
 - **A saved pack move now survives a reload.** The page rebuilt its layout from

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -112,6 +113,38 @@ def sweep_stale() -> int:
     return removed
 
 
+# Names that never belong in a sandbox child, beyond whatever `.env.example`
+# lists: an owner may export a credential by hand, and an exported value needs
+# no dotenv file to reach the child.
+_SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|_KEY$|^OWNER_ID$", re.IGNORECASE)
+
+
+def scrubbed_environment() -> dict[str, str]:
+    """The child's environment, with this project's credentials removed.
+
+    The sandbox isolated the CATALOG and not the ACCOUNT. `emojikit.panel`
+    calls `_detect_bot_username()`, which calls `load_env()` and then `getMe` --
+    so a sandbox started precisely to avoid touching the owner's data still
+    reached live Telegram as the real bot, with the real token.
+
+    Two leaks, two plugs. `EMOJI_MAPPER_NO_DOTENV` is the flag `load_env()`
+    already honours for the test suite, so the child never reads `.env`; the
+    inherited copies have to go with it, because an already-exported token does
+    not need the file. `.env.example` is the authoritative key list and holds no
+    values, so this stays correct as the project's credentials change.
+    """
+    template = ROOT / ".env.example"
+    listed: set[str] = set()
+    if template.is_file():
+        listed = {line.split("=", 1)[0].strip()
+                  for line in template.read_text(encoding="utf-8").splitlines()
+                  if "=" in line and not line.lstrip().startswith("#")}
+    child = {k: v for k, v in os.environ.items()
+             if k not in listed and not _SECRETISH.search(k)}
+    child["EMOJI_MAPPER_NO_DOTENV"] = "1"
+    return child
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default="collection",
@@ -136,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = [sys.executable, "-m", "emojikit.panel", "--data-dir", str(tmp),
            "--port", str(args.port), "--no-open", *panel_args]
-    return subprocess.call(cmd, cwd=ROOT)
+    return subprocess.call(cmd, cwd=ROOT, env=scrubbed_environment())
 
 
 if __name__ == "__main__":
