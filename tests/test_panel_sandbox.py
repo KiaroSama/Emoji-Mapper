@@ -91,7 +91,13 @@ class SandboxFixture(unittest.TestCase):
     """A disposable source catalog. Never `collection/` -- see the module docstring."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="sandbox-test-"))
+        # RESOLVED once. On a Windows runner `TEMP` is an 8.3 short name
+        # (`C:\Users\RUNNER~1\...`), and `Path.resolve()` expands it, so a
+        # stored path compared against an unresolved fixture path looks like it
+        # escaped the clone when it did not. It passes on a machine whose user
+        # name is short enough not to need the alias -- which is why this only
+        # showed up in the native-Windows job.
+        self.tmp = Path(tempfile.mkdtemp(prefix="sandbox-test-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.source = self.tmp / "src"
         (self.source / "media").mkdir(parents=True)
