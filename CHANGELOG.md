@@ -50,13 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carry the same pick box: click plus shift-click takes a run, dragging one
   picked card carries every picked held emoji, and Unhold on a picked card
   returns the whole set.
-- **A published emoji dragged into another pack now says why it cannot go.**
-  Telegram has no move-between-sets call — it would be a delete plus a re-add,
-  minting a new `custom_emoji_id` and breaking every stored reference — so the
-  drop is refused with the reason named and the emoji stays held. It used to be
-  accepted and then silently re-grouped by the card's own pack field, which read
-  as the drag being broken. Unpublished candidates still move freely, and a move
-  inside one pack is untouched.
+- **An emoji dropped into another pack now joins it, and Save writes the plan.**
+  The panel states the intended layout rather than mirroring Telegram: drag an
+  emoji into the pack it should end up in, and it is re-stamped into that pack
+  instead of being silently re-grouped by the pack it came from — which is what
+  made the drag look broken. Nothing moves on Telegram at that moment and
+  nothing can (the Bot API has no move-between-sets call), so **Save now writes
+  `<data-dir>/pack_plan.json`**: every emoji that changed pack with its `from`
+  and `to`, every emoji parked in the tray with the pack it came out of, the
+  resulting per-pack counts, and any pack over capacity. The real
+  rearrangement is a separate deliberate step read from that file. Packs stay
+  fixed 200-emoji buckets: a full one refuses the drop and names the gesture
+  that makes room — park one of its emoji in the tray, then bring the
+  replacement in. Capacity is now asked of the destination pack; it used to be
+  asked of the emoji's own, which refused moves out of a full pack and allowed
+  moves into one.
 - **Previews are warmed in the background and render wider.** One animation
   costs ~155 ms and one video poster ~613 ms, and the render bound was a
   hard-coded 2, so a cold tier arrived in visible chunks while the owner

@@ -1976,15 +1976,26 @@ Front-end:
   returns the whole picked set. Without it a held emoji was pickable nowhere —
   the pick box lives on a grid card and a held emoji has none — so the tray was
   the one place selection mode could not reach.
-- **A published emoji cannot be dragged into another pack.** Telegram has no
-  move-between-sets call: it would be a delete plus a re-add, which mints a NEW
-  `custom_emoji_id` and breaks every stored reference to the old one, so
-  `sync_order` only ever reorders WITHIN a set. Such a drop is refused with the
-  reason named, and the emoji stays held; Unhold returns it to its own pack. It
-  used to be accepted and then re-grouped by the card's own `pack` field, so it
-  snapped back silently and read as a broken drag. A candidate that is not yet
-  published carries no `pack` and still moves freely, and a move INSIDE one
-  pack is unaffected — only a positively identified different pack refuses.
+- **An emoji dropped into another pack joins it.** The panel states the
+  INTENDED layout; it is not a mirror of what is live on Telegram. Drag an
+  emoji into the pack you want it to end up in, save, and the emoji is
+  re-stamped into that pack — the grid redraws with it inside the destination
+  run. Nothing moves on Telegram at that moment and nothing can: the Bot API
+  has no move-between-sets call, so a real move is a delete plus a re-add that
+  mints a new `custom_emoji_id`. **Save writes the decision to
+  `<data-dir>/pack_plan.json`** (§ "The move plan" below) and the real
+  rearrangement is a separate, deliberate step performed from that file.
+  The re-stamp is the load-bearing half: without it `packStarts()` re-groups
+  the card by the pack number it arrived carrying, it becomes a one-card run
+  still labelled with the pack it came from, and the drag reads as having
+  snapped back — which is exactly how this was first reported.
+- **A full pack takes nothing, and the holding tray is how you make room.**
+  Packs are fixed 200-emoji buckets, logo included. A drop into a pack already
+  at 200 is refused with `Pack N is full (200/200). Hold one of its emoji
+  first, then bring this one in.` — park one of that pack's own emoji in the
+  tray, then bring the replacement in. Capacity is asked of the DESTINATION,
+  not of the emoji's own pack; asking the wrong one refused moves OUT of a full
+  pack and allowed moves INTO one.
 - **Pack boundaries and numbers** count included cards and the brand logos.
   Holding four entries from a full pack changes `#1–#200` to `#1–#196`, including
   when that pack is followed by other published packs. The same visible-index
@@ -2056,6 +2067,47 @@ Front-end:
 The panel ships no animation library: animated emoji are rasterised to WebP by
 `rlottie-python` on the server, so the page needs nothing from a CDN and works
 offline.
+
+### The move plan (`<data-dir>/pack_plan.json`)
+
+The panel decides nothing on Telegram. It is where the owner says what the
+layout **should** be; every save writes that decision to `pack_plan.json` beside
+`catalog.db`, and rearranging the live packs is a separate, deliberate step read
+from that file.
+
+It has to be written explicitly rather than inferred from the order, because
+with fixed 200-emoji buckets a pack boundary does not follow from position:
+"which pack was this meant for" is a decision, and a decision that is guessed
+later is a decision nobody made.
+
+```json
+{
+  "version": 1,
+  "written_utc": "2026-09-19T02:07:19Z",
+  "per_set": 200,
+  "counts": {"1": 199, "2": 197, "3": 199},
+  "over_capacity": {},
+  "moves": [{"key": "s:e8dc…", "label": "refx-nexus-3-round",
+             "from_pack": 2, "to_pack": 3}],
+  "held":  [{"key": "s:c0ff…", "label": "premium-id:5447…", "from_pack": 3}]
+}
+```
+
+| Field | What it is |
+|-------|------------|
+| `moves` | Every emoji whose intended pack differs from the one it is live in. This is the work. |
+| `held` | Every emoji parked in the tray, with the pack it came out of. Not a move — the owner took it out and has not said where it goes; parking one is how room is made for an arriving emoji. |
+| `counts` | Emoji per pack in the intended layout, brand logo included. |
+| `over_capacity` | Packs above `per_set`. Normally empty, because a drop over the cap is refused while curating — but a plan read back later must be able to say so rather than look healthy and fail at publish. |
+
+An emoji the page carried no pack for is **absent** from the plan entirely:
+saying nothing and saying "leave it" are different claims, and only the first
+is true. A candidate that was never published has no `from_pack`, so it is
+counted but never a move — there is nothing to move it out of. The brand logo
+is skipped: it is emoji 0 of every pack and does not travel.
+
+The file is written atomically, because the step that reads it may start at any
+moment and a half-written plan is a scrambled instruction set.
 
 ---
 
@@ -2171,6 +2223,7 @@ added, counts as the first of those 200).
 | `collection/manifests/<set>.md` | no | Per-pack manifest (name + id). |
 | `collection/publish_<base>.json` | no | Publish state (sets, sent links, keys, skipped). |
 | `collection/publish_plan_<base>.json` | no | Frozen per-format upload plan. |
+| `collection/pack_plan.json` | no | The panel's move plan: which emoji should change pack, and which are parked. Written on every Save. |
 | `coins/ticker_to_id.json` | no | Canonical ticker → custom_emoji_id map. The owner's own pack data, not part of the tool. |
 | `coins/keywords.csv` | **yes** | ticker → name/keywords. |
 | `coins/currency-emoji-inventory.md` | no | Inventory source. Names live custom-emoji ids, so it stays local. |

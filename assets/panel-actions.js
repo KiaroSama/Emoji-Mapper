@@ -572,7 +572,11 @@ async function flushSel(excluded){
   // ingest, or before the owner deselected something in another tab, would
   // then silently re-include emoji it has never heard of and be told "Saved".
   const known = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
-  try{ r = await apiPost('/api/save', {excluded, known}); }
+  // The pack each emoji is INTENDED to end up in, which is the whole point of
+  // the panel: the server holds what is live, so the difference between the
+  // two IS the move plan, and it is written out on every save.
+  const packs = ITEMS.filter(x=>!x.isLogo && x.pack!=null).map(x=>[x.key,x.pack]);
+  try{ r = await apiPost('/api/save', {excluded, known, packs}); }
   catch(_){ return failSel('The panel at this address is not responding.', 0, excluded); }
   j = r.json;
   if(!r.ok){
