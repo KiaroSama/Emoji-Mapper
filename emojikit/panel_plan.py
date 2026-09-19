@@ -134,8 +134,18 @@ def overlay_targets(view: list[dict], plan: dict | None) -> list[dict]:
 
 
 def merge_plan(previous: dict | None, view: list[dict], targets: dict[str, int],
-               scope: set[str], per_set: int) -> dict:
-    """Replace only this page's scope; preserve decisions it could not see."""
+               scope: set[str], per_set: int, live: set[str] | None = None) -> dict:
+    """Replace only this page's scope; preserve decisions it could not see.
+
+    ``live`` is every key the catalog still holds. Without it the merge can only
+    add: a page sees part of the catalog, so out-of-scope decisions are kept
+    unconditionally and a key that has since been deleted is kept forever --
+    counted in ``counts`` and able to report an ``over_capacity`` for a pack the
+    owner cannot find. Passing the catalog's own key set is what lets a decision
+    about an emoji that no longer exists be dropped rather than preserved; it
+    must come from the database under the same lease that writes the plan, never
+    from the render view, which hides published packs by design.
+    """
     old = previous or {}
     scoped = [card for card in view if card.get("isLogo") or card["key"] in scope]
     plan = build_plan(scoped, targets, per_set)
@@ -148,6 +158,15 @@ def merge_plan(previous: dict | None, view: list[dict], targets: dict[str, int],
     excluded = (old_excluded - scope) | {c["key"] for c in scoped
                                          if not c.get("isLogo") and not c["included"]}
     known = (set(old.get("known", [])) | set(combined) | old_excluded | scope)
+    if live is not None:
+        # Everything below is keyed by content key, so one filter covers the
+        # whole plan. `scope` is already inside `live` -- the save handler
+        # refuses otherwise -- so this only ever drops the stale remainder.
+        combined = {key: number for key, number in combined.items() if key in live}
+        known &= live
+        excluded &= live
+        for field in ("moves", "held"):
+            plan[field] = [row for row in plan[field] if row["key"] in live]
     plan["targets"] = [[key, combined[key]] for key in sorted(combined)]
     plan["known"] = sorted(known)
     plan["excluded"] = sorted(excluded)
@@ -162,6 +181,13 @@ def merge_plan(previous: dict | None, view: list[dict], targets: dict[str, int],
             packs = [card["pack"]] if card.get("pack") is not None else counts
             for number in packs:
                 logos[str(number)] = 1
+    if live is not None:
+        # A pack nobody targets any more has no slot to reserve. Left in, its
+        # stale entry still counts toward over_capacity for a pack that is gone.
+        alive = {str(number) for number in counts} | {
+            str(card["pack"]) for card in view
+            if card.get("isLogo") and card.get("pack") is not None}
+        logos = {number: slot for number, slot in logos.items() if number in alive}
     plan["logo_slots"] = logos
     plan["counts"] = {str(number): count for number, count in sorted(counts.items())}
     plan["over_capacity"] = {str(number): count + logos.get(str(number), 0)
