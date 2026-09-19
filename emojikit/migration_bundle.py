@@ -14,6 +14,7 @@ from pathlib import Path
 from emojikit.packstate import write_json_atomic
 
 from .maintenance import canonical_directory
+from . import sqlite_snapshot, state_artifacts
 
 VERSION = 2
 REFERENCES = (("items", "content_key"), ("publications", "content_key"),
@@ -125,7 +126,7 @@ def make_bundle(data_dir, backup, key_map, phashes, files, states):
     original = sqlite3.connect(backup)
     expected = sqlite3.connect(":memory:")
     try:
-        original.backup(expected)
+        sqlite_snapshot.backup(original, expected)
         before = database_signature(expected)
         rewrite_database(expected, key_map, phashes)
         after = database_signature(expected)
@@ -161,7 +162,7 @@ def validate_bundle(data_dir: Path, doc: dict) -> None:
     if len(doc["files"]) != len(original):
         raise RuntimeError("migration journal does not cover the complete snapshot")
     for name in doc["states"]:
-        if Path(name).name != name or not name.startswith("publish_") or not name.endswith(".json"):
+        if not state_artifacts.is_state_name(name):
             raise RuntimeError("migration journal contains an invalid state path")
     for intent in doc["files"]:
         source, dest = Path(intent["source"]), Path(intent["destination"])
@@ -190,7 +191,7 @@ def verify_files(files, *, final=False):
 
 
 def verify_states(data_dir, states):
-    names = {p.name for p in Path(data_dir).glob("publish_*.json")}
+    names = {p.name for p in state_artifacts.state_files(Path(data_dir))}
     if names != set(states):
         raise RuntimeError("publisher state files changed since the migration snapshot")
     for name, values in states.items():
@@ -273,7 +274,12 @@ def restore(data_dir, doc, write_journal):
         write_json_atomic(Path(data_dir) / name, values["before"])
     src, dst = sqlite3.connect(doc["backup"]), sqlite3.connect(doc["catalog"])
     try:
-        src.backup(dst)
+        # The destination here is the live catalog, not a scratch file: the
+        # capture budget would abort a slow rollback part-way through it. The
+        # signature check below still catches that, and the journal already
+        # records direction="restore" so a re-run finishes the job -- but the
+        # honest fix is not to give up on the owner's catalog after 30 s.
+        sqlite_snapshot.backup(src, dst, timeout=sqlite_snapshot.RESTORE_TIMEOUT)
     finally:
         dst.close()
         src.close()

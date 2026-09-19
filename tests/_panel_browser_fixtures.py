@@ -86,7 +86,8 @@ window.__settle = (i, status) => {
   if(status === 0) rec.rej(new TypeError('network'));
   else rec.res({ok: status < 300, status: status,
                 json: () => Promise.resolve(
-                  {ok: status < 300, included: 1, excluded: 1, error: 'refused'})});
+                  {ok: status < 300, count: (rec.body.order || []).length,
+                   included: 1, excluded: 1, error: 'refused'})});
 };
 // The exact pair of statements a drop runs: the model moves, then the order is
 // queued. Driving them directly is what makes an interleaving deterministic;

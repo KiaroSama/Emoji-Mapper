@@ -147,7 +147,7 @@ let orderRev = 0;             // the revision pendingOrder carries
 let orderFlight = 0;          // revision in flight; 0 when idle (single flight)
 let orderWait = null, orderBackoff = 0;
 
-let pendingSel = null;        // the excluded set a Save asked for and lost
+let pendingSel = null;        // immutable full body of the latest explicit Save
 let selRev = 0, selFlight = 0, selWait = null, selBackoff = 0;
 
 const RETRY_MIN = 1000, RETRY_MAX = 30000;
@@ -179,15 +179,34 @@ const orderSig = keys => keys.join('\0');
 // while a Save is in flight, or with no Save pressed at all, are unsaved work
 // that neither of those told anyone about. An acknowledgement may retire the
 // snapshot it carried and nothing newer.
-const selSig = (keys) => keys.slice().sort().join(' ');
-let ackedSel = selSig(ITEMS.filter(x => !x.isLogo && !x.included).map(x => x.key));
+const selSig = (keys) => keys.slice().sort().join('\0');
+// Scope, exclusions AND intended packs are one Save, never a live-model retry.
+//   `excluded` is full-state -- every key it does not name becomes included --
+//   so `known` has to say WHAT THIS PAGE CAN SEE, or the server must assume the
+//   tab speaks for the whole catalog. A page opened before an ingest, or before
+//   the owner deselected something in another tab, would then silently
+//   re-include emoji it has never heard of and be told "Saved".
+//   `packs` is the pack each emoji is INTENDED to end up in, which is the whole
+//   point of the panel: the server holds what is live, so the difference
+//   between the two IS the move plan it writes out.
+function selectionBody(){
+  const real = ITEMS.filter(x=>!x.isLogo);
+  return {excluded: real.filter(x=>!x.included).map(x=>x.key),
+          known: real.map(x=>x.key),
+          packs: real.filter(x=>x.pack!=null).map(x=>[x.key,x.pack])};
+}
+function selectionSig(body){
+  return JSON.stringify([body.known.slice().sort(), body.excluded.slice().sort(),
+    body.packs.map(p=>p.slice()).sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0)]);
+}
+let ackedSel = selectionSig(selectionBody());
 
 function currentExcluded(){
   return ITEMS.filter(x => !x.isLogo && !x.included).map(x => x.key);
 }
 
 /** Does the visible selection differ from what the server has acknowledged? */
-function selDirty(){ return selSig(currentExcluded()) !== ackedSel; }
+function selDirty(){ return selectionSig(selectionBody()) !== ackedSel; }
 
 /** Show it on the control you would press to fix it. */
 function markSelDirty(){
@@ -262,9 +281,24 @@ async function apiPost(path, body){
       const m = /const TOKEN = "([^"]+)"/.exec(html);
       if(m){ TOK = m[1]; r = await bounded(send()); }
     }
-    let json = {};
-    try{ json = await bounded(r.json()); }catch(_){ /* status says enough */ }
-    return {ok:r.ok, status:r.status, json};
+    let json;
+    try{ json = await bounded(r.json()); }
+    catch(err){
+      // A successful status without a complete acknowledgement proves nothing.
+      // Keep a non-success status useful even when its error body is malformed.
+      if(r.ok) throw err;
+      json = {};
+    }
+    const record = json !== null && typeof json === 'object' && !Array.isArray(json);
+    if(r.ok){
+      const count = n=>Number.isSafeInteger(n) && n>=0;
+      if(r.status !== 200 || !record || json.ok !== true ||
+         (path === '/api/save' && (!count(json.included) || !count(json.excluded))) ||
+         (path === '/api/order' && !count(json.count))){
+        throw new Error('invalid save acknowledgement');
+      }
+    }
+    return {ok:r.ok, status:r.status, json:record?json:{}};
   } finally {
     clearTimeout(timer);
     deadline.catch(()=>{});     // nothing is listening once we are done
@@ -560,45 +594,32 @@ document.getElementById('bg').onclick=()=>{
 // GIVEN and retries exactly that, so ticks made afterwards stay unsaved until
 // the owner presses Save again -- the same as if the failure had never
 // happened. What did change is that the refusal is no longer forgotten.
-async function flushSel(excluded){
-  if(selFlight || selStuck || Date.now()<selNextAt || pendingSel === null || excluded !== pendingSel) return false;
+async function flushSel(submitted){
+  if(selFlight || selStuck || Date.now()<selNextAt || pendingSel === null || submitted !== pendingSel) return false;
   const rev = selRev;
   const checkpoint = pendingSaveSnapshot;
   selFlight = rev;
-  let r, j = {};
-  // `known` is WHAT THIS PAGE CAN SEE. `excluded` is full-state -- every key
-  // it does not name becomes included -- so without it the server has to
-  // assume this tab speaks for the whole catalog. A page opened before an
-  // ingest, or before the owner deselected something in another tab, would
-  // then silently re-include emoji it has never heard of and be told "Saved".
-  const known = ITEMS.filter(x=>!x.isLogo).map(x=>x.key);
-  // The pack each emoji is INTENDED to end up in, which is the whole point of
-  // the panel: the server holds what is live, so the difference between the
-  // two IS the move plan, and it is written out on every save.
-  const packs = ITEMS.filter(x=>!x.isLogo && x.pack!=null).map(x=>[x.key,x.pack]);
-  try{ r = await apiPost('/api/save', {excluded, known, packs}); }
-  catch(_){ return failSel('The panel at this address is not responding.', 0, excluded); }
-  j = r.json;
+  let r;
+  // Nothing is re-read from ITEMS here: a retry is the same explicitly saved
+  // scope, selection and pack intent, even after newer unsaved edits.
+  try{ r = await apiPost('/api/save', submitted); }
+  catch(_){ return failSel('The panel did not provide a valid save acknowledgement.', 0, submitted); }
+  const j = r.json;
   if(!r.ok){
     return failSel('The panel refused the save (' + (j.error || r.status) + ').',
-                   r.status, excluded);
+                   r.status, submitted);
   }
   selFlight = 0; selBackoff = 0; selStuck = false;
-  // Acknowledge the snapshot that was SUBMITTED, not whatever the model holds
-  // now. Ticks made while this was in flight are newer unsaved work: recording
-  // them as saved is what cleared the dirty state, said "Saved ✓", and let the
-  // tab close on an exclusion the server had never been told about.
-  ackedSel = selSig(excluded);
-  logUI('save_succeeded',{revision:rev,count:excluded.length});
+  ackedSel = selectionSig(submitted);
+  logUI('save_succeeded',{revision:rev,count:submitted.excluded.length});
   if(checkpoint) savedSnapshot = checkpoint;
   markSelDirty();
-  if(rev !== selRev){ kickSel(0); return false; }   // a newer Save is waiting
+  if(rev !== selRev){ kickSel(0); return false; }
   pendingSel = null;
   clearAlertIfClean();
-  // Say WHOSE numbers these are. They come from the catalog, not the grid, and
-  // reading "213 included" under 15 visible cards is alarming until you know.
   const scope = HIDDEN ? ' in the catalog' : '';
-  toast(`Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
+  toast(selDirty() ? 'Saved the submitted version; newer changes are unsaved.'
+    : `Saved ✓  ${j.included} included · ${j.excluded} excluded${scope}`);
   return true;
 }
 
@@ -614,8 +635,8 @@ function failSel(why, status, submitted){
     // that the body itself is wrong. Re-sending the same body gets the same
     // answer; the selection stays queued and guarded until a reconciled tab
     // saves it.
-    refusedSel = selSig(submitted);
-    selStuck = pendingSel !== null && selSig(pendingSel)===refusedSel;
+    refusedSel = selectionSig(submitted);
+    selStuck = pendingSel !== null && selectionSig(pendingSel)===refusedSel;
     clearTimeout(selWait);
     if(!selStuck){selBackoff=0;kickSel(0);}
     return false;
@@ -634,11 +655,13 @@ function kickSel(ms){
 }
 
 function queueSelection(checkpoint){
-  pendingSel = currentExcluded();
-  pendingSaveSnapshot = checkpoint;
+  pendingSel = selectionBody();
+  // Snapshot arrays have no references into the mutable item model. Copy the
+  // checkpoint as well so Reset always describes the acknowledged Save.
+  pendingSaveSnapshot = JSON.parse(JSON.stringify(checkpoint));
   selRev++;
-  logUI('save_requested',{revision:selRev,count:pendingSel.length});
-  selStuck = selSig(pendingSel)===refusedSel;
+  logUI('save_requested',{revision:selRev,count:pendingSel.excluded.length});
+  selStuck = selectionSig(pendingSel)===refusedSel;
   if(!selStuck){selBackoff=0;selNextAt=Date.now();}
   flushSel(pendingSel);
 }

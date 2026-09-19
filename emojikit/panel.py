@@ -29,7 +29,8 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from emojikit.collection_state import PER_SET
-from emojikit.panel_plan import build_plan, write_plan
+from emojikit.panel_plan import (PlanError, merge_plan, overlay_targets, read_plan,
+                                 target_map, write_plan)
 from emojikit.catalog import Catalog
 from emojikit.packstate import LockBusy
 from emojikit.logsetup import record_exit_code, setup_logging
@@ -199,7 +200,11 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                     # until the panel was restarted, and a refresh looked like it
                     # did nothing. Reading 200 rows costs milliseconds.
                     _reload_view()
-                    items = _json_for_script(view)
+                    try:
+                        items = _json_for_script(overlay_targets(view, read_plan(db_path.parent)))
+                    except PlanError as exc:
+                        self._send(409, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
+                        return
                 page = (PAGE.replace("__ITEMS__", items).replace("__TOKEN__", token)
                             .replace("__PREVIEW_FPS__", str(preview_fps))
                             .replace("__PER_SET__", str(PER_SET))
@@ -281,7 +286,9 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
         def do_POST(self):
             try:
                 self._route_post()
-            except (sqlite3.Error, LockBusy) as exc:
+            except PlanError as exc:
+                self._send(409, json.dumps({"error": str(exc)}).encode())
+            except (sqlite3.Error, LockBusy, OSError) as exc:
                 # build_collection.py reads the same database file and
                 # sqlite3.connect only waits 5 s, so "database is locked" is
                 # routine here, not freak. Uncaught it escaped the handler and
@@ -346,7 +353,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                 if not isinstance(targets_raw, list) or not all(
                         isinstance(p, list) and len(p) == 2
                         and isinstance(p[0], str) and isinstance(p[1], int)
-                        and not isinstance(p[1], bool)
+                        and not isinstance(p[1], bool) and 1 <= p[1] <= 9007199254740991
                         for p in targets_raw):
                     self._send(400, b'{"error":"packs must be [key, pack] pairs"}')
                     return
@@ -362,50 +369,58 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                                  "cannot say which emoji it was showing; "
                                  "reload the page and save again"}).encode())
                     return
-                # ``known`` MUST be read under the lock: /api/order sorts
-                # ``view`` in place and CPython empties a list for the duration
-                # of list.sort(), so a save landing in that window saw no known
+                target_keys = [pair[0] for pair in targets_raw]
+                if (len(target_keys) != len(set(target_keys))
+                        or not set(target_keys) <= set(scope_raw)):
+                    self._send(400, b'{"error":"pack targets must be unique and inside known scope"}')
+                    return
+                # `scope_raw` MUST be narrowed under the lock: /api/order sorts
+                # `view` in place and CPython empties a list for the duration of
+                # list.sort(), so a save landing in that window saw no known
                 # keys, intersected the request down to nothing, and
                 # set_inclusion(set()) re-included every row -- discarding the
                 # whole de-selection while still answering {"ok": true}.
                 with lock:
-                    # Two narrowings, for two different reasons. The view is
-                    # what the server currently has; the tab's `known` is what
-                    # this particular page was actually looking at. Only their
+                    # Two narrowings, for two different reasons. `live` is what
+                    # the server currently has; the tab's `known` is what this
+                    # particular page was actually looking at. Only their
                     # intersection is a decision this request is entitled to
                     # make -- everything else keeps whatever the catalog says.
                     live = {v["key"] for v in view if not v.get("isLogo")}
                     scope = set(scope_raw) & live
                     excluded = set(raw) & scope
-                    cat = Catalog(db_path)
-                    try:
+                    # Catalog ownership protects BOTH permanent writes. Releasing
+                    # it before the plan write lets migration re-key the database
+                    # and then receive a brand-new plan with obsolete keys.
+                    with Catalog(db_path) as cat:
+                        current = {it.content_key: it for it in cat.all_items()}
+                        if not scope <= current.keys():
+                            self._send(409, b'{"error":"catalog identities changed; export the draft and reload"}')
+                            return
+                        if not set(target_keys) <= scope:
+                            self._send(400, b'{"error":"pack target is outside the visible catalog"}')
+                            return
+                        previous = read_plan(db_path.parent)
+                        staged = [dict(v, included=v["key"] not in excluded)
+                                  if v["key"] in scope else dict(v) for v in view]
+                        # Old clients may update inclusion, never erase pack intent.
+                        targets = (dict(targets_raw) if "packs" in payload else
+                                   {k: n for k, n in target_map(previous).items() if k in scope})
+                        plan = (merge_plan(previous, staged, targets, scope, PER_SET)
+                                if "packs" in payload or previous is not None else None)
                         # Outside the scope, carry the CURRENT state through.
                         # set_inclusion re-includes every key it is not given,
                         # so a grid that hides finished packs -- or a tab that
-                        # predates an ingest -- would otherwise re-include
-                        # every deselected item it cannot see.
-                        outside_excluded = {
-                            it.content_key for it in cat.all_items()
-                            if not it.included and it.content_key not in scope}
+                        # predates an ingest -- would otherwise re-include every
+                        # deselected item it cannot see.
+                        outside_excluded = {key for key, item in current.items()
+                                            if not item.included and key not in scope}
                         inc, exc = cat.set_inclusion(excluded | outside_excluded)
-                    finally:
-                        cat.close()
-                    for v in view:
-                        if v["key"] in scope:
-                            v["included"] = v["key"] not in excluded
-                    # The layout the owner just saved, written where the step
-                    # that rearranges the real packs can read it. Inside the
-                    # lock and after the inclusion write, so the plan describes
-                    # the state that was actually persisted, never a half of it.
-                    #
-                    # Only when the page actually SENT an opinion. A tab that
-                    # carries no `packs` has said nothing about the layout, and
-                    # treating that as "no moves" would let one stale save
-                    # overwrite a good plan with an empty one.
-                    plan = None
-                    if "packs" in payload:
-                        plan = build_plan(view, dict(targets_raw), PER_SET)
-                        write_plan(db_path.parent, plan)
+                        if plan is not None:
+                            # A failed write returns 503, never an acknowledgement.
+                            # The same scoped request is safe to retry under this lease.
+                            write_plan(db_path.parent, plan)
+                        view[:] = staged
                 body = {"ok": True, "included": inc, "excluded": exc}
                 if plan is not None:
                     body["moves"] = len(plan["moves"])
@@ -437,6 +452,9 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                     if ok:
                         cat = Catalog(db_path)
                         try:
+                            if not set(keys) <= {it.content_key for it in cat.all_items()}:
+                                self._send(409, b'{"error":"catalog identities changed; export the draft and reload"}')
+                                return
                             cat.set_order(keys)
                             cat.set_meta("order_seeded", "1")
                         finally:

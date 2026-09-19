@@ -2085,7 +2085,11 @@ later is a decision nobody made.
   "version": 1,
   "written_utc": "2026-09-19T02:07:19Z",
   "per_set": 200,
+  "targets": [["s:e8dc…", 3], ["s:5cb9…", 1]],
+  "known":    ["s:5cb9…", "s:c0ff…", "s:e8dc…"],
+  "excluded": ["s:c0ff…"],
   "counts": {"1": 199, "2": 197, "3": 199},
+  "logo_slots": {"1": 1, "2": 1, "3": 1},
   "over_capacity": {},
   "moves": [{"key": "s:e8dc…", "label": "refx-nexus-3-round",
              "from_pack": 2, "to_pack": 3}],
@@ -2095,10 +2099,25 @@ later is a decision nobody made.
 
 | Field | What it is |
 |-------|------------|
-| `moves` | Every emoji whose intended pack differs from the one it is live in. This is the work. |
+| `targets` | **The authoritative intent**: every emoji the panel has an opinion about, paired with the pack it should end up in. The server reads this back on load, so a saved move survives a reload. |
+| `moves` | The subset of `targets` whose intended pack differs from the one the emoji is live in — the work, derived for the reader's convenience. `targets` is the source of truth; `moves` is what it means today. |
 | `held` | Every emoji parked in the tray, with the pack it came out of. Not a move — the owner took it out and has not said where it goes; parking one is how room is made for an arriving emoji. |
-| `counts` | Emoji per pack in the intended layout, brand logo included. |
-| `over_capacity` | Packs above `per_set`. Normally empty, because a drop over the cap is refused while curating — but a plan read back later must be able to say so rather than look healthy and fail at publish. |
+| `known` | Every key any save has spoken for. A page shows only part of the catalog, so this records the scope decisions were made in and lets a later partial save merge instead of overwrite. |
+| `excluded` | Every key currently held out of a pack, across all saves — not only the ones the last page could see. |
+| `counts` | Emoji per pack in the intended layout. |
+| `logo_slots` | Packs whose brand logo consumes one of the 200 slots. The logo is emoji 0 of **each** pack, not once per family, so capacity has to count it per pack. |
+| `over_capacity` | Packs whose `counts` plus `logo_slots` exceed `per_set`. Normally empty, because a drop over the cap is refused while curating — but a plan read back later must be able to say so rather than look healthy and fail at publish. |
+
+A **partial save merges**: a page that can see only some of the catalog replaces
+the decisions inside its own scope and leaves every other decision in the file
+untouched. That is why `targets`, `known` and `excluded` are whole-catalog while
+`moves` and `held` read as a to-do list. A plan written by an older panel that
+carries only `moves` is still understood — its moves are read as the intent.
+
+An unreadable `pack_plan.json` is never silently replaced with an empty one: the
+panel refuses to load and names the file, because discarding saved intent to
+keep the page opening is the worse failure. Repair or move the file, then
+reload.
 
 An emoji the page carried no pack for is **absent** from the plan entirely:
 saying nothing and saying "leave it" are different claims, and only the first

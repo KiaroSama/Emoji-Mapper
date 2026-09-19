@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import shutil
 import tempfile
 import unittest
@@ -32,8 +33,12 @@ def encode(directory: Path, name: str, frames: list[bytes], *, pts: str = "") ->
     source = directory / (name + ".rgba")
     source.write_bytes(b"".join(frames))
     out = directory / (name + ".webm")
+    # Preserve the intended VFR timestamps AND a real final-frame duration.
+    # FFmpeg 7 otherwise writes duration == final PTS (zero terminal duration),
+    # correctly rejected by the production fail-closed timeline reader.
     timing = ["-vf", "settb=1/1000,setpts=" + pts,
-              "-fps_mode", "passthrough", "-enc_time_base", "1/1000"] if pts else []
+              "-fps_mode", "passthrough", "-enc_time_base", "1/1000",
+              "-bsf:v", "setts=duration=33"] if pts else []
     media._run([media.ffmpeg_path(), "-y", "-v", "error", "-f", "rawvideo",
                 "-pixel_format", "rgba", "-video_size", "100x100", "-framerate", "30",
                 "-i", str(source), *timing, "-c:v", "libvpx-vp9", "-threads", "1",
@@ -136,6 +141,42 @@ class NativeVideoBoundaries(unittest.TestCase):
                 self.assertIs(identity.same_image(self.clips[a], self.clips[b], "video"), False)
         self.assertIs(identity.same_image(self.clips["short"], self.clips["red"], "video"), True)
         self.assertIs(identity.same_image(self.clips["red"], self.clips["short"], "video"), True)
+
+    def test_sample_cache_does_not_alias_relative_paths_in_different_directories(self):
+        size = max(self.clips["red"].stat().st_size, self.clips["first"].stat().st_size)
+        for folder, name in (("one", "red"), ("two", "first")):
+            target = self.root / folder / "clip.webm"
+            target.parent.mkdir()
+            body = self.clips[name].read_bytes()
+            target.write_bytes(body + b"\0" * (size - len(body)))
+            os.utime(target, ns=(1700000000000000000, 1700000000000000000))
+        before = Path.cwd()
+        try:
+            video_decode._frame_cache.clear()
+            os.chdir(self.root / "one")
+            first = video_decode.frames_rgba(Path("clip.webm"), fps=30)
+            os.chdir(self.root / "two")
+            second = video_decode.frames_rgba(Path("clip.webm"), fps=30)
+            video_decode._frame_cache.clear()
+            self.assertEqual(second, video_decode.frames_rgba(Path("clip.webm"), fps=30))
+            self.assertNotEqual(first, second)
+        finally:
+            os.chdir(before)
+            video_decode._frame_cache.clear()
+
+    def test_sample_cache_revalidates_after_toolchain_change(self):
+        video_decode.frames_rgba(self.clips["red"])
+        with mock.patch.object(video_decode, "_ffmpeg_identity", return_value=("changed", 1, 2)), \
+                mock.patch.object(video_decode, "decoder_args", side_effect=media.MediaError("decoder unavailable")):
+            with self.assertRaisesRegex(media.MediaError, "decoder unavailable"):
+                video_decode.frames_rgba(self.clips["red"])
+
+    def test_vfr_fixture_has_complete_native_timing_evidence(self):
+        _raw, times, duration = video_decode.timeline_rgba(self.clips["vfr"])
+        self.assertEqual(len(times), 4)
+        self.assertAlmostEqual(times[2] - times[1], 0.010, places=3)
+        self.assertGreater(duration, times[-1])
+        self.assertAlmostEqual(duration, 1.0, places=3)
 
     def test_native_first_last_and_variable_rate_frames_cannot_disappear(self):
         for name in ("first", "middle", "last", "vfr"):
