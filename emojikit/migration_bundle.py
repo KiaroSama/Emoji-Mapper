@@ -274,7 +274,12 @@ def restore(data_dir, doc, write_journal):
         write_json_atomic(Path(data_dir) / name, values["before"])
     src, dst = sqlite3.connect(doc["backup"]), sqlite3.connect(doc["catalog"])
     try:
-        sqlite_snapshot.backup(src, dst)
+        # The destination here is the live catalog, not a scratch file: the
+        # capture budget would abort a slow rollback part-way through it. The
+        # signature check below still catches that, and the journal already
+        # records direction="restore" so a re-run finishes the job -- but the
+        # honest fix is not to give up on the owner's catalog after 30 s.
+        sqlite_snapshot.backup(src, dst, timeout=sqlite_snapshot.RESTORE_TIMEOUT)
     finally:
         dst.close()
         src.close()

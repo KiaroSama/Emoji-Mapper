@@ -6,6 +6,12 @@ import sqlite3
 import time
 
 BACKUP_TIMEOUT = 30.0
+# Rollback writes onto the LIVE catalog, and an interrupted online backup leaves
+# its destination incomplete. Waiting out a competing reader is recoverable;
+# abandoning the restore half-written is what the bundle exists to prevent, so
+# this path trades a long wait for never aborting mid-write at the 30 s mark.
+# Still bounded: an indefinite hang is what P06 set out to remove.
+RESTORE_TIMEOUT = 900.0
 
 
 class BackupTimeout(RuntimeError):

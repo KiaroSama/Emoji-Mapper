@@ -105,7 +105,11 @@ def read_plan(data_dir: Path) -> dict | None:
             raise ValueError("pack numbers must be positive integers")
         return doc
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise PlanError(f"cannot read {PLAN_NAME}; preserve and repair it: {exc}") from exc
+        # Name the exact file. This refusal also blocks the page itself, so the
+        # only way out is editing or moving that file -- a message that says
+        # only "pack_plan.json" leaves the owner hunting for which data
+        # directory the panel was started against.
+        raise PlanError(f"cannot read {path}; preserve and repair it: {exc}") from exc
 
 
 def target_map(plan: dict | None) -> dict[str, int]:
