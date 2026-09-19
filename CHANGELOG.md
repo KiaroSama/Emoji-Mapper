@@ -46,7 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path and include the FFmpeg identity the samples were decoded with.
 - **Native Windows now has its own CI job**, covering locks, migration and
   restore, HTTP persistence, video identity and the CLI contracts — paths that
-  Linux and WSL do not exercise.
+  Linux and WSL do not exercise. Which suites belong there is a judgement rather
+  than a property of the code, so each one declares `RUNS_ON_NATIVE_WINDOWS` and
+  `tests/test_ci_coverage.py` enforces the match in both directions: a marked
+  suite missing from the job, and a name in the job that no longer marks itself,
+  each fail.
+- **A saved plan no longer grows forever.** Decisions about emoji the catalog no
+  longer holds are dropped on the next save, checked against the database under
+  the same lease that writes the plan. Previously every out-of-scope key was
+  kept unconditionally, so a long-lived catalog accumulated dead entries that
+  still counted toward a pack's total and could report a false `over_capacity`.
 
 ### Changed - relicensed under the GNU GPL v3 or later
 
