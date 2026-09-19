@@ -109,7 +109,8 @@ def packs_named(data_dir: Path, wanted: set[int]) -> dict[str, int]:
 
 def build_view(cat: Catalog, bot_username: str = "",
                show_published: bool = False,
-               keep_sets: dict[str, int] | None = None) -> tuple[list[dict], dict, int]:
+               keep_sets: dict[str, int] | None = None, *,
+               seed_order: bool = True) -> tuple[list[dict], dict, int]:
     """The cards to render, and where each one's file lives.
 
     An emoji already live in a pack is hidden by default: the grid is what the
@@ -138,7 +139,7 @@ def build_view(cat: Catalog, bot_username: str = "",
     # First time only: seed the manual order with the look-alike-grouped
     # similarity order (a nice starting point). After that, always use the saved
     # position order so the user's drag-drop arrangement is what shows/publishes.
-    if cat.get_meta("order_seeded") != "1":
+    if seed_order and cat.get_meta("order_seeded") != "1":
         seeded = order_by_similarity(cat.all_items())
         cat.set_order([it.content_key for it in seeded])
         cat.set_meta("order_seeded", "1")

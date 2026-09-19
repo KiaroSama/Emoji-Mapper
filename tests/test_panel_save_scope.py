@@ -22,6 +22,8 @@ between the page and the server, and only both halves together can show it.
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 import threading
@@ -81,8 +83,10 @@ class SaveScope(unittest.TestCase):
             return exc.code, json.loads(exc.read() or b"{}")
 
     def excluded_now(self):
-        with Catalog(self.db) as cat:
-            return {it.content_key for it in cat.all_items() if not it.included}
+        # Observe committed state; do not contend for a writer lease just
+        # because the HTTP thread is unwinding after a refusal response.
+        with closing(sqlite3.connect(self.db.as_uri() + "?mode=ro", uri=True)) as con:
+            return {row[0] for row in con.execute("SELECT content_key FROM items WHERE included=0")}
 
     def test_an_ordinary_in_scope_save_still_works(self):
         scope = [self.key(i) for i in range(3)]
@@ -141,12 +145,14 @@ class SaveScope(unittest.TestCase):
                 code, _ = self.post({"excluded": [], "known": bad})
                 self.assertEqual(code, 409)
 
-    def test_a_scope_naming_unknown_keys_is_harmless(self):
-        """A tab can hold a key the catalog no longer has -- an item removed
-        between loads. It is intersected away, not treated as an instruction."""
-        code, _ = self.post({"excluded": [],
-                             "known": [self.key(0), "s:vanished", "nonsense"]})
-        self.assertEqual(code, 200)
+    def test_a_stale_scope_is_refused_without_applying_even_its_valid_subset(self):
+        # A success acknowledges the submitted body, not a silently narrowed
+        # subset. Previously this test accepted 200 but never checked an edit.
+        code, body = self.post({"excluded": [self.key(0), "s:vanished"],
+                               "known": [self.key(0), "s:vanished", "nonsense"]})
+        self.assertEqual(code, 409)
+        self.assertIn("reload", body["error"])
+        self.assertEqual(self.excluded_now(), set())
 
     def test_an_unknown_field_is_still_rejected(self):
         code, body = self.post({"excluded": [], "known": [], "wat": 1})
