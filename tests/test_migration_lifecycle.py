@@ -172,6 +172,7 @@ class MigrationCannotCertifyDamage(MigrationCase):
 
     def test_existing_link_after_interruption_is_replayed_without_losing_bytes(self):
         src, dest = self.pending()
+        original = src.read_bytes()
         link = bundle.os.link
 
         def stop(*args, **kwargs):
@@ -184,7 +185,12 @@ class MigrationCannotCertifyDamage(MigrationCase):
         with self.decode():
             self.assertEqual(self.cli("migrate-video-keys", "--apply"), ir.EXIT_OK)
         self.assertFalse(src.exists())
-        self.assertEqual(self.cat.col("items", "file_path"), [str(dest)])
+        # Migration stores resolved paths. Windows TEMP may use RUNNER~1 while
+        # resolve() records its long runneradmin spelling; these name one file.
+        paths = self.cat.col("items", "file_path")
+        self.assertEqual(paths, [str(dest.resolve())])
+        self.assertTrue(Path(paths[0]).samefile(dest))
+        self.assertEqual(Path(paths[0]).read_bytes(), original)
 
     def test_partial_legacy_migration_requires_full_backup_coverage(self):
         src, dest = self.pending()
