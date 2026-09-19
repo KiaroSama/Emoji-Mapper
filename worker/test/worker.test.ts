@@ -544,7 +544,7 @@ describe("the reverse lookup: ids in, emoji out", () => {
     });
     const env = ENV;
     await worker.fetch(webhookReq("/tg/general", "general-hook-secret", {
-      message: { ...msgFrom(42), text: `${ID_A}, ${ID_B}` },
+      update_id: 51, message: { ...msgFrom(42), text: `${ID_A}, ${ID_B}` },
     }), env, CTX);
     expect(calls.some((c) => c.method === "getCustomEmojiStickers")).toBe(true);
     const sends = calls.filter((c) => c.method === "sendMessage");
@@ -572,7 +572,7 @@ describe("the reverse lookup: ids in, emoji out", () => {
                           { headers: { "Content-Type": "application/json" } });
     });
     await worker.fetch(webhookReq("/tg/general", "general-hook-secret", {
-      message: { ...msgFrom(42), text: `${ID_A} ${ID_B}` },
+      update_id: 52, message: { ...msgFrom(42), text: `${ID_A} ${ID_B}` },
     }), ENV, CTX);
     const text = String(calls.filter((c) => c.method === "sendMessage")[0].body.text);
     expect(text).toContain("does not know");
