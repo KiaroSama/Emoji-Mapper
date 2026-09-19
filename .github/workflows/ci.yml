@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 
-# Every job runs on GitHub-HOSTED `ubuntu-latest`. This account's hosted
+# Jobs use ephemeral GitHub-HOSTED Ubuntu/Windows runners. This account's hosted
 # minutes are blocked for PRIVATE repositories, which is why CI used to run on
 # a self-hosted WSL runner; hosted minutes are free for PUBLIC ones, so the
 # block stopped applying when this repository was published.
@@ -188,3 +188,41 @@ jobs:
                                  timeout=30, stdin=subprocess.DEVNULL)
           sys.exit(r.returncode)
           PY
+
+  # Native Windows ownership and restore are not exercised by Linux or WSL.
+  # Keep this on an ephemeral hosted runner; never restore the public repo's
+  # former self-hosted runner merely to obtain Windows coverage.
+  windows-safety:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install isolated test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-coins.txt
+      - name: Require native Windows and FFmpeg
+        shell: pwsh
+        run: |
+          python -c "import os; assert os.name == 'nt'"
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:PATH = [Environment]::GetEnvironmentVariable('PATH','Machine') + ';' + $env:PATH
+          }
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            throw 'ffmpeg and ffprobe are required for native Windows regressions'
+          }
+      - name: Native lock, migration, HTTP persistence, identity and CLI regressions
+        run: >-
+          python -m unittest
+          tests.test_pack_locks tests.test_pack_locks_exclusion
+          tests.test_migration_lifecycle tests.test_migration_provenance
+          tests.test_state_artifacts tests.test_sqlite_snapshot
+          tests.test_panel_intent_persistence tests.test_video_collision_ingest
+          tests.test_entry_point_contracts -v

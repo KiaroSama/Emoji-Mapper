@@ -71,7 +71,7 @@ _available: dict[tuple[str, tuple[str, int, int]], bool] = {}
 # entry. Bounded because a sample stream is ~0.5 MB and an ingest walks
 # thousands of files: this is a working set, not a store.
 _FRAME_CACHE_MAX = 8
-_frame_cache: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
+_frame_cache: OrderedDict[tuple[str, int, int, int, tuple[str, int, int]], bytes] = OrderedDict()
 _timeline_cache: OrderedDict[tuple, tuple[bytes, tuple[float, ...], float]] = OrderedDict()
 MAX_NATIVE_FRAMES = 128
 
@@ -158,7 +158,7 @@ def decoder_args(path: Path) -> list[str]:
     ffmpeg = _ffmpeg_identity()
     try:
         st = path.stat()
-        cache_key = (str(path), st.st_size, st.st_mtime_ns, ffmpeg)
+        cache_key = (str(path.resolve()), st.st_size, st.st_mtime_ns, ffmpeg)
     except OSError:
         cache_key = None
     if cache_key is not None and cache_key in _decoder_cache:
@@ -219,7 +219,9 @@ def frames_rgba(path: Path, fps: int = SAMPLE_FPS) -> bytes:
     path = Path(path)
     try:
         st = path.stat()
-        cache_key = (str(path), st.st_size, st.st_mtime_ns, fps)
+        # The same relative name in another working directory is another file;
+        # cached pixels also belong to a particular decoder toolchain.
+        cache_key = (str(path.resolve()), st.st_size, st.st_mtime_ns, fps, _ffmpeg_identity())
     except OSError:
         cache_key = None
     if cache_key is not None and cache_key in _frame_cache:

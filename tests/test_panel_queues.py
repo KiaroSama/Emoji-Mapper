@@ -302,3 +302,101 @@ class AHangingRequestDoesNotWedgeTheQueue(PanelQueueCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompleteSaveSnapshots(PanelQueueCase):
+    """Pack intent is part of the same immutable revision as inclusion."""
+
+    def test_pack_only_edits_are_dirty_and_the_old_ack_does_not_clear_them(self):
+        page = self.open(items=fx.synth(6, packs=[1, 1, 1, 2, 2, 2]), clock=True)
+        page.evaluate("__save(); ITEMS[1].pack=2; markSelDirty(); __settle(0,200)")
+        page.clock.run_for(20)
+        self.assertTrue(page.evaluate("selDirty() && __unload() && __dirtyShown()"))
+        page.evaluate("__save(); __settle(1,200)")
+        page.clock.run_for(20)
+        self.assertFalse(page.evaluate("selDirty() || __unload()"))
+
+    def test_retry_does_not_submit_new_pack_intent_without_another_save(self):
+        page = self.open(items=fx.synth(6, packs=[1, 1, 1, 2, 2, 2]), clock=True)
+        page.evaluate("__save(); __settle(0,503)")
+        page.clock.run_for(20)
+        page.evaluate("ITEMS[1].pack=2; markSelDirty()")
+        page.clock.run_for(1100)
+        calls = self.sent(page, "/api/save")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["body"], calls[1]["body"])
+        page.evaluate("__settle(1,200)")
+        page.clock.run_for(20)
+        self.assertTrue(page.evaluate("selDirty() && __unload()"))
+
+    def test_new_pack_only_body_outlives_old_permanent_refusal(self):
+        for status in (400, 409):
+            with self.subTest(status=status):
+                page = self.open(items=fx.synth(6, packs=[1, 1, 1, 2, 2, 2]), clock=True)
+                page.evaluate(f"__save(); ITEMS[1].pack=2; __save(); __settle(0,{status})")
+                page.clock.run_for(20)
+                self.assertEqual(len(self.sent(page, "/api/save")), 2)
+                page.evaluate("__settle(1,503)")
+                page.clock.run_for(1100)
+                calls = self.sent(page, "/api/save")
+                self.assertEqual(calls[1]["body"], calls[2]["body"])
+                page.evaluate("__settle(2,200)")
+                page.clock.run_for(20)
+                self.assertFalse(page.evaluate("selDirty() || __unload()"))
+
+    def test_reset_restores_the_absence_of_a_pack_assignment(self):
+        page = self.open(items=fx.synth(6), clock=True)
+        page.evaluate("remember(); ITEMS[1].pack=2; markSelDirty(); document.getElementById('resetAll').click()")
+        self.assertFalse(page.evaluate("Object.hasOwn(ITEMS[1], 'pack')"))
+        self.assertFalse(page.evaluate("selDirty()"))
+        page.evaluate("undo()")
+        self.assertEqual(page.evaluate("ITEMS[1].pack"), 2)
+        page.evaluate("redo()")
+        self.assertFalse(page.evaluate("Object.hasOwn(ITEMS[1], 'pack')"))
+
+
+class AcknowledgementsMustBeComplete(PanelQueueCase):
+    def test_invalid_success_bodies_keep_both_queues_pending_and_retryable(self):
+        for kind in ("order", "save"):
+            for body in ("null", "[]", "{}", "{ok:false}", "{ok:true,count:-1}"):
+                with self.subTest(queue=kind, body=body):
+                    page = self.open(items=fx.synth(6), clock=True)
+                    page.evaluate("__reorder(0,3)" if kind == "order" else "__toggle(1);__save()")
+                    page.clock.run_for(450)
+                    page.evaluate(f"__net.calls[0].res({{ok:true,status:200,json:()=>Promise.resolve({body})}})")
+                    page.clock.run_for(20)
+                    pending, flight = ("pendingOrder", "orderFlight") if kind == "order" else ("pendingSel", "selFlight")
+                    self.assertTrue(page.evaluate(f"{pending}!==null && {flight}===0 && __unload()"))
+                    page.clock.run_for(1100)
+                    self.assertEqual(len(self.sent(page, f"/api/{kind}")), 2)
+                    page.evaluate("__settle(1,200)")
+                    page.clock.run_for(20)
+                    self.assertIsNone(page.evaluate(pending))
+                    self.assertEqual(page.evaluate("__rejections"), [])
+
+    def test_hanging_success_body_and_json_parse_error_do_not_acknowledge(self):
+        for kind in ("order", "save"):
+            for outcome in ("new Promise(()=>{})", "Promise.reject(new SyntaxError('truncated'))"):
+                with self.subTest(queue=kind, outcome=outcome):
+                    page = self.open(items=fx.synth(6), clock=True)
+                    page.evaluate("__reorder(0,3)" if kind == "order" else "__toggle(1);__save()")
+                    page.clock.run_for(450)
+                    page.evaluate(f"__net.calls[0].res({{ok:true,status:200,json:()=>{outcome}}})")
+                    page.clock.run_for(15050 if outcome.startswith("new") else 20)
+                    pending = "pendingOrder" if kind == "order" else "pendingSel"
+                    self.assertIsNotNone(page.evaluate(pending))
+                    self.assertTrue(page.evaluate("__unload()"))
+                    self.assertEqual(page.evaluate("__rejections"), [])
+
+    def test_malformed_error_body_does_not_wedge_a_flight_or_loop_permanently(self):
+        for kind in ("order", "save"):
+            page = self.open(items=fx.synth(6), clock=True)
+            page.evaluate("__reorder(0,3)" if kind == "order" else "__toggle(1);__save()")
+            page.clock.run_for(450)
+            page.evaluate("__net.calls[0].res({ok:false,status:400,json:()=>Promise.resolve(null)})")
+            page.clock.run_for(60000)
+            self.assertEqual(len(self.sent(page, f"/api/{kind}")), 1)
+            flight = "orderFlight" if kind == "order" else "selFlight"
+            self.assertEqual(page.evaluate(flight), 0)
+            self.assertTrue(page.evaluate("__unload()"))
+            self.assertEqual(page.evaluate("__rejections"), [])

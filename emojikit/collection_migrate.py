@@ -19,6 +19,7 @@ from pathlib import Path
 from emojikit import packstate
 from emojikit import identity
 from emojikit import migration_bundle as bundle
+from emojikit import sqlite_snapshot, state_artifacts
 from emojikit.maintenance import JOURNAL_NAME, maintenance
 # The signed-storage conversion is imported, never re-implemented: a 64-bit
 # hash that overflowed SQLite's signed range once dropped rows from this very
@@ -174,15 +175,21 @@ def backup_catalog(db: Path) -> Path:
     else:
         raise RuntimeError(f"cannot find an unused backup name beside {db}")
 
-    src = sqlite3.connect(db)
-    dst = sqlite3.connect(dest)
     try:
-        with dst:
-            src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
-    _verify_backup(db, dest)
+        src = sqlite3.connect(db)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                sqlite_snapshot.backup(src, dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        _verify_backup(db, dest)
+    except BaseException:
+        for path in (dest, Path(str(dest) + "-wal"), Path(str(dest) + "-shm")):
+            path.unlink(missing_ok=True)
+        raise
     return dest
 
 
@@ -262,7 +269,7 @@ def _apply_database(db: Path, key_map: dict[str, str],
 
 def state_files(data_dir: Path) -> list[Path]:
     """Every publisher artifact that names content keys."""
-    return sorted(data_dir.glob("publish_*.json"))
+    return state_artifacts.state_files(data_dir)
 
 
 def _remap(node, key_map: dict[str, str]):
@@ -287,7 +294,8 @@ def _apply_state(data_dir: Path, key_map: dict[str, str], states=None) -> list[s
             raise RuntimeError(
                 f"{path.name} could not be read ({exc}); refusing to leave it "
                 f"naming keys the catalog no longer has") from exc
-        fresh = _remap(doc, key_map)
+        fresh = (state_artifacts.remap_plan(doc, key_map)
+                 if path.name == state_artifacts.PACK_PLAN_NAME else _remap(doc, key_map))
         if states is not None:
             fresh = states[path.name]["after"]
         if fresh != doc:
@@ -346,7 +354,10 @@ def apply_migration(data_dir: Path, sv: Survey | None = None,
             states = {}
             for path in state_files(data_dir):
                 original = json.loads(path.read_text(encoding="utf-8"))
-                states[path.name] = {"before": original, "after": _remap(original, key_map)}
+                fresh = (state_artifacts.remap_plan(original, key_map)
+                         if path.name == state_artifacts.PACK_PLAN_NAME
+                         else _remap(original, key_map))
+                states[path.name] = {"before": original, "after": fresh}
             backup = backup_catalog(db)
             phashes = {key: _phash_to_db(value) for key, value in sv.phashes.items()}
             doc = bundle.make_bundle(data_dir, backup, key_map, phashes, files, states)
@@ -484,7 +495,10 @@ def stale_state_keys(data_dir: Path) -> dict[str, list[str]]:
             out[path.name] = ["<unreadable>"]
             continue
         found: set[str] = set()
-        _collect_keys(doc, found)
+        if path.name == state_artifacts.PACK_PLAN_NAME:
+            found.update(state_artifacts.plan_keys(doc))
+        else:
+            _collect_keys(doc, found)
         stale = sorted(k for k in found if k not in known)
         if stale:
             out[path.name] = stale
@@ -511,7 +525,10 @@ def required_state_keys(data_dir: Path) -> dict[str, list[str]]:
             out[path.name] = ["<invalid state>"]
             continue
         found = set()
-        _collect_keys({k: v for k, v in doc.items() if k != "skipped"}, found)
+        if path.name == state_artifacts.PACK_PLAN_NAME:
+            found.update(state_artifacts.plan_keys(doc))
+        else:
+            _collect_keys({k: v for k, v in doc.items() if k != "skipped"}, found)
         stale = sorted(found - known)
         if stale:
             out[path.name] = stale
