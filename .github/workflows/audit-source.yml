@@ -1,0 +1,34 @@
+name: Audit source snapshot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: startsWith(github.head_ref, 'audit/2026-09-19-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Archive only committed files, before running any repository code.
+      # Local credentials, Git configuration, logs and runtime data are not included.
+      - name: Capture the exact source under review
+        run: |
+          mkdir -p "$RUNNER_TEMP/audit-source"
+          git archive --format=tar --output="$RUNNER_TEMP/audit-source/source.tar" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/audit-source/commit.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/audit-source/tree.txt"
+          cd "$RUNNER_TEMP/audit-source"
+          sha256sum source.tar > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-source-${{ github.sha }}
+          path: ${{ runner.temp }}/audit-source/
+          retention-days: 3
+          if-no-files-found: error
