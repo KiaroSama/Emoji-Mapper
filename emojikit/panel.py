@@ -406,7 +406,12 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                         # Old clients may update inclusion, never erase pack intent.
                         targets = (dict(targets_raw) if "packs" in payload else
                                    {k: n for k, n in target_map(previous).items() if k in scope})
-                        plan = (merge_plan(previous, staged, targets, scope, PER_SET)
+                        # `current` comes from the database under this lease, so
+                        # the merge can drop decisions about emoji that are gone
+                        # instead of carrying them forever. The render view
+                        # cannot answer that: it hides published packs by design.
+                        plan = (merge_plan(previous, staged, targets, scope,
+                                           PER_SET, live=set(current))
                                 if "packs" in payload or previous is not None else None)
                         # Outside the scope, carry the CURRENT state through.
                         # set_inclusion re-includes every key it is not given,
