@@ -111,6 +111,9 @@ class CurationControls(unittest.TestCase):
                 const it = ITEMS.find(x => !x.included && !x.isLogo);
                 const from = it.pack;
                 const other = packStarts().starts.find(s => s.pack !== from);
+                // What `dragstart` does on the real path: without it the drop
+                // leaves no history entry and Undo pops the hold instead.
+                remember();
                 ITEMS.splice(ITEMS.indexOf(it), 1);
                 ITEMS.splice(other.index + 1, 0, it);
                 holdDragKeys = new Set([it.key]);
@@ -132,9 +135,11 @@ class CurationControls(unittest.TestCase):
         # Undo has to take the stamp back too, or the move looks reverted on
         # screen while the emoji still claims the pack it was moved into.
         page.click("#undo")
+        self.assertEqual(page.locator("#holdCards .hcard").count(), 1,
+                         "undo puts the emoji back in the tray")
         self.assertEqual(
             page.evaluate("() => ITEMS.find(x => !x.included && !x.isLogo).pack"),
-            moved["from"])
+            moved["from"], "undo must roll the pack stamp back as well")
 
     def test_a_full_destination_pack_refuses_the_drop_and_points_at_the_tray(self):
         """Packs are fixed 200-emoji buckets, so a full one takes nothing.
