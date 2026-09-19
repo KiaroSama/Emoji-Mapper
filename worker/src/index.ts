@@ -35,12 +35,21 @@ function botConfig(env: Env, bot: BotName): { token: string; secret: string } {
     : { token: env.COIN_BOT_TOKEN, secret: env.COIN_WEBHOOK_SECRET };
 }
 
+/** JSON parsing does not prove the required envelope, even after authentication.
+ * Only validate fields this dispatcher requires; future update types stay valid.
+ */
+function isUpdateEnvelope(value: unknown): value is TgUpdate {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const id = (value as Record<string, unknown>).update_id;
+  return typeof id === "number" && Number.isSafeInteger(id) && id >= 0;
+}
+
 async function onWebhook(request: Request, env: Env, ctx: ExecutionContext,
                          bot: BotName): Promise<Response> {
   const { token, secret } = botConfig(env, bot);
   if (!verifyWebhook(request, secret)) {
-    // 401, not 403: this is an authentication failure, and Telegram will not
-    // retry a 4xx -- which is what we want for a request Telegram did not send.
+    // 401 identifies an authentication failure. Do not assume that Telegram
+    // suppresses retries on 4xx; no authenticated action is allowed here.
     // Recorded, but never forwarded to the channel: this URL is public, and a
     // scanner walking the internet would otherwise flood it.
     ctx.waitUntil(log(env, { bot, level: "WARNING", event: "unauthorized",
@@ -53,10 +62,14 @@ async function onWebhook(request: Request, env: Env, ctx: ExecutionContext,
     return OK();          // 200: retrying will not conjure a token
   }
 
-  let update: TgUpdate;
+  let update: unknown;
   try {
     update = await request.json();
   } catch {
+    return new Response("bad request", { status: 400 });
+  }
+
+  if (!isUpdateEnvelope(update)) {
     return new Response("bad request", { status: 400 });
   }
 
