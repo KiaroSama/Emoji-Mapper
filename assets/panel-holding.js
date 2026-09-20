@@ -244,7 +244,14 @@ function canUnhold(keys,atDrop=false){
     // the whole point of the gesture. Reading `assignments` here instead asked
     // whether the emoji's OWN pack had room -- so moving one out of a full pack
     // into a roomy one was refused, and moving into a full one was allowed.
-    const destination=atDrop?runPackAt(ITEMS.indexOf(it),new Set(keys)):null;
+    // The aimed pack answers it now, for the same reason the stamp uses it: at
+    // a boundary the resting place names the pack above, not the one aimed at.
+    // Only when NOTHING was aimed at does capacity fall back to the resting
+    // place -- the guard must keep asking, and `undefined` is tested rather
+    // than `??` because `null` is a real answer (a run with no number yet).
+    const destination=atDrop
+      ? (aimedPack!==undefined?aimedPack:runPackAt(ITEMS.indexOf(it),new Set(keys)))
+      : null;
     const origin=atDrop?{pack:destination??assignments.get(key)}
                        :holdOrigins.get(key)||{pack:assignments.get(key)};
     const count=(counts.get(origin.pack)||0)+1;
@@ -310,7 +317,7 @@ holding.addEventListener('drop',e=>{
 holdCards.addEventListener('dragstart',e=>{
   const card=e.target.closest('.hcard');
   if(!card||e.target.closest('button')||e.target.closest('.pick')){e.preventDefault();return;}
-  dragKey=card.dataset.key;dragSnap=snapshot();
+  dragKey=card.dataset.key;dragSnap=snapshot();aimedPack=undefined;
   // Dragging a PICKED held card carries every picked held emoji, the same way
   // the grid carries a picked run; an unpicked one stays the single gesture.
   const many=heldPicked();
@@ -341,29 +348,39 @@ function runPackAt(index,ignore){
   for(let i=index+1;i<ITEMS.length;i++){const p=settled(i);if(p!=null)return p;}
   return null;
 }
-function acceptHeldDrop(){
-  if(!holdDragKeys)return true;
-  const keys=[...holdDragKeys];
-  if(!canUnhold(keys,true))return false;
-  // THE PANEL STATES THE INTENDED LAYOUT. It is not a mirror of what is live
-  // on Telegram: the owner drags an emoji into the pack they want it to end up
-  // in, saves, and the publish step performs the real move afterwards. So a
-  // cross-pack drop is accepted -- and the emoji must be RE-STAMPED into the
-  // destination pack. Without the stamp `packStarts()` re-groups it by its old
-  // pack number, it becomes a one-card run still labelled with the pack it came
-  // from, and the drag reads as having snapped back. Capacity is the only thing
-  // a drop refuses, above; that is what the holding tray is for -- park one,
-  // then bring the replacement in.
-  const restamp=[], dropped=new Set(keys);
+/** Accept a drop on the grid: every drop, from the tray or from the grid.
+ *
+ *  THE PANEL STATES THE INTENDED LAYOUT. It is not a mirror of what is live on
+ *  Telegram: the owner drags an emoji into the pack they want it to end up in,
+ *  saves, and the publish step performs the real move afterwards. So a
+ *  cross-pack drop is accepted -- and the emoji must be RE-STAMPED into the
+ *  destination pack. Without the stamp `packStarts()` re-groups it by its old
+ *  pack number, it becomes a one-card run still labelled with the pack it came
+ *  from, and the drag reads as having snapped back.
+ *
+ *  ONE path, for both sources. This used to return early for anything that was
+ *  not a held card, so a grid-to-grid drag never re-stamped: an emoji carried
+ *  from pack 1 into the middle of pack 4 kept pack 1 and CUT PACK 4 IN TWO.
+ *  Capacity is still the only thing a drop refuses -- that is what the holding
+ *  tray is for: park one, then bring the replacement in. */
+function acceptDrop(){
+  const keys=[...(holdDragKeys||carried)];
+  if(holdDragKeys&&!canUnhold(keys,true))return false;
   for(const k of keys){
     const it=ITEMS.find(x=>x.key===k);
-    if(!it||it.isLogo||it.included)continue;
-    const target=runPackAt(ITEMS.indexOf(it),dropped);
-    if(typeof target==='number'&&target!==it.pack)restamp.push([it,target]);
+    if(!it||it.isLogo)continue;
+    // A number is the destination; `null` is a run with no number yet, and the
+    // emoji must join it by LOSING its own -- carrying an old number there is
+    // what cut a false run inside a pack that has not been published. Nothing
+    // aimed at, nothing stamped.
+    if(typeof aimedPack==='number'){ if(it.pack!==aimedPack)it.pack=aimedPack; }
+    else if(aimedPack===null&&it.pack!=null) delete it.pack;
   }
-  for(const [it,target] of restamp)it.pack=target;
-  for(const k of holdDragKeys)setIncluded(ITEMS.find(x=>x.key===k),true);
-  holdDragKeys=null;relayout();updateCount();markSelDirty();return true;
+  if(holdDragKeys){
+    for(const k of holdDragKeys)setIncluded(ITEMS.find(x=>x.key===k),true);
+    holdDragKeys=null;
+  }
+  relayout();updateCount();markSelDirty();return true;
 }
 holdCards.addEventListener('dragend',()=>{holdDragKeys=null;});
 

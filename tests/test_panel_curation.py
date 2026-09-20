@@ -16,7 +16,14 @@ def tearDownModule():
     H.stop()
 
 
-class CurationControls(unittest.TestCase):
+class PanelPage:
+    """The shared `open`, and deliberately NOT a TestCase.
+
+    Every class below used to inherit from `CurationControls`, which IS one, so
+    unittest collected its nine tests again for each subclass: ten new tests ran
+    as thirty-seven. A mixin shares the fixture without sharing the suite.
+    """
+
     def open(self, items=None, **kwargs):
         if items is None:
             from emojikit.catalog import Catalog
@@ -29,6 +36,8 @@ class CurationControls(unittest.TestCase):
         page.set_default_timeout(5000)
         return page
 
+
+class CurationControls(PanelPage, unittest.TestCase):
     def test_toolbar_does_not_cover_brand_or_save_at_desktop_widths(self):
         page = self.open(fx.synth(12))
         for width in (1920, 1200):
@@ -114,10 +123,16 @@ class CurationControls(unittest.TestCase):
                 // What `dragstart` does on the real path: without it the drop
                 // leaves no history entry and Undo pops the hold instead.
                 remember();
+                holdDragKeys = new Set([it.key]);
+                carried.clear(); carried.add(it.key);
+                // And what `dragover` does. The pack comes from the card the
+                // pointer is ON, so a test that skips this is testing a drop
+                // that cannot happen -- nothing was aimed at, so by design
+                // nothing is stamped.
+                aimAt(other.index);
                 ITEMS.splice(ITEMS.indexOf(it), 1);
                 ITEMS.splice(other.index + 1, 0, it);
-                holdDragKeys = new Set([it.key]);
-                const accepted = acceptHeldDrop();
+                const accepted = acceptDrop();
                 return {accepted, from, into: other.pack, now: it.pack,
                         included: it.included,
                         assigned: assignedPacks().get(it.key),
@@ -156,11 +171,13 @@ class CurationControls(unittest.TestCase):
             """() => {
                 const it = ITEMS.find(x => !x.included && !x.isLogo);
                 const full = packStarts().starts.find(s => s.pack !== it.pack);
+                holdDragKeys = new Set([it.key]);
+                carried.clear(); carried.add(it.key);
+                aimAt(full.index);               // the pointer was over the full pack
                 ITEMS.splice(ITEMS.indexOf(it), 1);
                 ITEMS.splice(full.index + 1, 0, it);
                 let said = null; const real = toast; toast = m => { said = m; };
-                holdDragKeys = new Set([it.key]);
-                const accepted = acceptHeldDrop();
+                const accepted = acceptDrop();
                 toast = real;
                 return {accepted, said, held: !it.included, into: full.pack, pack: it.pack};
             }""")
@@ -237,7 +254,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TheHoldTrayIsSelectableByHand(CurationControls):
+class TheHoldTrayIsSelectableByHand(PanelPage, unittest.TestCase):
     """The tray's selection was reachable only by hitting a 1.3em box on a 64px
     card -- about 17px -- so a click on the card did nothing and multi-select,
     with the multi-card drag that depends on it, both looked broken while the
@@ -334,3 +351,188 @@ class TheHoldTrayIsSelectableByHand(CurationControls):
         cards.nth(2).dispatch_event("dragstart", {"dataTransfer": transfer})
         page.wait_for_timeout(150)
         self.assertEqual(page.evaluate("holdDragKeys.size"), 1)
+
+
+class ADroppedEmojiJoinsThePackItWasAimedAt(PanelPage, unittest.TestCase):
+    """Where a card comes to REST is not where the owner aimed.
+
+    Measured against the sandbox before this class existed: a held emoji
+    dropped on pack 4's FIRST card landed in pack 3, because the destination
+    was read by scanning backwards from the resting place -- and at a boundary
+    the card above the resting place is always the previous pack. Worse, a
+    grid-to-grid drag never re-stamped at all: an emoji carried from pack 1
+    into the middle of pack 4 kept pack 1 and CUT PACK 4 IN TWO.
+
+    Both gestures are driven here the way the page drives them: `aimAt` is what
+    `dragover` calls, `moveCarried` is what moves the model, and `acceptDrop`
+    is what the drop handler calls. Only the pointer is synthetic.
+    """
+
+    def hold_first(self, page):
+        page.click("#selmode")
+        page.locator(".card .pick").nth(0).click()
+        page.click("#toHold")
+        self.assertEqual(page.locator("#holdCards .hcard").count(), 1)
+
+    def test_a_drop_on_a_packs_first_card_joins_that_pack_not_the_one_above(self):
+        page = self.open(fx.synth(12, packs=[1] * 6 + [2] * 6))
+        self.hold_first(page)
+        moved = page.evaluate(
+            """() => {
+                const it = ITEMS.find(x => !x.included && !x.isLogo);
+                const head = packStarts().starts.find(s => s.pack === 2).index;
+                remember();
+                holdDragKeys = new Set([it.key]);
+                carried.clear(); carried.add(it.key);
+                aimAt(head);            // the pointer is ON pack 2's first card
+                moveCarried(head);      // dropped on its left half: before it
+                const accepted = acceptDrop();
+                return {accepted, pack: it.pack, at: ITEMS.indexOf(it),
+                        head: packStarts().starts.find(s => s.pack === 2).index,
+                        runs: packStarts().starts.map(s => s.pack)};
+            }""")
+        self.assertTrue(moved["accepted"])
+        self.assertEqual(moved["pack"], 2, "aimed at pack 2, so it joins pack 2")
+        # Not merely stamped: it must be pack 2's FIRST emoji, which is where it
+        # was dropped. Landing in pack 1 was a stamp of the pack above.
+        self.assertEqual(moved["at"], moved["head"])
+        self.assertEqual(moved["runs"], [1, 2], "no run may be cut by a drop")
+
+    def test_a_grid_to_grid_move_re_stamps_and_does_not_split_the_pack(self):
+        """The half nobody reported, and the more destructive one."""
+        page = self.open(fx.synth(12, packs=[1] * 6 + [2] * 6))
+        moved = page.evaluate(
+            """() => {
+                const it = ITEMS.find(x => x.pack === 1 && x.included && !x.isLogo);
+                const mid = packStarts().starts.find(s => s.pack === 2).index + 2;
+                dragKey = it.key; dragSnap = snapshot(); aimedPack = undefined;
+                carried.clear(); carried.add(it.key);
+                aimAt(mid); moveCarried(mid);
+                const accepted = acceptDrop();
+                commitDrag(); endDrag(true);
+                return {accepted, pack: it.pack,
+                        runs: packStarts().starts.map(s => s.pack)};
+            }""")
+        self.assertTrue(moved["accepted"])
+        self.assertEqual(moved["pack"], 2, "a grid drag must re-stamp too")
+        self.assertEqual(moved["runs"], [1, 2],
+                         "the destination pack was split by the dropped card")
+
+    def test_a_drop_that_aimed_at_nothing_stamps_nothing(self):
+        """Unknown is not a destination.
+
+        A drop can land on the grid without the pointer ever having been over a
+        card. Inferring a pack there would re-file an emoji into a pack nobody
+        chose -- and the stamp is an instruction the publish step carries out.
+        """
+        page = self.open(fx.synth(12, packs=[1] * 6 + [2] * 6))
+        self.hold_first(page)
+        after = page.evaluate(
+            """() => {
+                const it = ITEMS.find(x => !x.included && !x.isLogo);
+                const was = it.pack;
+                holdDragKeys = new Set([it.key]);
+                carried.clear(); carried.add(it.key);
+                aimedPack = undefined;           // no dragover ever fired
+                const accepted = acceptDrop();
+                return {accepted, was, now: it.pack};
+            }""")
+        self.assertTrue(after["accepted"], "the emoji still comes out of the tray")
+        self.assertEqual(after["now"], after["was"])
+
+    def test_a_drop_into_a_run_with_no_pack_number_invents_no_number(self):
+        """A catalog of candidates has no pack numbers at all yet.
+
+        The stale number is set by hand because the view cannot produce that
+        state today -- every card in an unnumbered catalog starts without one.
+        It is pinned anyway: the destination decides, and a number carried into
+        an unnumbered run is exactly what cuts a false run inside a pack that
+        has not been published.
+        """
+        page = self.open(fx.synth(12))          # no packs: pure candidates
+        after = page.evaluate(
+            """() => {
+                const it = ITEMS.find(x => x.included && !x.isLogo);
+                it.pack = 7;                     // a stamp from somewhere else
+                dragKey = it.key; dragSnap = snapshot(); aimedPack = undefined;
+                carried.clear(); carried.add(it.key);
+                aimAt(6); moveCarried(6);
+                const accepted = acceptDrop();
+                endDrag(true);
+                return {accepted, aimed: aimedPack, now: it.pack ?? null};
+            }""")
+        self.assertTrue(after["accepted"])
+        self.assertIsNone(after["aimed"], "an unnumbered run has no number to aim at")
+        self.assertIsNone(after["now"], "the emoji joins the run, it does not keep a number")
+
+
+class TheGridIsSelectableByClick(PanelPage, unittest.TestCase):
+    """Feature 002 gave the tray a click and left the grid as it was: the only
+    way to pick a grid card was a 1.7em box on a 140px card, because the click
+    handler returned early for everything else in selection mode."""
+
+    def test_clicking_a_cards_face_selects_it_and_shift_takes_the_range(self):
+        page = self.open(fx.synth(12))
+        page.click("#selmode")
+        page.locator(".card .thumb").nth(1).click()   # the artwork, not the box
+        self.assertEqual(page.evaluate("picked.size"), 1)
+        page.locator(".card .thumb").nth(4).click(modifiers=["Shift"])
+        self.assertEqual(page.evaluate("picked.size"), 4,
+                         "Shift must take the whole inclusive range")
+
+    def test_a_click_on_the_box_still_toggles_exactly_once(self):
+        """The box has its own `pointerdown`. Acting on the click as well would
+        toggle it and untoggle it, netting to zero."""
+        page = self.open(fx.synth(12))
+        page.click("#selmode")
+        page.locator(".card .pick").nth(2).click()
+        self.assertEqual(page.evaluate("picked.size"), 1)
+        page.locator(".card .pick").nth(2).click()
+        self.assertEqual(page.evaluate("picked.size"), 0, "and once back off again")
+
+    def test_outside_selection_mode_a_click_still_toggles_what_ships(self):
+        page = self.open(fx.synth(12))
+        page.locator(".card .thumb").nth(0).click()
+        self.assertEqual(page.locator("#holdCards .hcard").count(), 1,
+                         "an unticked emoji goes to the tray, as it always has")
+        self.assertEqual(page.evaluate("picked.size"), 0)
+
+    def test_the_brand_logo_is_never_picked(self):
+        page = self.open(fx.synth(6, logo=True))
+        page.click("#selmode")
+        page.locator(".card.logo").click()
+        self.assertEqual(page.evaluate("picked.size"), 0)
+
+
+class APickedCardWearsAMovingRing(PanelPage, unittest.TestCase):
+    """The owner's report: a selected card and an unselected one differed by a
+    dark inset outline, among four format accent colours, and could not be told
+    apart at a glance."""
+
+    def ring(self, page, selector):
+        return page.evaluate(
+            "s => {const n = document.querySelector(s); return n ? "
+            "{anim: getComputedStyle(n, '::before').animationName, "
+            " play: n.getAnimations({subtree: true}).map(a => a.playState)} : null}",
+            selector)
+
+    def test_only_a_picked_card_carries_the_ring_and_it_runs(self):
+        page = self.open(fx.synth(12))
+        page.click("#selmode")
+        page.locator(".card .thumb").nth(0).click()
+        marked = self.ring(page, ".card.picked")
+        plain = self.ring(page, ".card:not(.picked)")
+        self.assertEqual(marked["anim"], "pickspin")
+        self.assertIn("running", marked["play"], "a still ring is not a moving one")
+        self.assertEqual(plain["anim"], "none")
+
+    def test_a_picked_held_card_carries_the_same_ring(self):
+        """One control, one appearance. Two markers for one state would be the
+        defect this replaces, not an improvement on it."""
+        page = self.open(fx.synth(12))
+        page.click("#selmode")
+        page.locator(".card .pick").nth(0).click()
+        page.click("#toHold")
+        page.locator("#holdCards .hcard img").click()
+        page.wait_for_timeout(150)
+        self.assertEqual(self.ring(page, ".hcard.picked")["anim"], "pickspin")
