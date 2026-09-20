@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - the holding tray can be selected from and moved in bulk
+
+- **A pick box now means what it shows.** It drew the same check whether or not
+  the card was picked and only changed colour, so an unpicked box looked ticked
+  and two states were told apart by colour alone. Unpicked is empty now; the
+  check appears only when picked, on grid cards and held cards alike.
+- **A held card is selectable by clicking it.** Only a ~17px box responded, so a
+  click on the card did nothing and selecting a run meant aiming twice.
+  Shift-click takes the whole range. Dragging is unaffected -- a drag emits no
+  click, so the gestures cannot collide.
+- **Several held emoji move in one drag.** The machinery was already right; it
+  was unreachable, because a multi-selection could not be made by hand.
+- **The test sandbox starts again.** It held the clone's own catalog lock for
+  the server's lifetime, so the panel it started was refused its own database
+  and exited; and it cleared the environment before reading it, leaving the
+  process without even `PATH`. It had served nothing since it shipped.
+
+
 ### Fixed - a save is answered for what it actually submitted
 
 - **A stale Save is refused instead of quietly shrunk.** The panel intersected

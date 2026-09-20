@@ -235,3 +235,102 @@ class CurationControls(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheHoldTrayIsSelectableByHand(CurationControls):
+    """The tray's selection was reachable only by hitting a 1.3em box on a 64px
+    card -- about 17px -- so a click on the card did nothing and multi-select,
+    with the multi-card drag that depends on it, both looked broken while the
+    logic underneath was correct and measurably worked when driven directly."""
+
+    def held(self, page, count=5):
+        page.click("#selmode")
+        page.evaluate(
+            "n => holdKeys(new Set(ITEMS.filter(x=>!x.isLogo && x.included)"
+            ".slice(0, n).map(x=>x.key)))", count)
+        page.wait_for_timeout(200)
+        return page.locator("#holdCards .hcard")
+
+    def ticks(self, page):
+        """What each held card's pick box actually renders."""
+        return page.evaluate(
+            "[...document.querySelectorAll('#holdCards .hcard')].map("
+            "c => getComputedStyle(c.querySelector('.pick'), '::after').content)")
+
+    def test_an_unselected_tick_is_empty_and_only_a_selected_one_shows_a_check(self):
+        """The reported defect: both states rendered the same glyph and only the
+        colour changed, so an unselected box looked checked."""
+        page = self.open(fx.synth(12))
+        cards = self.held(page)
+        self.assertTrue(all(t == "none" for t in self.ticks(page)),
+                        f"a tick was drawn with nothing selected: {self.ticks(page)}")
+        cards.nth(1).locator("img").click()
+        page.wait_for_timeout(150)
+        drawn = [i for i, t in enumerate(self.ticks(page)) if t != "none"]
+        self.assertEqual(drawn, [1], "exactly the selected card shows a check")
+
+    def test_clicking_a_cards_face_selects_it_and_shift_takes_the_range(self):
+        page = self.open(fx.synth(12))
+        cards = self.held(page)
+        cards.nth(0).locator("img").click()      # the artwork, NOT the pick box
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("picked.size"), 1)
+        cards.nth(3).locator("img").click(modifiers=["Shift"])
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("picked.size"), 4,
+                         "Shift must take the whole inclusive range")
+
+    def test_one_click_on_the_box_toggles_once_not_twice(self):
+        """The box is a child of the card. Two handlers for one gesture would
+        toggle it and untoggle it, netting to zero."""
+        page = self.open(fx.synth(12))
+        cards = self.held(page)
+        cards.nth(0).locator(".pick").click()
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("picked.size"), 1)
+
+    def test_unhold_does_not_disturb_the_selection(self):
+        page = self.open(fx.synth(12))
+        cards = self.held(page)
+        cards.nth(0).locator("img").click()
+        cards.nth(2).locator("img").click()
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("picked.size"), 2)
+        page.locator("#holdCards .hcard button").nth(4).click()
+        page.wait_for_timeout(250)
+        self.assertEqual(page.evaluate("picked.size"), 2,
+                         "unholding an unpicked card changed the selection")
+
+    def test_outside_selection_mode_a_click_selects_nothing(self):
+        page = self.open(fx.synth(12))
+        cards = self.held(page)
+        page.click("#selmode")                   # back off again
+        page.wait_for_timeout(150)
+        cards.nth(0).locator("img").click()
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("picked.size"), 0)
+
+    def test_a_drag_from_the_tray_carries_every_selected_emoji(self):
+        page = self.open(fx.synth(12, packs=[1] * 6 + [2] * 6))
+        cards = self.held(page, 3)
+        cards.nth(0).locator("img").click()
+        cards.nth(2).locator("img").click(modifiers=["Shift"])
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("heldPicked().length"), 3)
+        # A real DataTransfer: a synthetic dragstart has none, and the handler
+        # sets `effectAllowed` on it before anything else.
+        transfer = page.evaluate_handle("() => new DataTransfer()")
+        cards.nth(0).dispatch_event("dragstart", {"dataTransfer": transfer})
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("holdDragKeys.size"), 3,
+                         "the drag must carry the whole selection, not one card")
+
+    def test_dragging_an_unselected_held_card_carries_only_itself(self):
+        page = self.open(fx.synth(12, packs=[1] * 6 + [2] * 6))
+        cards = self.held(page, 3)
+        cards.nth(0).locator("img").click()
+        page.wait_for_timeout(150)
+        transfer = page.evaluate_handle("() => new DataTransfer()")
+        cards.nth(2).dispatch_event("dragstart", {"dataTransfer": transfer})
+        page.wait_for_timeout(150)
+        self.assertEqual(page.evaluate("holdDragKeys.size"), 1)
