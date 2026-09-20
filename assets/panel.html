@@ -234,6 +234,13 @@ body.selmode .card{cursor:default}
    EARLIER also becomes the first one a source-text probe reads. */
 .hcard .pick{width:1.3em;height:1.3em;font-size:.95em;border-radius:.4em}
 .hcard.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
+/* The check appears ONLY when picked. It used to be written into the element,
+   so both states rendered the same glyph and only the colour changed: an
+   unselected box looked checked, and the difference between two states was
+   carried by colour alone. Presence of the glyph is the signal now, and the
+   card's pink outline is the second, non-colour cue. The empty box keeps its
+   border and its opaque fill because it sits over arbitrary artwork. */
+.card.picked .pick::after,.hcard.picked .pick::after{content:"✓"}
 .card.on .tick{background:#22c55e;border-color:#22c55e;color:#04220f}
 .card.off .tick{background:#1a2230;color:var(--bad);border-color:#3a2330}
 .glyph{font-size:1.67em;line-height:1.1;margin:.3em 0 0;user-select:text}

@@ -138,7 +138,7 @@ function makeCard(it){
   hdr.appendChild(el('span','pos',''));
   hdr.appendChild(el('span','badge', it.isLogo ? 'logo' : it.fmt));
   if(!it.isLogo) hdr.appendChild(el('span','tick', it.included ? '✓' : '✕'));
-  if(!it.isLogo) hdr.appendChild(el('span','pick', '✓'));
+  if(!it.isLogo) hdr.appendChild(el('span','pick'));
   card.appendChild(hdr);
   card.appendChild(makeThumb(it));
   // The glyph the sticker carries. Telegram never shows it -- a custom emoji

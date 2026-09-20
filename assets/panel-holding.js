@@ -157,7 +157,7 @@ function renderHolding(){
       const img=el('img');
       img.alt=it.label||'';img.loading='lazy';img.decoding='async';
       img.src='/preview/'+encodeURIComponent(it.key)+'?still=1&size=72';
-      const pick=el('span','pick','✓');
+      const pick=el('span','pick');
       const button=el('button','','Unhold'); button.type='button'; button.draggable=false;
       button.setAttribute('aria-label','Unhold '+(it.label||it.key));
       // Picked held emoji come back together; an unpicked one is still the
@@ -201,14 +201,25 @@ markPicked=function(key,on){
   for(const c of holdCards.children)
     if(c.dataset&&c.dataset.key===key)c.classList.toggle('picked',on);
 };
-// Pointer events, not click: the card's own draggable owns dragging, and one
-// element cannot run both gestures. Starting on the box is what tells them apart.
+// CLICK, on the whole card -- and click is what makes this safe rather than a
+// gesture conflict. A drag emits dragstart/drop/dragend and NO click, measured,
+// so the two gestures separate themselves by what the user DID. The previous
+// version separated them by where the user PRESSED: a pointerdown on the pick
+// box only. That box is 1.3em on a 64px card, about 17px, so selecting a run
+// meant hitting a small target twice and a click on the card did nothing --
+// which is why multi-select, and the multi-card drag that depends on it, both
+// looked broken while the logic underneath was correct.
+//
+// One handler, not two. Keeping the box's own pointerdown as well would make a
+// click on the box toggle twice and net to zero. The box is a child of the
+// card, so this covers it; the tray has no drag-paint, and `dragstart` already
+// refuses a drag that begins on the box.
 let lastHeldPick=null;
-holdCards.addEventListener('pointerdown',e=>{
+holdCards.addEventListener('click',e=>{
   if(!selMode)return;
-  const box=e.target.closest('.pick'); if(!box)return;
-  const card=box.closest('.hcard'); if(!card)return;
-  e.preventDefault();e.stopPropagation();
+  // Unhold owns its own click and must never move the selection.
+  if(e.target.closest('button'))return;
+  const card=e.target.closest('.hcard'); if(!card)return;
   const order=heldOrder(), i=order.indexOf(card.dataset.key);
   if(i<0)return;
   const anchor=order.indexOf(lastHeldPick);

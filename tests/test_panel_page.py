@@ -536,6 +536,29 @@ class SelectionModeCarriesARun(unittest.TestCase):
         self.assertIn("display:none", block(PAGE, ".pick{", "}"))
         self.assertIn("body.selmode .pick{display:flex}", PAGE)
 
+    def test_only_a_picked_box_draws_a_check(self):
+        """It used to be written into the element, so both states rendered the
+        same glyph and only the colour changed: an unselected box looked
+        checked, and two states were told apart by colour alone. The glyph is
+        the signal now, and it comes from one place."""
+        for built in ("el('span','pick')", "el('span','pick');"):
+            if built in SCRIPT:
+                break
+        else:
+            self.fail("the pick box must be built with no glyph of its own")
+        self.assertNotIn("el('span','pick','✓')", SCRIPT)
+        self.assertNotIn("el('span','pick', '✓')", SCRIPT)
+        rule = ".card.picked .pick::after,.hcard.picked .pick::after"
+        self.assertIn(rule, PAGE, "the check must be drawn for the picked state")
+        self.assertIn("✓", block(PAGE, rule + "{", "}"))
+
+    def test_the_empty_box_is_still_visible_over_artwork(self):
+        """An empty box with no fill would vanish over a light thumbnail, and
+        the state would then be unreadable in the other direction."""
+        base = block(PAGE, ".pick{", "}")
+        self.assertIn("border:", base)
+        self.assertIn("background:#0b1422", base)
+
     def test_leaving_the_mode_drops_the_picks(self):
         """A hidden selection that still moves cards on the next drag is worse
         than no selection at all."""

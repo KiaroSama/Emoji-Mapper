@@ -286,7 +286,9 @@ the grid is virtual, so a thousand cards cost what a hundred do. Click
 **Save** → writes the `included` flag to the catalog.
 
 **Selection mode** (the pill next to Zoom) is for moving several emoji as one
-group: drag across the small pick box in a card's top-left corner to select a
+group. In the holding tray, click a card anywhere to pick it and Shift-click
+another to take the run between them; in the grid, drag across the small pick
+box in a card's top-left corner to select a
 run, then drag any picked card to carry the whole set. While it is on, Select
 all / Deselect all / Invert act on the picks instead of on publish inclusion.
 **Holding** (the strip under the count line) is a place to park emoji out of
@@ -1204,10 +1206,23 @@ carries a second switch beside **Animation**:
 
 | Gesture | What it does |
 |---------|--------------|
-| Toggle **Selection** | Reveals a pick box on every card. Turning it off drops the picks. |
+| Toggle **Selection** | Reveals an EMPTY pick box on every card. Turning it off drops the picks. |
 | Click a pick box | Picks or unpicks that one card. |
+| Click a HELD card anywhere | Picks or unpicks it. The whole card is the target in the tray, not just the box. |
+| Shift-click a held card | Picks the whole run between it and the last one picked. |
 | Drag across pick boxes | Picks the whole run; dragging back **shrinks** it inside the same stroke. |
 | Drag a picked card | Carries every picked card together, keeping their order. |
+
+**A check means picked, and nothing else.** An unpicked box is empty. It used to
+draw the same check in both states and only change colour, so a box that was not
+picked still looked ticked, and the only difference between two states was a
+colour. In the tray that also made a multi-selection unreachable in practice:
+the box is about 17px on a 64px card, so a click on the card did nothing, and
+the drag that carries a whole selection never had a selection to carry.
+
+Clicking the card is safe alongside dragging because a drag emits no click at
+all — the two gestures separate themselves by what you did, not by where you
+pressed.
 
 The pick box is deliberately NOT the tick. The tick says "this ships"; the pick
 says "this moves with the others" — and while selection mode is on, clicking a
