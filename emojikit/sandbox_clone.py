@@ -38,7 +38,6 @@ from pathlib import Path
 
 from emojikit import sqlite_snapshot
 from emojikit.catalog import Catalog
-from emojikit.maintenance import lock_path
 from emojikit.packstate import exclusive_lock
 from emojikit.state_artifacts import state_files
 
@@ -48,10 +47,25 @@ from emojikit.state_artifacts import state_files
 TMP_PREFIX = "panel-sandbox-"
 MARKER_NAME = ".sandbox-owner.json"
 MARKER_VERSION = 1
+# The sandbox server's lifetime lease, and deliberately NOT `maintenance.lock_path()`.
+# That one is `.maintenance.lock`, which `Catalog()` takes through `writer()` on every
+# request -- and `exclusive_lock` is not reentrant, so a wrapper holding it for the
+# server's lifetime refuses the server its own catalog. It shipped that way and the
+# sandbox served nothing: the panel died with LockBusy naming the wrapper's own pid.
+# Two jobs, two files.
+LIFETIME_LOCK_NAME = ".sandbox-lifetime.lock"
 
 
 class CloneRefused(RuntimeError):
     """The clone cannot be made faithfully, so it is not made at all."""
+
+
+def lifetime_lock_path(directory: Path) -> Path:
+    """The lock a running sandbox holds, and the sweep tests for liveness.
+
+    Distinct from the catalog's writer lock by design -- see LIFETIME_LOCK_NAME.
+    """
+    return Path(directory).resolve() / LIFETIME_LOCK_NAME
 
 
 def safe_key(content_key: str) -> str:
@@ -133,8 +147,8 @@ def sweep_stale(root: Path | None = None) -> int:
         if not marker_is_self_describing(old):
             continue
         try:
-            with exclusive_lock(lock_path(old)):
-                _empty_except_lock(old, lock_path(old))
+            with exclusive_lock(lifetime_lock_path(old)):
+                _empty_except_lock(old, lifetime_lock_path(old))
                 removed += 1
         except Exception:  # noqa: BLE001 - a busy or unreadable clone is simply left
             continue
