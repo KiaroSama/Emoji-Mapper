@@ -563,9 +563,16 @@ class TheScrubLeavesTheProcessAbleToRun(unittest.TestCase):
                 inside = dict(os.environ)
         self.assertEqual(inside.get("EMOJI_MAPPER_NO_DOTENV"), "1")
         self.assertNotIn("GENERAL_BOT_TOKEN", inside, "credentials must still go")
-        for needed in ("PATH", "SYSTEMROOT"):
-            self.assertIn(needed, {k.upper() for k in inside},
-                          f"{needed} is gone; the process cannot run")
+        present = {k.upper() for k in inside}
+        self.assertIn("PATH", present, "PATH is gone; the process cannot run")
+        if sys.platform == "win32":
+            # Windows-only, and the one that actually bit: without SystemRoot
+            # Winsock cannot load its service providers and the panel died with
+            # WinError 10106 before it could open a socket. There is no such
+            # variable on Linux, so asserting it unconditionally fails CI for a
+            # reason that has nothing to do with the scrub.
+            self.assertIn("SYSTEMROOT", present,
+                          "SystemRoot is gone; Winsock cannot initialise")
         self.assertGreater(len(inside), 5, "the environment was wiped, not scrubbed")
 
     def test_the_environment_is_restored_afterwards(self):
