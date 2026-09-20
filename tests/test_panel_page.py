@@ -51,8 +51,11 @@ class DragAndDropOrdering(unittest.TestCase):
             self.assertNotIn(arithmetic, drop, f"the drop handler must not reach for {arithmetic}")
         commit = block(SCRIPT, "function commitDrag(){", "function endDrag")
         self.assertIn("order.every((k,i)=>k===dragSnap.order[i])", commit)
-        self.assertIn("selSig(dragSnap.included)) return;", commit,
+        self.assertIn("selSig(ITEMS.filter(x=>x.included).map(x=>x.key))===selSig(dragSnap.included)",
+                      commit,
                       "a tray release changes inclusion even when its position stays the same")
+        self.assertIn("packs===JSON.stringify(dragSnap.packs)) return;", commit,
+                      "and a cross-pack drop changes the stamp even when the order holds")
         self.assertLess(commit.index("remember(dragSnap);"), commit.index("saveOrder();"))
 
     def test_a_cancelled_drag_restores_the_order_taken_at_dragstart(self):
@@ -565,12 +568,43 @@ class SelectionModeCarriesARun(unittest.TestCase):
         self.assertIn("if(!selMode) clearPicked();", SCRIPT)
 
     def test_arranging_never_changes_what_ships(self):
-        """The card click toggles `included`. In selection mode a stray click
-        while moving cards must not quietly drop an emoji from the pack."""
+        """The card click toggles `included`. In selection mode that click now
+        PICKS instead -- it used to do nothing at all, which left the 1.7em box
+        as the only way to select on a 140px card -- and either way a click
+        while arranging must never quietly drop an emoji from the pack."""
         body = block(SCRIPT, "grid.addEventListener('click'", "// --- Losing the server")
-        self.assertIn("if(selMode) return;", body)
-        self.assertLess(body.index("if(selMode) return;"), body.index("remember();"),
-                        "the guard has to come before anything mutates")
+        self.assertIn("if(selMode){", body)
+        self.assertIn("pickCardAt(i, e.shiftKey);", body)
+        self.assertLess(body.index("if(selMode){"), body.index("remember();"),
+                        "the branch has to come before anything mutates inclusion")
+
+    def test_the_box_owns_its_own_click(self):
+        """Its `pointerdown` has already toggled. Acting on the click as well
+        would toggle twice and net to zero -- the same double-toggle that made
+        the tray's fix a replacement rather than an addition."""
+        body = block(SCRIPT, "grid.addEventListener('click'", "// --- Losing the server")
+        self.assertIn("if(!e.target.closest('.pick')) pickCardAt", body)
+
+    def test_a_picked_card_is_marked_by_a_moving_ring_on_both_surfaces(self):
+        """A flat inset outline among four format accents is what the owner
+        could not find. The ring is the same control in the grid and the tray:
+        two markers for one state would be a worse outcome than the bug."""
+        rule = ".card.picked::before,.hcard.picked::before"
+        self.assertIn(rule, PAGE)
+        ring = block(PAGE, rule + "{", "}")
+        self.assertIn("conic-gradient", ring)
+        self.assertIn("animation:pickspin", ring)
+        self.assertIn("@keyframes pickspin{to{transform:rotate(1turn)}}", PAGE,
+                      "the rotation must be a transform: the compositor animates "
+                      "that without repainting, and this grid is virtual because "
+                      "repainting cost 14-17 ms per pointer move")
+        self.assertNotIn(".card.picked{outline:2px solid #f0abfc;outline-offset:-2px}", PAGE,
+                         "the flat outline it replaces must be gone, not doubled")
+
+    def test_reduced_motion_keeps_the_ring_and_stops_it_moving(self):
+        """The preference is about movement, not about the marker."""
+        reduced = block(PAGE, "@media (prefers-reduced-motion:reduce){", "}}")
+        self.assertIn(".card.picked::before,.hcard.picked::before{animation:none", reduced)
 
     def test_dragging_a_picked_card_carries_the_whole_set_even_off_screen(self):
         """The carried set is read from ITEMS, not from the DOM: a picked card

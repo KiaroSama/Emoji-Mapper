@@ -103,17 +103,41 @@ function applyStroke(j){
 for(const ev of ['pointerup','pointercancel'])
   window.addEventListener(ev, ()=>{ paintFrom = null; });
 
+/** Toggle one card, with Shift taking the range from the last pick.
+ *
+ *  A CLICK, and on the whole card. That is safe next to the card's own drag
+ *  because a drag emits dragstart/drop/dragend and no click at all -- measured
+ *  for the tray in feature 002, and a grid card is the same kind of draggable
+ *  element. The span rule is `applyStroke`'s: the logo and anything that does
+ *  not ship are skipped, so the two ways of selecting cannot disagree. */
+function pickCardAt(i, shift){
+  remember();
+  const anchor = ITEMS.findIndex(x=>x.key===lastPick && x.included);
+  const on = !picked.has(ITEMS[i].key);
+  const [a,b] = shift && anchor >= 0 ? [Math.min(anchor,i), Math.max(anchor,i)] : [i,i];
+  for(let k=a;k<=b;k++){ if(!ITEMS[k].isLogo && ITEMS[k].included) markPicked(ITEMS[k].key, on); }
+  if(!shift || anchor < 0) lastPick = ITEMS[i].key;
+  paintSelLabel();
+}
+
 grid.addEventListener('click',e=>{
   // Copying must not also toggle the card: the label sits inside it, so this
   // has to run first and stop there.
   const cp = e.target.closest('.copyable');
   if(cp){ e.stopPropagation(); copyText(cp.dataset.copy); return; }
   const card = e.target.closest('.card'); if(!card) return;
-  // In selection mode the grid is for arranging only. A stray click must not
-  // quietly drop an emoji from the pack while the owner is moving cards.
-  if(selMode) return;
   const i = ITEMS.findIndex(x=>x.key===card.dataset.key);
   if(i < 0 || ITEMS[i].isLogo) return;   // preview-only card: not toggleable
+  // In selection mode the grid is for arranging only -- a stray click must not
+  // quietly drop an emoji from the pack -- so the click PICKS instead. It used
+  // to do nothing at all here, which left the 17px pick box as the only way to
+  // select on a 140px card.
+  if(selMode){
+    // The box owns its own click: its `pointerdown` has already toggled, and
+    // acting on both would toggle twice and net to zero.
+    if(!e.target.closest('.pick')) pickCardAt(i, e.shiftKey);
+    return;
+  }
   remember();
   if(e.shiftKey && lastIdx!==null){
     const [a,b]=[Math.min(lastIdx,i),Math.max(lastIdx,i)];
@@ -426,6 +450,23 @@ function blockUnload(e){ e.preventDefault(); e.returnValue = ''; }
 // about, because the grid is never anything but ITEMS drawn.
 let dragKey = null;
 let dragSnap = null;          // the order at dragstart: history on commit, restore on cancel
+// The pack the pointer is AIMING at -- never the one the card comes to rest
+// above. Those two differ at every pack boundary: dropping on pack 4's FIRST
+// card puts the emoji above it, so reading the list afterwards always answers
+// "pack 3", which is where a held emoji actually landed (measured). A
+// grid-to-grid drag was worse: it never re-stamped at all, so a card moved into
+// pack 4 kept pack 1 and cut pack 4 in two.
+// `undefined` means no card was ever under the pointer, and then nothing is
+// stamped: a destination nobody aimed at is not a destination.
+let aimedPack;
+/** Record the run under the pointer.
+ *
+ *  `j + 1` because `runPackAt` scans backwards from `index - 1`: this makes the
+ *  AIMED card itself the first candidate, and falls through to its neighbours
+ *  only when it carries no pack number of its own. A named function rather than
+ *  an inline assignment because a test has no pointer -- it calls this and
+ *  exercises the real arithmetic instead of copying it. */
+function aimAt(j){ aimedPack = runPackAt(j + 1, carried); }
 
 grid.addEventListener('dragstart',e=>{
   const card=e.target.closest('.card'); if(!card){e.preventDefault();return;}
@@ -433,6 +474,7 @@ grid.addEventListener('dragstart',e=>{
   if(!it || it.isLogo){ e.preventDefault(); return; }   // logo is fixed first
   dragKey=card.dataset.key;
   dragSnap=snapshot();
+  aimedPack=undefined;              // nothing aimed at yet in THIS drag
   // Dragging a PICKED card carries the whole set; dragging an unpicked one is
   // the single-card gesture that has always been here, untouched.
   carried.clear();
@@ -454,6 +496,10 @@ grid.addEventListener('dragover',e=>{
   // Which SIDE of the tile the pointer is on decides before-or-after, so the
   // last slot of a row is reachable and the gesture reads the way it looks.
   const r = card.getBoundingClientRect();
+  // The pack comes from the card the pointer is ON, the position from which
+  // half of it. Read it BEFORE the move, while the list still says where this
+  // card sits.
+  aimAt(j);
   moveCarried((e.clientX > r.left + r.width/2) ? j + 1 : j);
 });
 
@@ -477,7 +523,7 @@ grid.addEventListener('drop',e=>{
   if(dragKey===null) return;
   e.preventDefault();
   stopEdgeScroll();
-  if(!acceptHeldDrop()){endDrag(false);return;}
+  if(!acceptDrop()){endDrag(false);return;}
   commitDrag();
   endDrag(true);
 });
@@ -486,8 +532,13 @@ grid.addEventListener('dragend',()=>endDrag(false));
 /** Keep what the drag left in ITEMS: record where it started, save. */
 function commitDrag(){
   const order = ITEMS.map(x=>x.key);
+  // Pack stamps count as a change too. Comparing the order alone meant a drop
+  // that carried a card ACROSS a pack boundary without reordering anything left
+  // no history entry, so the owner could not undo it.
+  const packs = JSON.stringify(ITEMS.filter(x=>x.pack!=null).map(x=>[x.key,x.pack]));
   if(order.every((k,i)=>k===dragSnap.order[i]) &&
-     selSig(ITEMS.filter(x=>x.included).map(x=>x.key))===selSig(dragSnap.included)) return;
+     selSig(ITEMS.filter(x=>x.included).map(x=>x.key))===selSig(dragSnap.included) &&
+     packs===JSON.stringify(dragSnap.packs)) return;
   remember(dragSnap);
   logUI('reorder',{count:carried.size});
   saveOrder();
@@ -498,7 +549,7 @@ function endDrag(committed){
   // pointer, so leaving it would make the grid disagree with what was saved.
   if(!committed && dragKey !== null){ applySnapshot(dragSnap,false); }
   for(const k of carried){ const n = cards.get(k); if(n) n.classList.remove('drag'); }
-  carried.clear(); dragKey=null; dragSnap=null;
+  carried.clear(); dragKey=null; dragSnap=null; aimedPack=undefined;
   stopEdgeScroll();
   // Anything still parked is outside the window now that nothing carries it.
   while(park.firstChild) unmountCard(park.firstChild);

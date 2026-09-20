@@ -1207,9 +1207,9 @@ carries a second switch beside **Animation**:
 | Gesture | What it does |
 |---------|--------------|
 | Toggle **Selection** | Reveals an EMPTY pick box on every card. Turning it off drops the picks. |
-| Click a pick box | Picks or unpicks that one card. |
-| Click a HELD card anywhere | Picks or unpicks it. The whole card is the target in the tray, not just the box. |
-| Shift-click a held card | Picks the whole run between it and the last one picked. |
+| Click a card anywhere | Picks or unpicks it — grid card or held card. The whole card is the target, not the box. |
+| Shift-click a card | Picks the whole run between it and the last one picked. |
+| Click a pick box | Picks or unpicks that one card, exactly once. |
 | Drag across pick boxes | Picks the whole run; dragging back **shrinks** it inside the same stroke. |
 | Drag a picked card | Carries every picked card together, keeping their order. |
 
@@ -1222,7 +1222,16 @@ the drag that carries a whole selection never had a selection to carry.
 
 Clicking the card is safe alongside dragging because a drag emits no click at
 all — the two gestures separate themselves by what you did, not by where you
-pressed.
+pressed. The grid works the same way now; it used to ignore a click entirely in
+selection mode, which left that 1.7em box as the only way to pick on a 140px
+card.
+
+**A picked card wears a bright ring that travels around it.** The marker used to
+be a flat inset outline, one more dark line among four format accent colours,
+and a selection could not be found at a glance. The ring is a conic gradient
+rotated by a transform — the compositor animates that without repainting, which
+matters on a grid that is virtual precisely because repainting cost 14-17 ms per
+pointer move. It stops moving, and stays bright, under `prefers-reduced-motion`.
 
 The pick box is deliberately NOT the tick. The tick says "this ships"; the pick
 says "this moves with the others" — and while selection mode is on, clicking a
@@ -2049,6 +2058,15 @@ Front-end:
   the card by the pack number it arrived carrying, it becomes a one-card run
   still labelled with the pack it came from, and the drag reads as having
   snapped back — which is exactly how this was first reported.
+  **The pack comes from the card the pointer was aimed at**, recorded while the
+  drag is live, never from whatever ends up above the card once it lands. Those
+  two answers differ at every pack boundary, and the difference was measurable:
+  a held emoji dropped on pack 4's FIRST card landed stamped pack 3. Every drop
+  re-stamps, from the tray and from inside the grid alike — a grid-to-grid drag
+  used to keep its old pack number and cut the destination pack in two. A drop
+  that never passed over any card stamps nothing: an unknown destination is not
+  a destination. A drop into a run that has no pack number yet leaves the emoji
+  without one, so it continues that run instead of starting a false one.
 - **A full pack takes nothing, and the holding tray is how you make room.**
   Packs are fixed 200-emoji buckets, logo included. A drop into a pack already
   at 200 is refused with `Pack N is full (200/200). Hold one of its emoji

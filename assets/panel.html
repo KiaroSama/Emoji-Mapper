@@ -175,7 +175,6 @@ body.bg-gray  .thumb{background:#808a96}
 .hcard{flex:none;position:relative;width:64px;border-radius:.5em;cursor:grab;
   border:1px solid var(--line);background:var(--panel);overflow:hidden}
 .hcard:hover{border-color:var(--neon2)}
-.hcard.picked{outline:2px solid #f0abfc;outline-offset:-2px}
 .hcard img,.hcard video{width:100%;height:42px;object-fit:contain;display:block}
 .hcard button{width:100%;padding:3px 2px;border-radius:0;font-size:11px}
 #unholdAll{flex:none;font-size:12px;padding:6px 8px}
@@ -228,7 +227,30 @@ body.selmode .pick{display:flex}
 body.selmode .tick{display:none}
 body.selmode .card{cursor:default}
 .card.picked .pick{background:#f0abfc;border-color:#f0abfc;color:#3b0a45}
-.card.picked{outline:2px solid #f0abfc;outline-offset:-2px}
+/* A selection you can find without hunting for it. The flat inset outline read
+   as one more dark line among four format accents, and the owner could not tell
+   a picked card from an unpicked one across the grid. Two layers, both inside
+   the card because it clips: `::before` is a rotating conic gradient twice the
+   card's size (a square only its own size would sweep its corners out of view
+   and leave gaps), `::after` is the card's own colour laid back over the middle
+   so only a 2px band of the gradient shows. The ROTATION is a transform, which
+   the compositor animates without repainting -- this grid exists because a
+   repaint cost 14-17 ms per pointer move, and `conic-gradient(from var(--angle))`
+   would repaint every selected card every frame to look identical. */
+.card.picked,.hcard.picked{border-color:#f0abfc}
+.card.picked::before,.hcard.picked::before{content:"";position:absolute;inset:-50%;
+  z-index:-2;pointer-events:none;animation:pickspin 1.8s linear infinite;
+  background:conic-gradient(#f0abfc,#fff,#67e8f9,#f0abfc,#fff,#67e8f9,#f0abfc)}
+/* Lit all the way round, with the white points doing the travelling: a ring
+   that is mostly transparent only lights one corner at a time, and at a 140px
+   card that reads as a flicker rather than as motion. */
+.card.picked::after,.hcard.picked::after{content:"";position:absolute;
+  z-index:-1;pointer-events:none;border-radius:inherit;background:var(--panel)}
+/* In em, so the band keeps its weight at every zoom -- a 3px ring on a card
+   scaled to 220% is a hairline. The tray does not zoom, so it stays in px. */
+.card.picked::after{inset:.25em}
+.hcard.picked::after{inset:2px}
+@keyframes pickspin{to{transform:rotate(1turn)}}
 /* The tray joins selection mode, so a held emoji is pickable too. These
    override the box above and belong after it -- a `.pick{` rule placed
    EARLIER also becomes the first one a source-text probe reads. */
@@ -271,7 +293,11 @@ body.compact .glyph,body.compact .lbl,body.compact .sub{display:none}
   background:#0c1622;border:1px solid var(--neon);color:var(--txt);padding:10px 16px;
   border-radius:12px;box-shadow:0 0 22px #22d3ee44;opacity:0;transition:all .25s;pointer-events:none}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+/* Transitions AND the selection ring: the rule above covers `transition` only,
+   and a ring that travels forever is exactly what this preference is about. It
+   stays bright and present, it just stops moving. */
+@media (prefers-reduced-motion:reduce){*{transition:none!important}
+  .card.picked::before,.hcard.picked::before{animation:none}}
 </style></head>
 <body class="bg-checker">
 <header>

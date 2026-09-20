@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - an emoji joins the pack it was dropped on, and a selection can be seen
+
+- **A drop reads the card you aimed at, not the card it landed above.** Those
+  differ at every pack boundary: dropping a held emoji on pack 4's FIRST card
+  stamped it pack 3 and filed it as pack 3's last slot. The destination is now
+  taken from the card under the pointer while the drag is live.
+- **A drag inside the grid re-stamps too.** Only drops from the holding tray
+  did, so an emoji carried from pack 1 into the middle of pack 4 kept pack 1 and
+  SPLIT pack 4 into two runs with a false separator between them.
+- **Nothing is inferred when nothing was aimed at**, and an emoji dropped into a
+  run with no pack number yet keeps no number, so it continues that run.
+- **A click anywhere on a grid card selects it** in selection mode, with
+  Shift-click taking the range. The grid ignored the click entirely, leaving a
+  1.7em box as the only target on a 140px card; the tray was fixed for this and
+  the grid was not.
+- **A picked card wears a bright moving ring.** The flat inset outline read as
+  one more dark line among the format accent colours. The rotation is a
+  transform, so it costs no repaint, and it stops under `prefers-reduced-motion`.
+- A drop that changes only the pack now records history, so it can be undone.
+
 ### Fixed - the holding tray can be selected from and moved in bulk
 
 - **A pick box now means what it shows.** It drew the same check whether or not
