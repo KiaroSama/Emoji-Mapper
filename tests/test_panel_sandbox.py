@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 import panel_sandbox  # noqa: E402 - needs the paths above
 from emojikit import sandbox_clone  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
+from emojikit.packstate import exclusive_lock  # noqa: E402
 
 # Two things here are only real on native Windows, so a green Linux run proves
 # neither. `exclusive_lock` uses msvcrt byte-range locking there and `flock`
@@ -389,10 +390,8 @@ class TheSweepReclaimsOnlyWhatItCanProveIsAbandoned(SandboxFixture):
         self.assertFalse((old / "catalog.db").exists())
 
     def test_a_sandbox_whose_lease_is_held_survives(self):
-        from emojikit.maintenance import lock_path
-        from emojikit.packstate import exclusive_lock
         live = self.sandbox_dir("live")
-        with exclusive_lock(lock_path(live)):
+        with exclusive_lock(sandbox_clone.lifetime_lock_path(live)):
             self.assertEqual(sandbox_clone.sweep_stale(self.tmp), 0)
         self.assertTrue((live / "catalog.db").exists(),
                         "a served sandbox must not be deleted by the next start")
@@ -417,15 +416,17 @@ class TheSweepReclaimsOnlyWhatItCanProveIsAbandoned(SandboxFixture):
         """Unlinking a locked inode on POSIX lets two processes each hold a lock
         at one path and each believe it is alone -- the hole `exclusive_lock`'s
         own docstring records. A tombstone costs nothing."""
-        from emojikit.maintenance import lock_path
-        from emojikit.packstate import exclusive_lock
-        old = self.sandbox_dir("dead")
-        with exclusive_lock(lock_path(old)):
+        # The LIFETIME lock, which is the one the sweep takes and therefore the
+        # one whose inode must not be unlinked. The catalog's writer lock is a
+        # different file and not this test's subject.
+        lock = sandbox_clone.lifetime_lock_path(self.sandbox_dir("dead"))
+        old = lock.parent
+        with exclusive_lock(lock):
             pass                       # create the lock file, then release it
-        self.assertTrue(lock_path(old).exists())
+        self.assertTrue(lock.exists())
         self.assertEqual(sandbox_clone.sweep_stale(self.tmp), 1)
         self.assertFalse((old / "catalog.db").exists())
-        self.assertTrue(lock_path(old).exists(), "the lock tombstone must survive")
+        self.assertTrue(lock.exists(), "the lock tombstone must survive")
 
     def test_a_symlink_is_never_followed(self):
         target = self.tmp / "real-data"
@@ -491,3 +492,84 @@ class TheSandboxHoldsItsLeaseForTheLifeOfTheServer(SandboxFixture):
         self.assertEqual(seen["dotenv_off"], "1", "credentials must be off while serving")
         self.assertEqual(os.environ, before, "the environment must be restored")
         self.assertFalse(seen["clone"].exists(), "the clone is deleted on exit")
+
+
+class TheLifetimeLeaseDoesNotBlockThePanelItStarts(SandboxFixture):
+    """The regression this class exists for.
+
+    The wrapper held `lock_path(tmp)` for the server's lifetime -- which is
+    `tmp/.maintenance.lock`, the exact file `Catalog(tmp/"catalog.db")` takes
+    through `maintenance.writer()`. `exclusive_lock` is not reentrant, so the
+    panel died with `LockBusy` naming the wrapper's own pid and the sandbox
+    served nothing.
+
+    It shipped green because the test that covered the lifetime wiring stubbed
+    `panel.main` with a function that never opened a Catalog. A stub that does
+    not do the one thing the real code does first proves the one thing that
+    cannot fail.
+    """
+
+    def test_the_panel_can_open_its_catalog_while_the_lease_is_held(self):
+        self.fill()
+        dest = self.dest()
+        sandbox_clone.clone_catalog(self.source, dest)
+        with exclusive_lock(sandbox_clone.lifetime_lock_path(dest)):
+            # Exactly what panel.main() does before it serves anything.
+            with Catalog(dest / "catalog.db") as cat:
+                self.assertEqual(len(cat.all_items()), 1)
+
+    def test_the_wrapper_lets_the_real_panel_reach_its_catalog(self):
+        """Through the wrapper, not around it: the stub does what the panel
+        does first, so the wrapper's own lock is what is under test."""
+        self.fill()
+        seen = {}
+
+        def panel_that_opens_its_catalog(argv, *, reuse_existing=True):
+            clone = Path(argv[argv.index("--data-dir") + 1])
+            with Catalog(clone / "catalog.db") as cat:
+                seen["items"] = len(cat.all_items())
+            return 0
+
+        with mock.patch.object(panel_sandbox.panel, "main", panel_that_opens_its_catalog), \
+                mock.patch.object(panel_sandbox.tempfile, "gettempdir",
+                                  return_value=str(self.tmp)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = panel_sandbox.main(["--source", str(self.source), "--port", "8797"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen.get("items"), 1,
+                         "the panel never got to open its catalog")
+
+    def test_the_lifetime_lock_is_not_the_catalogs_writer_lock(self):
+        """Named so a future edit cannot quietly point them at one file again."""
+        from emojikit.maintenance import lock_path
+        self.assertNotEqual(sandbox_clone.lifetime_lock_path(self.tmp).name,
+                            lock_path(self.tmp).name)
+
+
+class TheScrubLeavesTheProcessAbleToRun(unittest.TestCase):
+    """The scrub removes credentials, not the operating system.
+
+    `scrubbed_process_environment` cleared `os.environ` and only then called
+    `scrubbed_environment()`, which reads `os.environ` -- by that point empty.
+    The panel therefore ran with one variable, and Winsock could not create a
+    socket at all (`WinError 10106`). The existing test called
+    `scrubbed_environment()` directly, where the environment is still intact, so
+    it passed while the context manager it stands for was wiping everything.
+    """
+
+    def test_the_machine_environment_survives_inside_the_context(self):
+        with mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "111:live"}, clear=False):
+            with panel_sandbox.scrubbed_process_environment():
+                inside = dict(os.environ)
+        self.assertEqual(inside.get("EMOJI_MAPPER_NO_DOTENV"), "1")
+        self.assertNotIn("GENERAL_BOT_TOKEN", inside, "credentials must still go")
+        for needed in ("PATH", "SYSTEMROOT"):
+            self.assertIn(needed, {k.upper() for k in inside},
+                          f"{needed} is gone; the process cannot run")
+        self.assertGreater(len(inside), 5, "the environment was wiped, not scrubbed")
+
+    def test_the_environment_is_restored_afterwards(self):
+        before = dict(os.environ)
+        with panel_sandbox.scrubbed_process_environment():
+            pass
+        self.assertEqual(dict(os.environ), before)

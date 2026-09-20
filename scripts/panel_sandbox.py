@@ -46,10 +46,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from emojikit import panel  # noqa: E402 - needs ROOT on the path
-from emojikit.maintenance import lock_path  # noqa: E402
 from emojikit.packstate import exclusive_lock  # noqa: E402
 from emojikit.sandbox_clone import (  # noqa: E402
-    TMP_PREFIX, clone_catalog, sweep_stale)
+    TMP_PREFIX, clone_catalog, lifetime_lock_path, sweep_stale)
 
 # IMPORTED, never re-typed: the sandbox's whole job is to stay off the port a
 # real panel uses, and two copies of that number would drift the day one moves.
@@ -96,10 +95,16 @@ def scrubbed_process_environment():
     has to be applied here rather than handed to a child. Restoring matters
     because a caller that imported this module keeps running afterwards.
     """
+    # Computed BEFORE the clear, and that order is the whole point: reading
+    # `os.environ` after clearing it returns an EMPTY mapping, so the panel ran
+    # with nothing but the dotenv flag -- no SystemRoot, no PATH -- and Winsock
+    # could not even create a socket (`WinError 10106`). A scrub that removes
+    # everything is not a scrub.
+    child = scrubbed_environment()
     saved = dict(os.environ)
     try:
         os.environ.clear()
-        os.environ.update(scrubbed_environment())
+        os.environ.update(child)
         yield
     finally:
         os.environ.clear()
@@ -163,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         # Held for the whole life of the server, and released when this process
         # ends however it ends. That is what lets the next run's sweep tell an
         # abandoned clone from one that is still being served.
-        with exclusive_lock(lock_path(tmp)), scrubbed_process_environment():
+        with exclusive_lock(lifetime_lock_path(tmp)), scrubbed_process_environment():
             return panel.main(panel_arguments(args, tmp), reuse_existing=False)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
