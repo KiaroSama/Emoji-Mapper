@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import os
 import time
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -340,9 +341,17 @@ def write_json_atomic(path: Path, data) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=1)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    # An exclusive, invocation-owned sibling avoids truncating someone else's
+    # .tmp file or sharing an inode with another atomic writer. Callers still
+    # need their domain lock around an entire read-modify-write transaction.
+    fd, name = tempfile.mkstemp(prefix="." + path.name + "-", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        # After replace the pathname is gone; on failure only our inode is removed.
+        tmp.unlink(missing_ok=True)
