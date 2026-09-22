@@ -18,7 +18,7 @@
 # Pinned: the browser build is downloaded per playwright version, so a floating
 # version would silently ask for a Chromium that is not on the machine and the
 # module would fail at launch rather than at install.
-playwright==1.62.0
+playwright==1.63.0
 
 # The linter scripts\check.ps1 runs. Not a runtime dependency either; kept here
 # so `ruff check .` means the same thing locally as it does in CI.
