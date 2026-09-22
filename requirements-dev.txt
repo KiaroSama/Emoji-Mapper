@@ -22,4 +22,4 @@ playwright==1.62.0
 
 # The linter scripts\check.ps1 runs. Not a runtime dependency either; kept here
 # so `ruff check .` means the same thing locally as it does in CI.
-ruff>=0.16.7
+ruff>=0.16.8
