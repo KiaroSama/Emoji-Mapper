@@ -122,7 +122,7 @@ reported to `console`, which `wrangler tail` reads. `GET /health` reports
 never arrive.
 
 ```bash
-npx wrangler d1 execute emoji-mapper-logs --remote \
+npx wrangler d1 execute numera-emoji-mapper-logs --remote \
   --command "SELECT ts, bot, level, event, detail FROM logs ORDER BY id DESC LIMIT 20"
 ```
 
@@ -175,8 +175,8 @@ are ignored rather than silently coerced.
 Create the log database once, then deploy:
 
 ```powershell
-npx wrangler d1 create emoji-mapper-logs      # put the id in wrangler.toml
-npx wrangler d1 migrations apply emoji-mapper-logs --remote
+npx wrangler d1 create numera-emoji-mapper-logs      # put the id in wrangler.toml
+npx wrangler d1 migrations apply numera-emoji-mapper-logs --remote
 npx wrangler deploy
 ```
 
