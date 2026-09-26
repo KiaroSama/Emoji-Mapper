@@ -4,7 +4,8 @@ Covers:
   * BrandLogo format conversion (static PNG, looped video WEBM, animated needs
     a Lottie source and is skipped for raster);
   * publish_format placing the logo as the FIRST emoji of every set, only for
-    the Emoji Mapper bot, with correct custom_emoji_id offset mapping.
+    a bot the operator listed in BRAND_LOGO_BOTS, with correct custom_emoji_id
+    offset mapping.
 """
 
 from __future__ import annotations
@@ -208,32 +209,18 @@ class PublishFormatLogoFirst(unittest.TestCase):
                 self.assertEqual(cat.get(keys[0]).custom_emoji_id, f"{set_name}-0")
 
 
-class TheDefaultBrandLogoActuallyShips(unittest.TestCase):
-    """Owner rule: every pack the main bot builds leads with the YourBrand logo.
+class TheRepositoryShipsNoOperatorLogo(unittest.TestCase):
+    """The logo is the operator's own (BRAND_LOGO_PATH), never a repo default.
 
-    Every other test in this module passes its own synthetic logo, so none of
-    them notices if the DEFAULT one is missing. That is not hypothetical: the
-    default used to be an absolute F:\\ path, so on any machine but one the
-    "mandatory" logo silently vanished from every pack and nothing failed.
+    A default once pointed at one machine's F: drive and the "mandatory" logo
+    vanished everywhere else; a default inside the repo would instead publish
+    one operator's brand in everybody's packs. So there is none, and a publish
+    stops without one (tests/test_publish_cli.py pins the stop).
     """
 
-    def test_the_default_logo_is_a_real_file_inside_the_repo(self):
-        p = Path(cs.BRAND_LOGO_DEFAULT)
-        self.assertTrue(p.is_file(), f"the default brand logo is missing: {p}")
-        self.assertTrue(
-            str(p.resolve()).startswith(str(ROOT.resolve())),
-            "the default brand logo must ship in the repo, not point at a "
-            "machine-specific path")
-
-    def test_the_default_logo_is_not_blank(self):
-        """A blank logo would upload as an empty first emoji in every pack."""
-        with Image.open(cs.BRAND_LOGO_DEFAULT) as im:
-            self.assertFalse(media.is_blank_image(im.convert("RGBA")))
-
-    def test_the_main_bot_gets_it_and_the_coin_bot_does_not(self):
-        self.assertIn("youremojibot", cs.BRAND_LOGO_BOTS)
-        self.assertNotIn("yourcoinemojibot", cs.BRAND_LOGO_BOTS,
-                         "the coin bot is exempt by owner decision")
+    def test_no_default_logo_or_bot_list_survives_in_source(self):
+        for name in ("BRAND_LOGO_DEFAULT", "BRAND_LOGO_BOTS", "BRAND_LOGO_KW"):
+            self.assertFalse(hasattr(cs, name), name)
 
 
 if __name__ == "__main__":

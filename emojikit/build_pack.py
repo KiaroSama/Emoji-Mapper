@@ -1,6 +1,6 @@
 """Create Telegram premium custom-emoji pack(s) from a folder of PNG images.
 
-This is the generic Emoji Mapper engine: it uploads every 100x100 PNG found in a
+This is the generic Numera Emoji Mapper engine: it uploads every 100x100 PNG found in a
 source directory into one or more Telegram custom-emoji sets. It is NOT tied to
 cryptocurrency coins -- point ``--source-dir`` at any folder of prepared PNGs
 (see make_emoji_pngs.py) to build a pack of arbitrary emojis.
@@ -169,7 +169,7 @@ KEYWORDS_CSV = ROOT / "keywords.csv"
 def _under_a_test_runner() -> bool:
     """True when a test runner, not a tool, owns this process.
 
-    The suite's own guard (tests/__init__.py) sets EMOJI_MAPPER_NO_DOTENV, but
+    The suite's own guard (tests/__init__.py) sets NUMERA_EMOJI_MAPPER_NO_DOTENV, but
     it protects only what is imported AFTER it, and it runs at all only when
     `tests` is imported as a package -- `unittest discover -s tests` without
     `-t .` loads the modules as top level and skips it. Either way the modules
@@ -193,7 +193,7 @@ def load_env() -> None:
     # credentials straight back into os.environ after the suite scrubbed them --
     # reopening the hole that once let a test reach live Telegram and replace a
     # sticker in a production pack.
-    if os.environ.get("EMOJI_MAPPER_NO_DOTENV") == "1" or _under_a_test_runner():
+    if os.environ.get("NUMERA_EMOJI_MAPPER_NO_DOTENV") == "1" or _under_a_test_runner():
         return
     env = ROOT / ".env"
     if env.is_file():

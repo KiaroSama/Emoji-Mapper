@@ -85,7 +85,7 @@ class ReopenPanel(unittest.TestCase):
                 self.wfile.write(body)
 
         port = self.serve(Handler)
-        legacy_page = ('<title>Emoji Mapper — Curate</title><script id="items-data">[]</script>'
+        legacy_page = ('<title>Numera Emoji Mapper — Curate</title><script id="items-data">[]</script>'
                        '<script>const TOKEN = "fixture";</script>'
                        '<script src="/static/panel-grid.js"></script>').encode("utf-8")
         cases = [

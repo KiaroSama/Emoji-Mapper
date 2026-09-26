@@ -10,7 +10,7 @@ import os
 import webbrowser
 from pathlib import Path
 
-APP = "emoji-mapper-panel"
+APP = "numera-emoji-mapper-panel"
 PROBE_TIMEOUT = 1
 MAX_REPLY = 4 * 1024 * 1024
 log = logging.getLogger("panel")
@@ -59,7 +59,7 @@ def probe_session(port: int) -> dict | None:
     if status != 200 or body.strip() != b'{"ok":true}':
         return None
     status, body = _get(port, "/")
-    markers = ('<title>Emoji Mapper — Curate</title>', 'id="items-data"',
+    markers = ('<title>Numera Emoji Mapper — Curate</title>', 'id="items-data"',
                '/static/panel-grid.js', 'const TOKEN = ')
     if status == 200 and all(marker.encode("utf-8") in body for marker in markers):
         return {"application": APP, "legacy": True}

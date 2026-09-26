@@ -1,6 +1,6 @@
-# Emoji Mapper — Complete Guide (0 → 100)
+# Numera Emoji Mapper — Complete Guide (0 → 100)
 
-This is the full reference for **Emoji Mapper**. It is written so that any
+This is the full reference for **Numera Emoji Mapper**. It is written so that any
 person **or AI agent** can read it once and understand how the project works and
 how to perform every workflow and the next steps correctly. Keep this file in
 sync with the code: whenever a command, flag, file, or workflow changes, update
@@ -14,7 +14,7 @@ the matching section here.
 
 ## 1. What this project does
 
-Emoji Mapper turns images/animations into **Telegram premium custom-emoji
+Numera Emoji Mapper turns images/animations into **Telegram premium custom-emoji
 packs**, and also **collects** premium emoji from existing packs and posts.
 
 Two independent but related sides:
@@ -32,7 +32,7 @@ Supported custom-emoji formats: **static** (PNG/WEBP, 100×100), **animated**
 ## 2. Repository map
 
 ```
-Emoji Mapper/
+Numera Emoji Mapper/
   run.ps1                  Windows launcher (menu). Prefer this.
   emojikit/                command modules and shared toolkit
     build_pack.py            core engine: upload a folder of media to emoji sets
@@ -50,6 +50,7 @@ Emoji Mapper/
     packstate.py              state-file shape + atomic write + pack-family lock
     announce.py               announce finished packs (Worker, or direct)
     collection_state.py       publisher plan/resume state + brand logo
+    operator_config.py        the operator's identities from .env; unset = stop, no default
     collection_reconcile.py   what is live in a set, and whose key each sticker is
     collection_migrate.py     a content-key migration as ONE versioned change
     collection_preflight.py   --preflight only: ask Telegram to validate the queue
@@ -118,11 +119,21 @@ WORKER_PUBLISH_SECRET=<optional: bearer for that endpoint; both or neither>
 EMOJI_LOG_RETENTION_DAYS=30    # optional: prune logs/ older than N days (0 = keep all)
 EMOJI_FFMPEG_TIMEOUT=300       # optional: seconds per ffmpeg/ffprobe child
 CMC_API_KEY=<optional CoinMarketCap key, only for coins/fetch_cmc.py>
+
+# Your identities -- required where used, NO default (the repo names no operator)
+BRAND_LOGO_BOTS=<bots whose sets lead with your logo; EMPTY = none, unset = stop>
+BRAND_LOGO_PATH=private/brand-logo.png   # your logo; private/ is git-ignored
+BRAND_LOGO_KEYWORDS=<optional: logo emoji keywords, default logo>
+COLLECTION_PACK_BASE=<your general collection's --base>
+COIN_PACK_BASE=<your coin set-name base>
+COIN_PACK_TITLE=<your coin set title>
+EMOJI_ARCHIVE_DIR=<where full packs are archived>
+COIN_EMOJI_DIR=<where the coin logo PNGs live>
 ```
 
 That is the complete set of variables any code reads, plus two environment-only
 switches used for testing: `TELEGRAM_API_BASE` (Bot API endpoint override,
-default `https://api.telegram.org`) and `EMOJI_MAPPER_NO_DOTENV=1` (makes
+default `https://api.telegram.org`) and `NUMERA_EMOJI_MAPPER_NO_DOTENV=1` (makes
 `emojikit.build_pack.load_env()` a no-op; it is read *before* `.env`, so it only works
 from the real environment — the test suite sets it there). There is no
 `GENERAL_BOT_USERNAME` / `GENERAL_BOT_NAME`: every tool takes the bot's username
@@ -149,7 +160,7 @@ clean), then shows a **colored, sectioned** menu. Sections are lettered in order
 has its own numbering, so keys stay unique — type e.g. `A1`, `B3`, `D1`:
 
 ```
-                              Emoji Mapper
+                              Numera Emoji Mapper
 ====================================================================
 Logging to: logs\run_2026-07-03_12-29-45_UTC.log
 
@@ -165,7 +176,7 @@ Collection (multi-format, duplicate-proof)
   B4) Open web panel to pick & reorder emoji (browser)
 
 Bot
-  C1) Run the Emoji Mapper bot (premium-emoji ID extractor)
+  C1) Run the Numera Emoji Mapper bot (premium-emoji ID extractor)
 
 Maintenance
   D1) Run the project checks (byte-compile + unit tests)
@@ -381,7 +392,7 @@ not from positions** (a historical position-based bug scrambled it):
 
 ---
 
-## 8. The Emoji Mapper bot (`emojikit/emoji_bot.py`)
+## 8. The Numera Emoji Mapper bot (`emojikit/emoji_bot.py`)
 
 Long-polling bot (run it and leave it running; only one instance at a time):
 
@@ -439,7 +450,7 @@ which the client-side behaviour exists — a save pipeline that drops the newest
 edit is perfectly well-formed JavaScript, and a source-text assertion cannot
 tell it from a correct one. A missing playwright or Chromium is a **hard error,
 never a skip**: a browser test that reports green on a machine with no browser
-is worse than no browser test at all. Set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to
+is worse than no browser test at all. Set `NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1` to
 opt out deliberately, and know that you did.
 
 `scripts\check.ps1` is the single command CI and a developer both run, so the two
@@ -479,7 +490,7 @@ A separate job also makes a Worker failure legible as a Worker failure.
 **So does the panel's browser suite**, in `panel-browser:`, for the same reason:
 it exercises JavaScript, so running it in the matrix would download Chromium
 once per Python version to prove the same thing. The matrix sets
-`EMOJI_MAPPER_NO_BROWSER_TESTS=1` explicitly — an opt-out that is written down
+`NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1` explicitly — an opt-out that is written down
 is the only kind this module accepts.
 
 `check.ps1` stays Python-only: it is the command a developer runs constantly,
@@ -728,7 +739,7 @@ remain the identity, and only the human title moved.
 | `--new-set` | off | Start this run in a **fresh** set instead of filling the current one. |
 | `--into-pack` | *(newest)* | Add to pack **N** instead of the newest one, so any pack with room can be topped up. |
 | `--data-dir` | `collection` | Catalog/media directory. |
-| `--brand-logo` | `assets/yourbrand-emoji-logo.png` | First-emoji brand logo (Emoji Mapper bot only). |
+| `--brand-logo` | `BRAND_LOGO_PATH` | First-emoji brand logo, for the bots in `BRAND_LOGO_BOTS` only. |
 | `--no-brand-logo` | off | Disable the mandatory first-emoji logo. |
 | `--mixed` | off | Publish every format into ONE family (see above). |
 | `--dry-run` | off | Show the plan without uploading. |
@@ -790,16 +801,23 @@ catch. Both now follow the pack actually being written to, and a test pins it.
 Only **included** (panel-selected), not-yet-uploaded, non-skipped items are
 published. Per-format sets, drift-proof resume, per-pack manifests.
 
-**Brand logo (first emoji of every set).** When publishing with the
-`@YourEmojiBot` bot, the YourBrand logo is inserted as the **first
-emoji of every set** (`--brand-logo`, default `BRAND_LOGO_DEFAULT` in
-`emojikit/build_collection.py` = the repo's own `assets/yourbrand-emoji-logo.png`, so a
-fresh clone works with no machine-specific path). Since Bot API 7.2
-(March 2024) a single custom-emoji set may contain **mixed formats**, so the
-logo is always a **static** 100x100 PNG and leads a static, video *or* animated
-set alike (verified live). The `@YourCoinEmojiBot` coin bot is exempt.
-Disable with `--no-brand-logo`. The logo occupies position 0, so item
-`custom_emoji_id`s are read from position 1 onward (handled automatically).
+**Brand logo (first emoji of every set).** Your own logo, configured in
+`.env` -- the repository ships none, because it names no operator:
+
+| Key | Meaning |
+|-----|---------|
+| `BRAND_LOGO_BOTS` | Bot usernames whose sets lead with the logo, comma-separated. **Set it empty** for "no bot"; unset stops the publish. |
+| `BRAND_LOGO_PATH` | The logo image. Relative paths are under the project root; `private/` is git-ignored for exactly this. |
+| `BRAND_LOGO_KEYWORDS` | Optional search keywords for the logo emoji (default `logo`). |
+
+When publishing with a listed bot the logo is inserted as the **first emoji of
+every set** (`--brand-logo` overrides the path). A listed bot whose logo file
+is missing stops the publish before anything changes: the first slot cannot be
+filled afterwards. Since Bot API 7.2 (March 2024) a single custom-emoji set may
+contain **mixed formats**, so the logo is always a **static** 100x100 PNG and
+leads a static, video *or* animated set alike (verified live). Leave the coin
+bot out of `BRAND_LOGO_BOTS` to keep it exempt. Disable with `--no-brand-logo`.
+The logo occupies position 0, so item `custom_emoji_id`s are read from position 1 onward (handled automatically).
 
 ### 12.5b `emojikit/sync_order.py` — reorder an ALREADY PUBLISHED pack
 
@@ -926,11 +944,11 @@ still be reordered, which would make every name in its folder wrong.
 | `--check` | — | Does the archive still describe the packs? Exit 3 if not. Local only, no network. |
 | `--sync` | — | Archive every FULL pack and regenerate its metadata from the live set. |
 
-`EMOJI_ARCHIVE_DIR` overrides the archive root (default
-`F:\Stickers and Emojis\Emojis`). Each folder holds:
+`EMOJI_ARCHIVE_DIR` is the archive root and `COLLECTION_PACK_BASE` the pack
+family it follows; both are required, with no default. Each folder holds:
 
 ```
-001_logo_yourbrand.png              the brand logo, copied from assets/ (never moved)
+001_logo.png                         your brand logo, copied from BRAND_LOGO_PATH
 <slot>_<format>_<key[:12]>.<ext>     one per emoji; slot is 1-based, the logo is 1
 _history.json  _history.md           every position, id, content key and glyph
 _manifest.md                         name -> current id, the quick lookup
@@ -1075,7 +1093,7 @@ name prefix and deleted every hit, so starting a second sandbox removed the
 first one's catalog.
 
 **And it isolates the account.** The panel runs in the wrapper's own process
-with `EMOJI_MAPPER_NO_DOTENV=1` -- the flag `load_env()` already honours for the
+with `NUMERA_EMOJI_MAPPER_NO_DOTENV=1` -- the flag `load_env()` already honours for the
 test suite -- and with every key `.env.example` names, plus anything
 credential-shaped, stripped from the environment and restored afterwards.
 Without it, a sandbox that had carefully cloned the catalog still called `getMe`
@@ -1131,15 +1149,14 @@ published media. Measure performance on a separate catalog with the same media,
 viewport, zoom and warm-cache state; desktop load and browser configuration matter.
 
 **Brand logo preview.** `--bot-username YourEmojiBot` selects branding
-without a Telegram lookup. Otherwise, if `GENERAL_BOT_TOKEN` resolves to
-`@YourEmojiBot` and the logo file (`BRAND_LOGO_DEFAULT` in
-`emojikit/build_collection.py`) exists, the panel shows it as a distinct **gold-bordered
+without a Telegram lookup. Otherwise, if `GENERAL_BOT_TOKEN` resolves to a bot
+in `BRAND_LOGO_BOTS` and `BRAND_LOGO_PATH` exists, the panel shows it as a distinct **gold-bordered
 first card** labelled "Brand logo (auto-added on publish)" so you can see where
 it will land *before* publishing. This card is preview-only: it's not clickable,
 not counted in the included/excluded totals, and never sent to `/api/save` — the
 logo itself is never part of the catalog and is only actually inserted by
-`emojikit/build_collection.py` at publish time (see §12.5). For the coin bot, or if the
-logo file is missing, the card is simply not shown.
+`emojikit/build_collection.py` at publish time (see §12.5). For an unlisted bot, or if the
+logo is not configured or missing, the card is simply not shown.
 
 **Emoji already live in a pack are hidden.** The panel arranges the pack being
 BUILT, and `is_published` skips a published item at publish time however it is
@@ -1832,7 +1849,7 @@ calibration that has worked in practice — recheck the distance histogram the
 dry run prints before trusting it on a changed corpus).
 
 ```powershell
-.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "F:\...\emoji" --max-distance 200 --apply
+.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "<coin logo folder>" --max-distance 200 --apply
 ```
 
 A resumable cache (`coins/remap_live_cache.json`, gitignored) avoids
@@ -1922,14 +1939,14 @@ the base coin's id. This filled the NOWPayments inventory to 354/354.
 ### 18.4 Rebuild the coin id map after any pack change
 
 ```powershell
-.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "F:\...\emoji" --max-distance 200 --apply
+.venv\Scripts\python.exe coins\remap_ids.py --emoji-dir "<coin logo folder>" --max-distance 200 --apply
 .venv\Scripts\python.exe coins\enhance_map.py
 .venv\Scripts\python.exe coins\alias_map.py
-.venv\Scripts\python.exe coins\write_manifests.py --out-dir "F:\...\@YourBrand Crypto Emoji"
+.venv\Scripts\python.exe coins\write_manifests.py --out-dir "<coin archive folder>"
 ```
 ---
 
-## 19. The Emoji Mapper bot internals (`emojikit/emoji_bot.py`)
+## 19. The Numera Emoji Mapper bot internals (`emojikit/emoji_bot.py`)
 
 Long-polling loop: `getUpdates(offset, timeout=50, allowed_updates=[message,
 channel_post, edited_channel_post, my_chat_member])`. Each update is dispatched
@@ -2524,13 +2541,13 @@ $PY coins\fetch_logos.py
 $PY -m emojikit.make_emoji_pngs --in coins\logos\svg --out coins\logos\emoji
 $PY -m emojikit.make_emoji_pngs --in coins\logos\png --out coins\logos\emoji
 $PY coins\rebuild_dedup.py
-$PY coins\remap_ids.py --emoji-dir "F:\...\emoji" --max-distance 200 --apply
+$PY coins\remap_ids.py --emoji-dir "<coin logo folder>" --max-distance 200 --apply
 $PY coins\enhance_map.py
 $PY coins\alias_map.py
 $PY coins\check_all_packs.py
-$PY coins\verify_logos.py --emoji-dir "F:\...\emoji"
-$PY coins\verify_logos.py --emoji-dir "F:\...\emoji" --fix --only sol,xrp
-$PY coins\write_manifests.py --out-dir "F:\...\@YourBrand Crypto Emoji"
+$PY coins\verify_logos.py --emoji-dir "<coin logo folder>"
+$PY coins\verify_logos.py --emoji-dir "<coin logo folder>" --fix --only sol,xrp
+$PY coins\write_manifests.py --out-dir "<coin archive folder>"
 
 # --- tests / CI-locally ---
 .\scripts\check.ps1                                     # what CI runs (compile + suite)
@@ -2604,7 +2621,7 @@ DUPLICATE image groups: 0 (extra duplicate stickers: 0)
   real browser (Playwright) at the relevant breakpoints.
 - **Sync:** push to `main` and keep this guide + `README.md` current.
 
-*This guide is the single source of truth for how Emoji Mapper works. If code
+*This guide is the single source of truth for how Numera Emoji Mapper works. If code
 and guide disagree, fix whichever is wrong and re-sync.*
 
 ---

@@ -41,10 +41,12 @@ from coins import _http
 from emojikit import media
 from emojikit.identity import _dhash, hamming
 from emojikit.logsetup import setup_logging
+from emojikit import operator_config
 
 ROOT = Path(__file__).resolve().parent
 # The coin pack family, matching coins/fetch_paprika.py and coins/rebuild_dedup.py.
-SET_BASE = "cryptoemoji"
+load_env()  # before the operator's pack family is read at import
+SET_BASE = operator_config.value("COIN_PACK_BASE")
 # Keyed on the BASE NAME, exactly like the fetchers and the rebuild tool:
 # --fix replaces stickers in the very sets they append to. A lock named after
 # this script's own file (coin_pack.lock) was a DIFFERENT name from theirs, so
@@ -475,6 +477,7 @@ def fix_one(tg: Telegram, uid: int, sets: list[dict], map_path: Path,
 
 def main() -> int:
     load_env()
+    operator_config.stop_unless("COIN_PACK_BASE")
     setup_logging("verify_logos")
     ap = argparse.ArgumentParser()
     ap.add_argument("--emoji-dir", required=True)

@@ -41,7 +41,7 @@ from pathlib import Path
 
 from emojikit import pack_gallery
 from emojikit.build_pack import EXIT_FAILED, EXIT_OK, Telegram, load_env
-from emojikit.collection_state import BRAND_LOGO_DEFAULT
+from emojikit import operator_config
 from emojikit import media
 from emojikit.logsetup import record_exit_code, setup_logging
 from emojikit.packstate import write_json_atomic
@@ -50,16 +50,19 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "packs"
 DATA_DIR = ROOT / "collection"
 COINS_DIR = ROOT / "coins"
-GENERAL_STATE = DATA_DIR / "publish_YourBrand_Emoji_Packs.json"
 COINS_STATE = COINS_DIR / "rebuild_dedup_state.json"
 TICKER_MAP = COINS_DIR / "ticker_to_id.json"
 CATALOG = DATA_DIR / "catalog.db"
 THUMBS = OUT_DIR / ".thumbs"
 # The coin logos are a 5877-file corpus kept OUTSIDE the repo. Never hard-code
 # one machine's drive letter: the brand logo once did and vanished everywhere
-# else. Env var first, then the documented location, then no pictures.
+# else. The env var, or no pictures.
 COIN_ART_ENV = "COIN_EMOJI_DIR"
-COIN_ART_FALLBACK = Path(r"F:\Stickers and Emojis\Emojis\@YourBrand Crypto Emoji\emoji")
+
+
+def general_state() -> Path:
+    """The general family's publish state, named after COLLECTION_PACK_BASE."""
+    return DATA_DIR / f"publish_{operator_config.value('COLLECTION_PACK_BASE')}.json"
 
 EXIT_STALE = 3          # --check only: the roster no longer describes the inputs
 log = logging.getLogger("pack_manifest")
@@ -169,9 +172,8 @@ def previous_ids() -> dict[str, dict]:
 def coin_art_dir() -> Path | None:
     """Where the coin logo PNGs live, or None when this machine cannot see them."""
     env = os.environ.get(COIN_ART_ENV)
-    for cand in ([Path(env)] if env else []) + [COIN_ART_FALLBACK]:
-        if cand.is_dir():
-            return cand
+    if env and Path(env).is_dir():
+        return Path(env)
     log.warning("coin art not found (set %s); coin pages will have no pictures.",
                 COIN_ART_ENV)
     return None
@@ -341,7 +343,7 @@ def fingerprint() -> dict:
     edit to these files moves both numbers.
     """
     out = {}
-    for p in (CATALOG, GENERAL_STATE, COINS_STATE, TICKER_MAP):
+    for p in (CATALOG, general_state(), COINS_STATE, TICKER_MAP):
         try:
             s = p.stat()
             out[p.name] = [s.st_size, int(s.st_mtime)]
@@ -376,8 +378,13 @@ def refresh(family: str) -> int:
         if not token:
             log.error("GENERAL_BOT_TOKEN is not set; cannot read the general packs.")
             return EXIT_FAILED
+        if not operator_config.value("COLLECTION_PACK_BASE"):
+            # Unset is unknown, not "no general packs": a roster that silently
+            # dropped the family would read as if the packs were gone.
+            log.error("COLLECTION_PACK_BASE is not set; cannot find the general packs.")
+            return EXIT_FAILED
         tg = Telegram(token)
-        jobs += [("general", r, tg) for r in _sets(GENERAL_STATE) if r.get("name")]
+        jobs += [("general", r, tg) for r in _sets(general_state()) if r.get("name")]
     if family in ("all", "coins"):
         # The coin packs belong to a DIFFERENT bot. A set belongs to the bot that
         # created it, so the general token answers STICKERSET_INVALID here.
@@ -415,9 +422,9 @@ def refresh(family: str) -> int:
                 # The brand logo has no catalog row -- it is inserted at publish
                 # time, never ingested -- so the catalog cannot supply its art
                 # either, and the page showed "no preview" on the one row the
-                # owner cares most about. It ships in the repo; use it.
+                # owner cares most about. Use the operator's configured logo.
                 if e["role"] == "brand-logo":
-                    return Path(BRAND_LOGO_DEFAULT)
+                    return operator_config.brand_logo_path(strict=False)
                 return gen_art.get(e["custom_emoji_id"])
             return gen_path
         def coin_path(e):

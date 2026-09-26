@@ -45,7 +45,7 @@ class _Env:
             "custom_emoji_id TEXT);")
         con.execute("INSERT INTO items VALUES(?,?,?,?)",
                     (KEY, str(media), "static", json.dumps(["lock"])))
-        con.execute("INSERT INTO publications VALUES(?,?,?,?)", (pa.BASE, KEY, "set1", cid))
+        con.execute("INSERT INTO publications VALUES(?,?,?,?)", (pa._base(), KEY, "set1", cid))
         con.commit()
         con.close()
 
@@ -66,7 +66,7 @@ class _Env:
                 p.unlink()
             self.folder.rmdir()
 
-        for p in (patch.object(pa, "CATALOG", db), patch.object(pa, "STATE", state),
+        for p in (patch.object(pa, "CATALOG", db), patch.object(pa, "_state_file", lambda: state),
                   patch.object(pa, "archive_root", lambda: self.archive)):
             stack.enter_context(p)
 

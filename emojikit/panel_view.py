@@ -12,7 +12,7 @@ import logging
 import re
 from pathlib import Path
 
-from emojikit.collection_state import BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT
+from emojikit import operator_config
 from emojikit.catalog import PHASH_BITS, Catalog
 
 # Deliberately the panel's logger, not this module's: these messages are the
@@ -162,8 +162,11 @@ def build_view(cat: Catalog, bot_username: str = "",
     view = []
     by_key: dict[str, Path] = {}
 
-    logo_path = Path(BRAND_LOGO_DEFAULT)
-    branded = bot_username.lower() in BRAND_LOGO_BOTS and logo_path.is_file()
+    # Preview only, so unset configuration shows no logo instead of stopping;
+    # the publish itself refuses to run without it.
+    logo_path = operator_config.brand_logo_path(strict=False)
+    branded = (bot_username.lower() in operator_config.brand_logo_bots(strict=False)
+               and logo_path is not None and logo_path.is_file())
     if branded and not keep_sets:
         # Preview-only: shows where the brand logo will be inserted on publish.
         # It is NOT part of the catalog, is never counted in the totals, is not

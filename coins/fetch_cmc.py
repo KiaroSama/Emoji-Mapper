@@ -32,6 +32,7 @@ import time
 import urllib.parse
 
 from emojikit.build_pack import (ingest_exit_code, load_env)
+from emojikit import operator_config
 from emojikit.telegram_api import (Telegram)
 from coins import _http
 from coins._inventory import base_ticker
@@ -102,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                          "no pack or map changes.")
     dry = ap.parse_args(argv).dry
     load_env()
+    operator_config.stop_unless("COIN_PACK_BASE", "COIN_PACK_TITLE")
     headers = cmc_headers()
     ticker_to_id: dict[str, str] = json.loads(TICKER_IDS.read_text("utf-8"))
     have = set(ticker_to_id)

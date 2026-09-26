@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with Emoji Mapper
+description: Report a problem with Numera Emoji Mapper
 labels: ["bug"]
 body:
   - type: markdown

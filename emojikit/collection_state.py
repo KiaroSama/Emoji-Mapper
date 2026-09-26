@@ -40,20 +40,15 @@ FMT_TAG = {"static": "s", "video": "v", "animated": "a"}
 MIXED = "mixed"
 DEFAULT_EMOJI = "\U0001F600"
 
-# --- Brand logo (first emoji of every set built with the Emoji Mapper bot) --- #
-# Only packs published by these bots get the mandatory YourBrand logo as their
-# first emoji. The coin bot (@YourCoinEmojiBot) is intentionally
-# excluded, so it is NOT in this set.
-BRAND_LOGO_BOTS = {"youremojibot"}
-# Ships with the repository. This used to be an absolute F:\ path, so on any
-# other machine the "mandatory" logo silently vanished from every pack.
-BRAND_LOGO_DEFAULT = str(ROOT / "assets" / "yourbrand-emoji-logo.png")
-BRAND_LOGO_EMOJI = "\u2705"          # ✅ associated standard emoji for the logo
-BRAND_LOGO_KW = ["yourbrand", "logo"]
+# --- Brand logo (the operator's own first emoji) --- #
+# WHICH bots get it, the image and its keywords are the operator's own
+# configuration (emojikit.operator_config): the repository is public and names
+# no operator. Only the associated standard emoji is fixed here.
+BRAND_LOGO_EMOJI = "✅"          # ✅ associated standard emoji for the logo
 
 
 class BrandLogo:
-    """The brand logo (YourBrand) used as the FIRST emoji of every set.
+    """The operator's brand logo, used as the FIRST emoji of every set.
 
     Since Bot API 7.2 (March 2024) a single custom-emoji set may contain mixed
     formats, so the logo is always a **static** 100x100 PNG and can lead a

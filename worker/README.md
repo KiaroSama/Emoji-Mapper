@@ -1,4 +1,4 @@
-# Emoji Mapper bots — Cloudflare Worker
+# Numera Emoji Mapper bots — Cloudflare Worker
 
 Both bots in one Worker, answering only the admins you name, plus the endpoint
 the local builder calls so a finished pack is announced **by the bot** in your

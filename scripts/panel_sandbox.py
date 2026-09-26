@@ -67,7 +67,7 @@ def scrubbed_environment() -> dict[str, str]:
     so a sandbox started precisely to avoid touching the owner's data still
     reached live Telegram as the real bot, with the real token.
 
-    Two leaks, two plugs. `EMOJI_MAPPER_NO_DOTENV` is the flag `load_env()`
+    Two leaks, two plugs. `NUMERA_EMOJI_MAPPER_NO_DOTENV` is the flag `load_env()`
     already honours for the test suite, so `.env` is never read; the inherited
     copies have to go with it, because an already-exported token does not need
     the file. `.env.example` is the authoritative key list and holds no values,
@@ -81,7 +81,7 @@ def scrubbed_environment() -> dict[str, str]:
                   if "=" in line and not line.lstrip().startswith("#")}
     child = {k: v for k, v in os.environ.items()
              if k not in listed and not _SECRETISH.search(k)}
-    child["EMOJI_MAPPER_NO_DOTENV"] = "1"
+    child["NUMERA_EMOJI_MAPPER_NO_DOTENV"] = "1"
     return child
 
 

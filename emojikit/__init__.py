@@ -1,4 +1,4 @@
-"""Emoji Mapper core toolkit.
+"""Numera Emoji Mapper core toolkit.
 
 A shared library for the collector, publishing workflows and local curation:
 

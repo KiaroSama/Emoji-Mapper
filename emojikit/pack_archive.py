@@ -18,7 +18,7 @@ Two halves, and the second is the one that was missing:
 
 Layout of ``<archive>/<pack title>/``::
 
-    001_logo_yourbrand.png                 the brand logo, byte-identical to the repo asset
+    001_logo.png                            the operator's brand logo (BRAND_LOGO_PATH), copied
     <slot:03d>_<format>_<key[:12]>.<ext>    one per emoji, slot is 1-based (the logo is 1)
     _history.json                           machine: every position, id, content key and glyph
     _history.md                             the same, for a human
@@ -40,7 +40,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from emojikit.collection_state import BRAND_LOGO_DEFAULT, PER_SET
+from emojikit import operator_config
+from emojikit.collection_state import PER_SET
+from emojikit.errors import OperatorConfigMissing
 from emojikit import logsetup
 from emojikit.packstate import LockBusy, write_json_atomic
 from emojikit.maintenance import writer
@@ -48,16 +50,12 @@ from emojikit.maintenance import writer
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "collection"
 CATALOG = DATA_DIR / "catalog.db"
-BASE = "YourBrand_Emoji_Packs"
-STATE = DATA_DIR / f"publish_{BASE}.json"
-
-# The archive lives on the owner's media drive, not in the repository. An env
-# var so the path is not baked in: an absolute default is exactly how the brand
-# logo once vanished on every other machine.
+# The general pack family and the archive folder are the operator's own
+# (COLLECTION_PACK_BASE, EMOJI_ARCHIVE_DIR). No fallback: an absolute default is
+# exactly how the brand logo once vanished on every other machine.
 ARCHIVE_ENV = "EMOJI_ARCHIVE_DIR"
-ARCHIVE_FALLBACK = Path(r"F:\Stickers and Emojis\Emojis")
 
-LOGO_NAME = "001_logo_yourbrand.png"
+LOGO_NAME = "001_logo.png"
 META = ("_history.json", "_history.md", "_manifest.md")
 NAME_RE = re.compile(r"^(\d{3})_(static|animated|video)_([0-9a-f]{12})\.")
 
@@ -66,18 +64,27 @@ log = logging.getLogger("pack_archive")
 
 
 def archive_root() -> Path:
-    raw = os.environ.get(ARCHIVE_ENV, "").strip()
-    return Path(raw) if raw else ARCHIVE_FALLBACK
+    operator_config.require(ARCHIVE_ENV)
+    return Path(operator_config.value(ARCHIVE_ENV))
+
+
+def _base() -> str:
+    return operator_config.value("COLLECTION_PACK_BASE")
+
+
+def _state_file() -> Path:
+    return DATA_DIR / f"publish_{_base()}.json"
 
 
 def _sets() -> list[dict]:
-    if not STATE.is_file():
+    state = _state_file()
+    if not state.is_file():
         return []
     try:
-        return [s for s in json.loads(STATE.read_text(encoding="utf-8")).get("sets") or []
+        return [s for s in json.loads(state.read_text(encoding="utf-8")).get("sets") or []
                 if s.get("name") and s.get("title")]
     except (OSError, ValueError) as exc:
-        log.error("cannot read %s: %s", STATE.name, exc)
+        log.error("cannot read %s: %s", state.name, exc)
         return []
 
 
@@ -94,7 +101,7 @@ def _catalog() -> tuple[dict[str, dict], dict[str, list[str]]]:
             "SELECT i.content_key ck, i.file_path fp, i.format fmt, i.keywords kw, "
             "       p.set_name sn, p.custom_emoji_id cid "
             "FROM items i JOIN publications p ON p.content_key = i.content_key "
-            "WHERE p.base = ?", (BASE,)).fetchall()
+            "WHERE p.base = ?", (_base(),)).fetchall()
     finally:
         db.close()
     for r in rows:
@@ -264,7 +271,13 @@ def _sync(tg) -> int:
 
             logo = folder / LOGO_NAME
             if not logo.is_file():
-                shutil.copy2(BRAND_LOGO_DEFAULT, logo)   # copied, never moved: the repo keeps its asset
+                # A folder archived under an older logo name keeps its file,
+                # renamed; otherwise the operator's logo is copied, never moved.
+                older = sorted(folder.glob("001_logo*.png"))
+                if older:
+                    os.replace(older[0], logo)
+                else:
+                    shutil.copy2(operator_config.brand_logo_path(), logo)
             write_json_atomic(folder / "_history.json",
                               {"set_name": rec["name"],
                                "link": f"https://t.me/addemoji/{rec['name']}",
@@ -299,22 +312,27 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.check or args.sync):
         ap.error("give --check or --sync")
 
+    from emojikit.build_pack import load_env
+    load_env()
+    try:
+        operator_config.require("COLLECTION_PACK_BASE", ARCHIVE_ENV)
+    except OperatorConfigMissing as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_FAILED
     if args.check:
         stale, why = check()
         print(("STALE: " + "; ".join(why)) if stale else "fresh: the archive matches the packs")
         return EXIT_STALE if stale else EXIT_OK
 
     logsetup.setup_logging("pack_archive")
-    from emojikit.build_pack import load_env
     from emojikit.telegram_api import Telegram
-    load_env()
     token = os.environ.get("GENERAL_BOT_TOKEN")
     if not token:
         log.error("GENERAL_BOT_TOKEN is not set; cannot read the live packs.")
         return EXIT_FAILED
     try:
         return sync(Telegram(token))
-    except LockBusy as exc:
+    except (LockBusy, OperatorConfigMissing) as exc:
         log.error("%s", exc)
         return EXIT_FAILED
 

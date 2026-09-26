@@ -46,8 +46,9 @@ from emojikit.collection_reconcile import (_confirm_new_upload,
                                   _live_index, _manifest_mismatch, _probe,
                                   _set_is_open,
                                   reconcile_set)
-from emojikit.collection_state import (BRAND_LOGO_BOTS, BRAND_LOGO_DEFAULT,
-                              BRAND_LOGO_EMOJI, BRAND_LOGO_KW,
+from emojikit import operator_config
+from emojikit.errors import OperatorConfigMissing
+from emojikit.collection_state import (BRAND_LOGO_EMOJI,
                               DEFAULT_EMOJI, FMT_TAG, MIXED, PER_SET, ROOT,
                               BrandLogo, SetDrift, StateError, _lock_path, _state_path,
                               _static_is_blank, freeze_plan, load_state,
@@ -335,7 +336,7 @@ def publish_format(tg: Telegram, cat: Catalog, *, fmt: str, plan_keys: list[str]
                         # static, video or animated set alike.
                         tg.create_emoji_set(user_id, set_name, set_title, logo_png,
                                             "static", [BRAND_LOGO_EMOJI],
-                                            BRAND_LOGO_KW,
+                                            operator_config.brand_logo_keywords(),
                                             needs_repainting=repaint)
                     else:
                         tg.create_emoji_set(user_id, set_name, set_title, path,
@@ -613,9 +614,9 @@ def main(argv: list[str] | None = None) -> int:
                          "added to an existing pack and it flattens colour "
                          "art, so give repaintable emoji their own family.")
     ap.add_argument("--data-dir", default="collection")
-    ap.add_argument("--brand-logo", default=BRAND_LOGO_DEFAULT,
+    ap.add_argument("--brand-logo", default=None,
                     help="Logo image used as the FIRST emoji of every set built "
-                         "by the Emoji Mapper bot (ignored for the coin bot).")
+                         "by a BRAND_LOGO_BOTS bot (default: BRAND_LOGO_PATH).")
     ap.add_argument("--no-brand-logo", action="store_true",
                     help="Disable the mandatory first-emoji brand logo.")
     ap.add_argument("--dry-run", action="store_true")
@@ -651,7 +652,13 @@ def main(argv: list[str] | None = None) -> int:
     # The brand logo is the first emoji of every set it leads, so it costs one
     # slot per set. Which bot runs is only known after getMe, so the dry-run
     # assumes the logo is used whenever it is enabled and present.
-    logo_planned = bool(not args.no_brand_logo and Path(args.brand_logo).is_file())
+    try:
+        args.logo_bots, args.brand_logo = operator_config.brand_logo(
+            args.no_brand_logo, args.brand_logo)
+    except OperatorConfigMissing as exc:
+        log.error("%s", exc)
+        return EXIT_USAGE
+    logo_planned = bool(args.logo_bots)
     capacity = args.per_set - (1 if logo_planned else 0)
     if capacity < 1:
         log.error("--per-set %d leaves no room for the brand logo; use at least "
@@ -742,16 +749,12 @@ def _publish(args, *, base: str, formats: list[str], data_dir: Path, db: Path,
                 tg, cat, args.user_id, plan, formats, base,
                 set(state.get("skipped", [])), pending_keys)
 
-        # The YourBrand logo is the mandatory first emoji of every set built by
-        # the Emoji Mapper bot; the coin bot is excluded by design.
+        # The operator's logo is the mandatory first emoji of every set built by
+        # a bot they listed in BRAND_LOGO_BOTS; its file was checked up front.
         logo = None
-        if not args.no_brand_logo and bot.lower() in BRAND_LOGO_BOTS:
-            if logo_planned:
-                logo = BrandLogo(args.brand_logo, data_dir)
-                log.info("brand logo enabled (first emoji of every set): %s",
-                         args.brand_logo)
-            else:
-                log.warning("brand logo requested but not found: %s", args.brand_logo)
+        if bot.lower() in args.logo_bots:
+            logo = BrandLogo(args.brand_logo, data_dir)
+            log.info("brand logo enabled (first emoji of every set): %s", args.brand_logo)
 
         ok = failed = 0
         for fmt in formats:

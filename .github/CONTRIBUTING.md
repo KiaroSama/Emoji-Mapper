@@ -1,6 +1,6 @@
 # Contributing
 
-Emoji Mapper is free software under the **GNU General Public License v3 or
+Numera Emoji Mapper is free software under the **GNU General Public License v3 or
 later** (see [LICENSE](LICENSE)).
 
 ## External contributions

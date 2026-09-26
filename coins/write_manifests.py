@@ -5,7 +5,7 @@ map to it and its custom_emoji_id. One Markdown file per pack plus a combined
 index, written under ``<out-dir>/manifests/``.
 
 Usage:
-  python coins/write_manifests.py --out-dir "F:\\...\\@YourBrand Crypto Emoji"
+  python coins/write_manifests.py --out-dir "<your coin archive folder>"
 """
 
 from __future__ import annotations

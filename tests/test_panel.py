@@ -13,6 +13,7 @@ test_panel_guard.py and the process/port behaviour in test_panel_server.py.
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import tempfile
@@ -50,13 +51,14 @@ class BrandLogoPreview(unittest.TestCase):
         self.tmp.cleanup()
 
     def _view(self, bot_username: str, logo_file: Path | None):
-        target = str(logo_file) if logo_file else pv.BRAND_LOGO_DEFAULT
-        with mock.patch.object(pv, "BRAND_LOGO_DEFAULT", target):
+        operator = {"BRAND_LOGO_BOTS": "YourEmojiBot",
+                    "BRAND_LOGO_PATH": str(logo_file) if logo_file else ""}
+        with mock.patch.dict(os.environ, operator):
             with Catalog(self.cat_path) as cat:
                 view, by_key, _hidden = p.build_view(cat, bot_username)
                 return view, by_key
 
-    def test_logo_shown_first_for_emoji_mapper_bot(self):
+    def test_logo_shown_first_for_a_listed_bot(self):
         logo = self.data / "logo.png"
         _make_png(logo)
         view, by_key = self._view("YourEmojiBot", logo)
@@ -583,6 +585,13 @@ class OnePackCanBeUnhidden(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name)
         self.db = self.data / "catalog.db"
+        # The logo cards need a configured operator logo: none ships in the repo.
+        logo = self.data / "brand.png"
+        _make_png(logo)
+        operator = mock.patch.dict(os.environ, {"BRAND_LOGO_BOTS": "YourEmojiBot",
+                                                "BRAND_LOGO_PATH": str(logo)})
+        operator.start()
+        self.addCleanup(operator.stop)
         with Catalog(self.db) as cat:
             for i in range(6):
                 img = self.data / "media" / "static" / f"i{i}.png"
