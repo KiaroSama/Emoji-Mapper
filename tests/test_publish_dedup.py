@@ -252,7 +252,7 @@ class FakeTelegram:
         self.bodies: dict[str, bytes] = {}
 
     def get_me(self):
-        return {"username": "GodVerifyEmojiMapperbot"}
+        return {"username": "YourEmojiBot"}
 
     def _sticker(self, name, path, fmt, emojis):
         i = len(self.sets[name])
@@ -324,7 +324,7 @@ class PublishDedupTest(unittest.TestCase):
             bc.publish_format(tg, cat, fmt="static", plan_keys=keys,
                               base="pk", title="Pack", user_id=1,
                               default_emoji="😀", per_set=200, data_dir=data,
-                              state=state, bot="GodVerifyEmojiMapperbot",
+                              state=state, bot="YourEmojiBot",
                               logo=None)
 
     def test_unrecorded_live_upload_is_reconciled_not_reuploaded(self):
@@ -333,7 +333,7 @@ class PublishDedupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             data = Path(t)
             keys = self._seed_catalog(data)
-            set_name = "pks1_by_GodVerifyEmojiMapperbot"
+            set_name = "pks1_by_YourEmojiBot"
             tg = FakeTelegram(fuid_for={"item0": "SRC-item0"})
             tg.sets[set_name] = [
                 {"emojis": ["😀"], "fmt": "static", "custom_emoji_id": "cid-old-0",
@@ -360,7 +360,7 @@ class PublishDedupTest(unittest.TestCase):
                               ambiguous_add_keys={"item1"})
             state = {"base": "pk", "sets": [], "sent": []}
             self._publish(tg, data, keys, state)
-            set_name = "pks1_by_GodVerifyEmojiMapperbot"
+            set_name = "pks1_by_YourEmojiBot"
             live = tg.sets[set_name]
             self.assertEqual(len(live), 2)                     # item1 exactly once
             self.assertEqual(tg.add_calls, ["item1"])          # one send, no retry
@@ -374,7 +374,7 @@ class PublishDedupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             data = Path(t)
             keys = self._seed_catalog(data)
-            set_name = "pks1_by_GodVerifyEmojiMapperbot"
+            set_name = "pks1_by_YourEmojiBot"
 
             class OccupiedTG(FakeTelegram):
                 def create_emoji_set(self, user_id, name, title, path, fmt,

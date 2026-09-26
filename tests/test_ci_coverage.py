@@ -2,7 +2,7 @@
 
 The Python matrix runs full discovery, so an ordinary new module is covered the
 moment it is written. The browser suites are the exception: they opt out of the
-matrix (`EMOJI_MAPPER_NO_BROWSER_TESTS=1`, because they test JavaScript and
+matrix (`NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1`, because they test JavaScript and
 would download Chromium once per Python version) and run in their own job from
 a HAND-MAINTAINED list of module names.
 
@@ -117,7 +117,7 @@ class EveryBrowserSuiteIsClaimedByCi(unittest.TestCase):
         that has no browser -- and with it set silently, a green matrix would
         mean less than it looks.
         """
-        self.assertIn("EMOJI_MAPPER_NO_BROWSER_TESTS", self.workflow)
+        self.assertIn("NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS", self.workflow)
 
     def test_no_browser_suite_is_run_twice(self):
         """Once in its own job is the whole point of the opt-out."""

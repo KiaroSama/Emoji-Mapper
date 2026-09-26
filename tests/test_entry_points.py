@@ -135,7 +135,7 @@ class SuiteIsHermetic(unittest.TestCase):
         build_pack.load_env()
         self.assertEqual(dict(os.environ), before,
                          "load_env() modified the environment despite "
-                         "EMOJI_MAPPER_NO_DOTENV")
+                         "NUMERA_EMOJI_MAPPER_NO_DOTENV")
 
     def test_outbound_connections_are_refused(self):
         import socket

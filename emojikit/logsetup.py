@@ -1,4 +1,4 @@
-"""Advanced, secret-safe logging for Emoji Mapper executable scripts.
+"""Advanced, secret-safe logging for Numera Emoji Mapper executable scripts.
 
 Every execution creates a fresh UTC log file under the project ``logs/``
 directory, named ``<script>_YYYY-MM-DD_HH-mm-ss_UTC_<run_id>.log`` (resolved

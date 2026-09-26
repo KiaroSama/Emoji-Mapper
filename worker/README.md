@@ -1,4 +1,4 @@
-# Emoji Mapper bots — Cloudflare Worker
+# Numera Emoji Mapper bots — Cloudflare Worker
 
 Both bots in one Worker, answering only the admins you name, plus the endpoint
 the local builder calls so a finished pack is announced **by the bot** in your
@@ -238,7 +238,7 @@ Body shape:
   "bot": "coin",
   "note": "optional line above the list",
   "style": "cards",
-  "packs": [{ "name": "gvcryptoemoji1_by_bot", "title": "Coins 1", "count": 200 }]
+  "packs": [{ "name": "cryptoemoji1_by_bot", "title": "Coins 1", "count": 200 }]
 }
 ```
 

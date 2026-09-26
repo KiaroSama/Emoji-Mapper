@@ -282,7 +282,7 @@ class MainApplyTest(unittest.TestCase):
         self.out = self.dir / "ticker_to_id.json"
         self.cand = self.dir / "ticker_to_id.candidate.json"
         # The real family lock lives in the repo; keep the suite off it.
-        self.pack_lock = self.dir / "pack_gvcryptoemoji.lock"
+        self.pack_lock = self.dir / "pack_cryptoemoji.lock"
         (self.dir / "state.json").write_text(
             json.dumps({"sets": [{"index": 1, "name": "s1"}]}), encoding="utf-8")
 
@@ -410,7 +410,7 @@ class ApplyIsSerialisedAgainstThePackFamily(unittest.TestCase):
         (self.emoji / "btc.png").write_bytes(_png((200, 20, 20, 255)))
         self.out = self.dir / "ticker_to_id.json"
         self.out.write_text(json.dumps({"btc": "STALE"}), encoding="utf-8")
-        self.pack_lock = self.dir / "pack_gvcryptoemoji.lock"
+        self.pack_lock = self.dir / "pack_cryptoemoji.lock"
         (self.dir / "state.json").write_text(
             json.dumps({"sets": [{"index": 1, "name": "s1"}]}), encoding="utf-8")
 

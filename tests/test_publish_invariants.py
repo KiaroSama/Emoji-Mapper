@@ -34,7 +34,7 @@ from emojikit.collection_state import MIXED, SetDrift
 from emojikit import identity
 from emojikit.catalog import Catalog
 
-SET = "pks1_by_GodVerifyEmojiMapperbot"
+SET = "pks1_by_YourEmojiBot"
 
 
 class AClosedSetIsNeverAppendedTo(unittest.TestCase):
@@ -83,7 +83,7 @@ class AClosedSetIsNeverAppendedTo(unittest.TestCase):
             return bc.publish_format(
                 tg, cat, fmt="static", plan_keys=keys, base="pk", title="Pack",
                 user_id=1, default_emoji="\U0001f600", per_set=200,
-                data_dir=self.data, state=state, bot="GodVerifyEmojiMapperbot",
+                data_dir=self.data, state=state, bot="YourEmojiBot",
                 logo=None, **kw)
 
     def test_no_pending_item_is_added_to_a_set_with_a_foreign_sticker(self):
@@ -156,7 +156,7 @@ class MixedFamiliesStillCheckEachItemsOwnFormat(unittest.TestCase):
                               title="Pack", user_id=1,
                               default_emoji="\U0001f600", per_set=200,
                               data_dir=self.dir, state=state,
-                              bot="GodVerifyEmojiMapperbot", logo=None)
+                              bot="YourEmojiBot", logo=None)
             self.assertEqual(tg.uploaded, [],
                              "a blank emoji was published into a mixed family")
             self.assertIn(key, state.get("skipped", []))

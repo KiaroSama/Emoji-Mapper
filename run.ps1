@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Emoji Mapper launcher: prepares the Python environment and offers a colored,
+    Numera Emoji Mapper launcher: prepares the Python environment and offers a colored,
     sectioned menu to build/collect/publish Telegram custom-emoji packs and run
     the premium-emoji bot.
 
@@ -107,7 +107,7 @@ function Write-Step   ($m) { Write-Host "==> $m" -ForegroundColor Magenta; Write
 function Log-Ok       ($m) { Write-Log 'INFO' "OK: $m" }
 
 function Show-Banner {
-    $title = 'Emoji Mapper'
+    $title = 'Numera Emoji Mapper'
     $width = 100
     try { if ([Console]::WindowWidth -gt 0) { $width = [Console]::WindowWidth } } catch { }
     $pad = [Math]::Max(0, [int](($width - $title.Length) / 2))
@@ -191,10 +191,10 @@ function Run-Wizard ($steps) {
 }
 
 # --- Prefer Windows Terminal + PowerShell 7 (single relaunch, loop-safe) ---
-if (-not $NoRelaunch -and -not $env:EMOJI_MAPPER_RELAUNCHED) {
+if (-not $NoRelaunch -and -not $env:NUMERA_EMOJI_MAPPER_RELAUNCHED) {
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh -and $PSVersionTable.PSVersion.Major -lt 7) {
-        $env:EMOJI_MAPPER_RELAUNCHED = '1'
+        $env:NUMERA_EMOJI_MAPPER_RELAUNCHED = '1'
         $self = $MyInvocation.MyCommand.Definition
         # Forward every switch the caller passed. Passing only -NoRelaunch used to
         # drop -Check, so a scripted doctor run silently became an interactive menu.
@@ -321,7 +321,7 @@ function Test-Ffmpeg {
 # Every input prompt supports {back=0, quit=exit}: 0 aborts to the menu, exit
 # quits. Each Python launch is logged (command + exit code) via Invoke-Py.
 function Action-BuildGeneral ($py) {
-    Write-Title "Build a general emoji pack (@GodVerifyEmojiMapperbot)"
+    Write-Title "Build a general emoji pack (@YourEmojiBot)"
     $st = @{ emoji = '😀' }
     $steps = @(
         { $v = Ask "Source image folder (e.g. input\myset)"; if ($v -eq '0') { return 'back' }
@@ -489,7 +489,7 @@ function Action-Panel ($py) {
 }
 
 function Action-RunBot ($py) {
-    Write-Title "Run the Emoji Mapper bot (premium-emoji ID extractor)"
+    Write-Title "Run the Numera Emoji Mapper bot (premium-emoji ID extractor)"
     Write-Info "Send the bot a premium emoji or a post with emoji, or add it to a channel/group."
     Write-Info "Press Ctrl+C to stop the bot."
     Invoke-PyReport $py @('-m','emojikit.emoji_bot') "Bot"
@@ -532,7 +532,7 @@ function Show-Menu {
     Menu-Item $script:CKeyB 'B4' 'Open web panel to pick & reorder emoji (browser)'
     Write-Host ''
     Write-Host (Paint $script:CBot 'Bot')
-    Menu-Item $script:CKeyC 'C1' 'Run the Emoji Mapper bot (premium-emoji ID extractor)'
+    Menu-Item $script:CKeyC 'C1' 'Run the Numera Emoji Mapper bot (premium-emoji ID extractor)'
     Write-Host ''
     Write-Host (Paint $script:CMaint 'Maintenance')
     Menu-Item $script:CKeyD 'D1' 'Run the project checks (byte-compile + unit tests)'

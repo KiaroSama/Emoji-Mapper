@@ -1,4 +1,4 @@
-# Linting for Emoji Mapper.
+# Linting for Numera Emoji Mapper.
 #
 # The rule set is not a preference -- it is the one this codebase already
 # assumes. 122 `# noqa` comments were written against a linter that was never

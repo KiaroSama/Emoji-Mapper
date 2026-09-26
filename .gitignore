@@ -171,3 +171,7 @@ worker/.wrangler/
 # rewrite, a migration). They hold the very data the repository must not
 # publish, so they are local-only and never leave this machine.
 /.backups/
+
+# The operator's own assets (their brand logo, BRAND_LOGO_PATH). Per-operator,
+# never shipped: the public repository names no operator.
+/private/

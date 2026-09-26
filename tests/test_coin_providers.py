@@ -40,7 +40,7 @@ from emojikit import packstate as ps  # noqa: E402
 from coins import fetch_cmc, fetch_paprika as fp  # noqa: E402
 from coins import _dedup_plan as cfg  # noqa: E402
 
-SET = "gvcryptoemoji1_by_bot"
+SET = "cryptoemoji1_by_bot"
 
 from tests._coin_fixtures import (FakeTelegram, _gradient,  # noqa: E402
                                   _png_bytes)
@@ -101,7 +101,7 @@ class VerifiedPublish(unittest.TestCase):
             {"index": 1, "name": SET, "title": "T 1"}]})
         self.ids = self.dir / "ticker_to_id.json"
         ps.write_json_atomic(self.ids, {"btc": "c-btc"})
-        self.lock = self.dir / "pack_gvcryptoemoji.lock"
+        self.lock = self.dir / "pack_cryptoemoji.lock"
         self.patch = mock.patch.multiple(
             fp, EMOJI=self.emoji, STATE=self.state, TICKER_IDS=self.ids,
             PACK_LOCK=self.lock, KEYWORDS_CSV=self.dir / "none.csv", USER_ID=1)
@@ -171,11 +171,11 @@ class VerifiedPublish(unittest.TestCase):
         tg = FakeTelegram(existing=fp.PER_SET)
         mapping: dict[str, str] = {}
         self.assertEqual(fp.publish_logos(tg, ["aaa"], mapping), (1, 0))
-        self.assertEqual(tg.creates, ["gvcryptoemoji2_by_bot"])
+        self.assertEqual(tg.creates, ["cryptoemoji2_by_bot"])
         sets = json.loads(self.state.read_text("utf-8"))["sets"]
-        self.assertEqual([s["name"] for s in sets], [SET, "gvcryptoemoji2_by_bot"])
+        self.assertEqual([s["name"] for s in sets], [SET, "cryptoemoji2_by_bot"])
         self.assertEqual(mapping["aaa"],
-                         tg.sets["gvcryptoemoji2_by_bot"][0]["custom_emoji_id"])
+                         tg.sets["cryptoemoji2_by_bot"][0]["custom_emoji_id"])
 
     def test_a_second_publisher_is_refused_instead_of_appending_too(self):
         """A REAL hold, not a lock file with someone else's pid in it.
@@ -322,7 +322,7 @@ class CommandExitCodes(unittest.TestCase):
         self.patch = mock.patch.multiple(
             fp, EMOJI=self.emoji, STATE=self.state, TICKER_IDS=self.ids,
             CACHE=self.cache, INV=self.inv, OUT_INV=self.dir / "out.md",
-            PACK_LOCK=self.dir / "pack_gvcryptoemoji.lock",
+            PACK_LOCK=self.dir / "pack_cryptoemoji.lock",
             KEYWORDS_CSV=self.dir / "none.csv", USER_ID=1)
         self.patch.start()
         self.sleep = mock.patch.object(fp.time, "sleep", lambda s: None)

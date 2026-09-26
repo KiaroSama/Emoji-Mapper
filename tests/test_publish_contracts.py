@@ -157,9 +157,9 @@ class MixedPublishesOneFamily(unittest.TestCase):
 
     def test_the_base_name_accepts_telegram_s_actual_rule(self):
         # Underscores are legal in a set name; this used to reject them, which
-        # refused a perfectly valid name like GodVerify_Emoji_Packs.
-        self.assertEqual(bc.valid_base("GodVerify_Emoji_Packs"),
-                         "GodVerify_Emoji_Packs")
+        # refused a perfectly valid name like YourBrand_Emoji_Packs.
+        self.assertEqual(bc.valid_base("YourBrand_Emoji_Packs"),
+                         "YourBrand_Emoji_Packs")
         self.assertEqual(bc.valid_base("mypack"), "mypack")
         for bad in ("bad__two", "_lead", "9start", "trail_", "has space", ""):
             with self.assertRaises(SystemExit, msg=bad):
@@ -167,9 +167,9 @@ class MixedPublishesOneFamily(unittest.TestCase):
 
     def test_a_base_too_long_for_the_64_char_name_is_refused_up_front(self):
         """Not as a Bot API error after the plan is frozen and uploads began."""
-        bc.check_name_length("short", "GodVerifyEmojiMapperbot")      # fits
+        bc.check_name_length("short", "YourEmojiBot")      # fits
         with self.assertRaises(SystemExit):
-            bc.check_name_length("x" * 50, "GodVerifyEmojiMapperbot")
+            bc.check_name_length("x" * 50, "YourEmojiBot")
 
     def test_mixed_orders_across_formats_and_drops_the_format_letter(self):
         tmp = tempfile.TemporaryDirectory()

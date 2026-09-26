@@ -387,7 +387,7 @@ holdCards.addEventListener('dragend',()=>{holdDragKeys=null;});
 function exportDraft(){
   const blob=new Blob([JSON.stringify({version:1,snapshot:snapshot()},null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob), a=el('a');
-  a.href=url;a.download='emoji-mapper-draft.json';a.click();
+  a.href=url;a.download='numera-emoji-mapper-draft.json';a.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 for(const it of ITEMS)if(!it.included&&!it.isLogo)holdOrigins.set(it.key,originFor(it));

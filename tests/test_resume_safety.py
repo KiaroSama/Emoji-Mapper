@@ -352,7 +352,7 @@ class AddMediaExitCode(unittest.TestCase):
 class LinksDestination(unittest.TestCase):
     """Finished-pack links must go where PACK_LINKS_CHAT_ID says."""
 
-    OWNER = 5899781975
+    OWNER = 111111111
 
     def _env(self, value):
         return mock.patch.dict("os.environ", {"PACK_LINKS_CHAT_ID": value},
@@ -363,16 +363,16 @@ class LinksDestination(unittest.TestCase):
             self.assertEqual(announce.links_chat_id(self.OWNER), self.OWNER)
 
     def test_numeric_channel_id_is_used_as_an_int(self):
-        with self._env("-1002052830618"):
-            self.assertEqual(announce.links_chat_id(self.OWNER), -1002052830618)
+        with self._env("-1001111111111"):
+            self.assertEqual(announce.links_chat_id(self.OWNER), -1001111111111)
 
     def test_at_username_is_passed_through(self):
         with self._env("@packlinks"):
             self.assertEqual(announce.links_chat_id(self.OWNER), "@packlinks")
 
     def test_surrounding_whitespace_is_tolerated(self):
-        with self._env("  -1002052830618  "):
-            self.assertEqual(announce.links_chat_id(self.OWNER), -1002052830618)
+        with self._env("  -1001111111111  "):
+            self.assertEqual(announce.links_chat_id(self.OWNER), -1001111111111)
 
     def test_every_publisher_resolves_the_same_destination(self):
         """A publisher that still hardcoded the owner would fail here.

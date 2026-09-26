@@ -11,7 +11,7 @@ asserts the result -- including the order the catalog is left holding.
 Needs playwright and its Chromium build (``requirements-dev.txt``). Missing
 either is a hard error, never a skip: a browser test that reports green on a
 machine with no browser is worse than no browser test at all. Set
-``EMOJI_MAPPER_NO_BROWSER_TESTS=1`` to opt out deliberately.
+``NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1`` to opt out deliberately.
 """
 
 from __future__ import annotations

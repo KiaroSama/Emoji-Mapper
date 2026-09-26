@@ -116,7 +116,7 @@ jobs:
     # than skipping when playwright or Chromium is missing, because a browser
     # test that reports green on a machine with no browser is worse than none.
     env:
-      EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
+      NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
     strategy:
       matrix:
         # 3.11 is the runtime run.ps1 / .venv target; 3.12 guards against the
@@ -196,7 +196,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 25
     env:
-      EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
+      NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
         with:

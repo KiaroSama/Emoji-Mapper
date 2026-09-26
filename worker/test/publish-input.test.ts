@@ -63,7 +63,7 @@ function publish(json: string): Request {
   });
 }
 
-const OK_PACK = { name: "gvcryptoemoji1_by_bot", title: "Coins 1" };
+const OK_PACK = { name: "cryptoemoji1_by_bot", title: "Coins 1" };
 const PACKS = [OK_PACK];
 
 /**
@@ -128,7 +128,7 @@ describe("F14 - /publish checks the JSON before it reads it", () => {
 
   it("refuses scalars and arrays", async () => {
     for (const json of ["123", '"packs"', "true",
-                        "[]", '[{"name":"gvcryptoemoji1_by_bot"}]']) {
+                        "[]", '[{"name":"cryptoemoji1_by_bot"}]']) {
       await rejects(json);
     }
   });
@@ -137,7 +137,7 @@ describe("F14 - /publish checks the JSON before it reads it", () => {
     await rejects("{}");
     await rejects('{"packs":{}}');
     await rejects('{"packs":[]}');
-    await rejects('{"packs":"gvcryptoemoji1_by_bot"}');
+    await rejects('{"packs":"cryptoemoji1_by_bot"}');
     await rejects(JSON.stringify({
       packs: Array.from({ length: 501 }, (_, i) => ({ name: `set_${i}` })),
     }));
@@ -145,7 +145,7 @@ describe("F14 - /publish checks the JSON before it reads it", () => {
 
   it("refuses a null or non-object pack entry", async () => {
     await rejects('{"packs":[null]}');
-    await rejects('{"packs":["gvcryptoemoji1_by_bot"]}');
+    await rejects('{"packs":["cryptoemoji1_by_bot"]}');
     await rejects('{"packs":[[]]}');
     await rejects(JSON.stringify({ packs: [OK_PACK, null] }));
   });
@@ -227,14 +227,14 @@ describe("F14 - what a valid publish still does", () => {
     // and for the coin family a note and style="list".
     const sends = await accepted({
       bot: "coin", style: "list",
-      note: "\u{1F4E6} @GodVerify Crypto Emoji — all packs:",
-      packs: [{ name: "gvcryptoemoji1_by_bot", title: "1", count: 200 },
-              { name: "gvcryptoemoji2_by_bot", title: "2" }],
+      note: "\u{1F4E6} @YourBrand Crypto Emoji — all packs:",
+      packs: [{ name: "cryptoemoji1_by_bot", title: "1", count: 200 },
+              { name: "cryptoemoji2_by_bot", title: "2" }],
     });
     expect(sends).toHaveLength(1);
     const text = String(sends[0].body.text);
-    expect(text).toContain("t.me/addemoji/gvcryptoemoji1_by_bot");
-    expect(text).toContain("t.me/addemoji/gvcryptoemoji2_by_bot");
+    expect(text).toContain("t.me/addemoji/cryptoemoji1_by_bot");
+    expect(text).toContain("t.me/addemoji/cryptoemoji2_by_bot");
     expect(text).not.toContain("✅");     // list style has no card ticks
     assertSendable(text);
   });
@@ -317,7 +317,7 @@ describe("F15 - an oversized note cannot escape the chunker", () => {
 
   it("keeps every pack link intact across a whole family", async () => {
     const packs = Array.from({ length: 500 }, (_, i) => ({
-      name: `gvcryptoemoji${i + 1}_by_GodVerifyCoinEmojiMapperbot`,
+      name: `cryptoemoji${i + 1}_by_YourCoinEmojiBot`,
       title: `Crypto & pack <${i + 1}>`,
       count: 200,
     }));

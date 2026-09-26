@@ -220,7 +220,7 @@ class TestCopyButtonLimit(unittest.TestCase):
         return kb
 
     def test_short_ids_fit_one_button(self):
-        kb = self._assert_covers(["5899781975"] * 3)
+        kb = self._assert_covers(["111111111"] * 3)
         self.assertEqual(len(kb), 1)
 
     def test_nineteen_digit_ids(self):
@@ -235,7 +235,7 @@ class TestCopyButtonLimit(unittest.TestCase):
         self._assert_covers([str(9) * 25 for _ in range(50)])
 
     def test_single_id(self):
-        self._assert_covers(["5899781975"])
+        self._assert_covers(["111111111"])
 
 
 class TestIdsTypedAsText(unittest.TestCase):
@@ -334,15 +334,15 @@ class TestAccessControl(unittest.TestCase):
     def test_unauthorized_user_cannot_extract_ids(self):
         upd = self._msg(999)
         upd["message"]["entities"] = [
-            {"type": "custom_emoji", "custom_emoji_id": "5899781975"}]
+            {"type": "custom_emoji", "custom_emoji_id": "111111111"}]
         b.handle_update(self.tg, 42, upd, {42})
         sent_text = " ".join(kw["data"]["text"] for _, kw in self.sent)
-        self.assertNotIn("5899781975", sent_text)
+        self.assertNotIn("111111111", sent_text)
 
     def test_unauthorized_group_message_is_silently_ignored(self):
         upd = self._msg(999, chat_type="supergroup")
         upd["message"]["entities"] = [
-            {"type": "custom_emoji", "custom_emoji_id": "5899781975"}]
+            {"type": "custom_emoji", "custom_emoji_id": "111111111"}]
         b.handle_update(self.tg, 42, upd, {42})
         self.assertEqual(self.sent, [], "must not reply into a group")
 

@@ -1,14 +1,14 @@
 <div align="center">
 
-<img src="assets/emoji-mapper-logo.png" alt="Emoji Mapper" width="180">
+<img src="assets/numera-emoji-mapper-logo.png" alt="Numera Emoji Mapper" width="180">
 
-# Emoji Mapper
+# Numera Emoji Mapper
 
 **Build Telegram premium custom-emoji packs from any collection of images.**
 
 </div>
 
-Emoji Mapper started as a crypto-coin logo packer and is now a general tool: it
+Numera Emoji Mapper started as a crypto-coin logo packer and is now a general tool: it
 takes a folder of images, normalizes each one to the exact 100×100 PNG that
 Telegram custom emoji require, and uploads them through a bot into one or more
 custom-emoji sets owned by your account.
@@ -17,8 +17,8 @@ It ships with two independent workflows that share the same engine:
 
 | | Workflow | Bot | Source | Purpose |
 |---|----------|-----|--------|---------|
-| <img src="assets/coin-emoji-mapper-logo.png" alt="" width="42"> | **Crypto coins** | `TELEGRAM_BOT_TOKEN` | CoinGecko / CoinPaprika / CoinMarketCap logos | the original coin-logo packs |
-| <img src="assets/emoji-mapper-logo.png" alt="" width="42"> | **General** | `GENERAL_BOT_TOKEN` (`@GodVerifyEmojiMapperbot`) | any folder of images you provide | any non-coin emoji pack |
+| <img src="assets/numera-coin-emoji-mapper-logo.png" alt="" width="42"> | **Crypto coins** | `TELEGRAM_BOT_TOKEN` | CoinGecko / CoinPaprika / CoinMarketCap logos | the original coin-logo packs |
+| <img src="assets/numera-emoji-mapper-logo.png" alt="" width="42"> | **General** | `GENERAL_BOT_TOKEN` (`@YourEmojiBot`) | any folder of images you provide | any non-coin emoji pack |
 
 The same scripts (`emojikit/make_emoji_pngs.py` + `emojikit/build_pack.py`) power both; only the
 source folder and the selected bot token differ.
@@ -67,9 +67,16 @@ copy .env.example .env
 ```
 PACK_OWNER_USER_ID=<your numeric telegram id>
 TELEGRAM_BOT_TOKEN=<coin bot token>
-GENERAL_BOT_TOKEN=<general bot token>      # @GodVerifyEmojiMapperbot
+GENERAL_BOT_TOKEN=<general bot token>      # @YourEmojiBot
 CMC_API_KEY=<optional CoinMarketCap key>
 ```
+
+Your own identities — which bots lead their packs with your brand logo, the
+logo itself, your pack bases and coin pack title — are `.env` keys too
+(`BRAND_LOGO_BOTS`, `BRAND_LOGO_PATH`, `COLLECTION_PACK_BASE`, `COIN_PACK_BASE`,
+`COIN_PACK_TITLE`, …). The repository names no operator, so none has a default:
+a tool that needs one stops and names it. Keep your logo in the git-ignored
+`private/` folder.
 
 ## Quick start — general emoji pack (new bot)
 
@@ -178,7 +185,7 @@ Sets are named `<base>s<n>_by_<bot>` (static), `<base>v<n>_by_<bot>` (video) and
 > Re-publishing other people's emoji under a new name may raise ownership /
 > copyright concerns — only collect content you have the right to use.
 
-## Emoji Mapper bot (premium-emoji ID extractor)
+## Numera Emoji Mapper bot (premium-emoji ID extractor)
 
 `emojikit/emoji_bot.py` runs the general bot interactively (long-polling) and extracts
 premium custom-emoji IDs with tap-to-copy buttons (Telegram `copy_text`):
@@ -270,7 +277,7 @@ is bounded and does not block saving.
 .venv\Scripts\python.exe -m emojikit.panel        # or run.ps1 -> B4
 .venv\Scripts\python.exe -m emojikit.panel --preview-fps 12
 # Branding without a Telegram username lookup:
-.venv\Scripts\python.exe -m emojikit.panel --bot-username GodVerifyEmojiMapperbot
+.venv\Scripts\python.exe -m emojikit.panel --bot-username YourEmojiBot
 ```
 
 B4 reopens an existing panel on the requested port instead of starting a second
@@ -317,7 +324,7 @@ Then build/rebuild with the coin bot:
 ## Project layout
 
 ```
-Emoji Mapper/                  # the whole project
+Numera Emoji Mapper/                  # the whole project
   emojikit/                    # command modules and shared toolkit
     build_pack.py                # core engine: upload any source dir with any bot
     make_emoji_pngs.py           # core engine: image -> 100x100 PNG (--in/--out)
@@ -331,6 +338,7 @@ Emoji Mapper/                  # the whole project
     panel.py                     # curate panel: the server, the page, the APIs
     emoji_bot.py                 # bot: extract premium-emoji ids (tap-to-copy)
     telegram_api.py           # the Bot API client + Telegram's caps
+    operator_config.py        # your identities from .env (no defaults)
     packstate.py              # state-file shape + atomic write + pack lock
     announce.py               # announce finished packs (Worker, or direct)
     collection_state.py       # its plan/resume state + the brand logo
@@ -354,7 +362,7 @@ Emoji Mapper/                  # the whole project
   worker/                      # Cloudflare Worker: both bots + /publish (TypeScript)
     src/                       # auth, telegram, emoji-id extraction, routing
     test/                      # vitest, fetch stubbed (never reaches Telegram)
-  assets/                      # shipped images (incl. the brand logo) + the panel page and its scripts
+  assets/                      # the project's own images + the panel page and its scripts
   run.ps1                      # launcher (single-pack + collection workflows)
   scripts/check.ps1            # byte-compile + full unit suite (also used by CI)
   scripts/identity_repair.py   # report/migrate/recover/restore catalog identity
@@ -396,7 +404,7 @@ python -m playwright install chromium           # once; the panel's browser suit
 `tests/test_panel_browser.py` drives the real panel in headless Chromium and
 **raises** rather than skipping when playwright or Chromium is missing — a
 browser test that reports green on a machine with no browser is worse than
-none. `EMOJI_MAPPER_NO_BROWSER_TESTS=1` opts out deliberately; CI does that in
+none. `NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1` opts out deliberately; CI does that in
 the Python matrix and runs the module in its own job instead.
 
 Lint is `ruff check .` with **no** arguments: `ruff.toml` at the repo root owns
@@ -427,8 +435,8 @@ and update `.env`.
 
 ## License
 
-Emoji Mapper — builds Telegram premium custom-emoji packs.
-Copyright (C) 2026 GodVerify
+Numera Emoji Mapper — builds Telegram premium custom-emoji packs.
+Copyright (C) 2026 KiaroSama
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the **GNU General Public License** as published by the Free

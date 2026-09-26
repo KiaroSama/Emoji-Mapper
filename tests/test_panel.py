@@ -13,6 +13,7 @@ test_panel_guard.py and the process/port behaviour in test_panel_server.py.
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import tempfile
@@ -50,16 +51,17 @@ class BrandLogoPreview(unittest.TestCase):
         self.tmp.cleanup()
 
     def _view(self, bot_username: str, logo_file: Path | None):
-        target = str(logo_file) if logo_file else pv.BRAND_LOGO_DEFAULT
-        with mock.patch.object(pv, "BRAND_LOGO_DEFAULT", target):
+        operator = {"BRAND_LOGO_BOTS": "YourEmojiBot",
+                    "BRAND_LOGO_PATH": str(logo_file) if logo_file else ""}
+        with mock.patch.dict(os.environ, operator):
             with Catalog(self.cat_path) as cat:
                 view, by_key, _hidden = p.build_view(cat, bot_username)
                 return view, by_key
 
-    def test_logo_shown_first_for_emoji_mapper_bot(self):
+    def test_logo_shown_first_for_a_listed_bot(self):
         logo = self.data / "logo.png"
         _make_png(logo)
-        view, by_key = self._view("GodVerifyEmojiMapperbot", logo)
+        view, by_key = self._view("YourEmojiBot", logo)
         self.assertTrue(view[0]["isLogo"])
         self.assertEqual(view[0]["key"], pv.LOGO_KEY)
         self.assertEqual(by_key[pv.LOGO_KEY], logo)
@@ -70,13 +72,13 @@ class BrandLogoPreview(unittest.TestCase):
     def test_logo_hidden_for_coin_bot(self):
         logo = self.data / "logo.png"
         _make_png(logo)
-        view, _ = self._view("GodVerifyCoinEmojiMapperbot", logo)
+        view, _ = self._view("YourCoinEmojiBot", logo)
         self.assertEqual(len(view), 3)  # no logo card injected
         self.assertTrue(all(not v.get("isLogo") for v in view))
 
     def test_logo_hidden_when_file_missing(self):
         missing = self.data / "does_not_exist.png"
-        view, _ = self._view("GodVerifyEmojiMapperbot", missing)
+        view, _ = self._view("YourEmojiBot", missing)
         self.assertEqual(len(view), 3)
 
     def test_logo_hidden_when_bot_unknown(self):
@@ -638,7 +640,7 @@ class OnePackCanBeUnhidden(unittest.TestCase):
         was accused of exactly that. Each of these packs really does carry the
         logo as its emoji 0; it went up when the pack was created."""
         with Catalog(self.db) as cat:
-            view, by_key, _h = p.build_view(cat, "GodVerifyEmojiMapperbot", False,
+            view, by_key, _h = p.build_view(cat, "YourEmojiBot", False,
                                             p.packs_named(self.data, {1, 2}))
         logos = [v for v in view if v.get("isLogo")]
         self.assertEqual([v["pack"] for v in logos], [1, 2])
@@ -655,7 +657,7 @@ class OnePackCanBeUnhidden(unittest.TestCase):
     def test_without_with_pack_the_single_publish_preview_is_unchanged(self):
         """The normal flow builds ONE new pack, and its logo is not live yet."""
         with Catalog(self.db) as cat:
-            view, _bk, _h = p.build_view(cat, "GodVerifyEmojiMapperbot", False, None)
+            view, _bk, _h = p.build_view(cat, "YourEmojiBot", False, None)
         logos = [v for v in view if v.get("isLogo")]
         self.assertEqual([v["key"] for v in logos], [pv.LOGO_KEY])
         self.assertEqual(view[0]["key"], pv.LOGO_KEY, "always first")

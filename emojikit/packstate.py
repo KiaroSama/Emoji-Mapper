@@ -136,7 +136,7 @@ def pack_family_lock_path(base: str) -> Path:
     Locks used to be named after whichever state file a given tool happened to
     use -- coin_pack.lock, rebuild_dedup_state.json.lock, state_<base>.json.lock
     -- so a provider top-up and a rebuild could hold three different locks while
-    mutating the same gvcryptoemoji* sets. Keying on the base name is what makes
+    mutating the same cryptoemoji* sets. Keying on the base name is what makes
     the exclusion real.
     """
     # Dots are dropped too: a base is [A-Za-z][A-Za-z0-9]* anyway, and keeping

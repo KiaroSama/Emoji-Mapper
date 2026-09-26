@@ -209,8 +209,8 @@ class PackFamilyLock(unittest.TestCase):
     """Every tool touching one pack family must contend for the SAME lock."""
 
     def test_same_base_yields_the_same_path(self):
-        self.assertEqual(ps.pack_family_lock_path("gvcryptoemoji"),
-                         ps.pack_family_lock_path("gvcryptoemoji"))
+        self.assertEqual(ps.pack_family_lock_path("cryptoemoji"),
+                         ps.pack_family_lock_path("cryptoemoji"))
 
     def test_different_bases_do_not_collide(self):
         self.assertNotEqual(ps.pack_family_lock_path("one"),
@@ -261,7 +261,7 @@ class CanonicalMapLock(unittest.TestCase):
 
     def test_it_is_not_the_pack_family_lock(self):
         with ps.canonical_map_lock():
-            with ps.exclusive_lock(ps.pack_family_lock_path("gvcryptoemoji")):
+            with ps.exclusive_lock(ps.pack_family_lock_path("cryptoemoji")):
                 pass          # different concerns must not block each other
 
 
