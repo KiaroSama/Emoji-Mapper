@@ -1,4 +1,4 @@
-# Emoji Mapper runtime dependencies -- the core toolset.
+# Numera Emoji Mapper runtime dependencies -- the core toolset.
 #
 # The crypto-coin reconciliation tool needs one more package; it lives in
 # requirements-coins.txt so that everyone building ordinary emoji packs is not

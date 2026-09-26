@@ -89,7 +89,7 @@ class TestRedaction(unittest.TestCase):
 
     def test_content_key_and_ids_preserved(self):
         # Content hashes and numeric custom_emoji_ids must NOT be redacted.
-        s = "key s:01f6c1284261975d0000934b7fe6f3c3 cid 5899781975"
+        s = "key s:01f6c1284261975d0000934b7fe6f3c3 cid 111111111"
         self.assertEqual(L.redact(s), s)
 
     def test_formatter_redacts_record(self):

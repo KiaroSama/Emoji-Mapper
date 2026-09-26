@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an idea or improvement for Emoji Mapper
+description: Suggest an idea or improvement for Numera Emoji Mapper
 labels: ["enhancement"]
 body:
   - type: textarea

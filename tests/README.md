@@ -34,7 +34,7 @@ the page through `_panel_browser_fixtures.py`, which is also what
 .venv\Scripts\python.exe -m playwright install chromium
 ```
 
-Set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out on purpose. CI does exactly
+Set `NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out on purpose. CI does exactly
 that in the Python matrix and runs both modules in its own `panel-browser:` job
 instead: they test JavaScript, so once per Python version would download
 Chromium twice to prove the same thing. That job names its modules explicitly
@@ -105,7 +105,8 @@ rather than adding an opt-out.
 | `test_preflight_outcomes.py` | preflight may not report acceptance it never obtained. The old counter counted ATTEMPTS, so a run in which every `check_uploadable` failed at the transport reported "all accepted" |
 | `test_reconcile_uniqueness.py` | unique attribution means every rival was EXCLUDED. With two candidates matching one live sticker the function correctly reported ambiguity — and deleting one candidate's FILE made it answer "unique" with the survivor, so removing evidence promoted a guess to a certainty |
 | `test_reconcile_identity.py` | recovery must never give a stranger's picture our item's identity. dHash is a grayscale STRUCTURE hash — an opaque red square and an opaque blue one are zero apart — so a perceptual match may only NOMINATE; content verification decides, and "more than one" and "could not examine" stay distinct from "no match" |
-| `test_brand_logo.py` | the mandatory logo-first behaviour in `build_collection`: its conversion per format, that the real shipped asset is used, and that the coin bot stays exempt |
+| `test_brand_logo.py` | the mandatory logo-first behaviour in `build_collection`: its conversion per format, and that no default logo or bot list survives in source |
+| `test_operator_config.py` | the operator's identities come only from configuration: an unset key stops naming itself, empty `BRAND_LOGO_BOTS` means none, a listed bot needs an existing logo |
 | `test_pack_manifest.py` | the `packs/` roster: what it records, and when it admits to being stale |
 | `test_pack_archive.py` | when a FULL pack earns an archive move, and when the archive has stopped being true |
 | `test_sync_order.py` | reordering an already-published pack with `setStickerPositionInSet`, which moves a sticker without re-uploading it, so every `custom_emoji_id` survives |
@@ -139,7 +140,7 @@ rather than adding an opt-out.
 | `test_panel_preview.py` | Real HTTP previews: requested size/rate, cache reuse, single-frame posters for all formats, VP9 alpha preservation and invalid-resource-budget refusal |
 | `test_ci_coverage.py` | the browser job runs from a hand-maintained list of module names, so this fails when a suite imports the harness without being named there — and asserts none is run twice |
 | `test_fake_contracts.py` | every test double whose method shadows a `Telegram` method must accept what the real client passes. `FakeTelegram.send_message()` rejected `disable_preview`, so every happy-path announcement in two suites was silently exercising the swallowed error path while the tests stayed green |
-| `test_panel_browser.py` | what the panel's client code actually DOES, in headless Chromium: the save pipeline's revisioned queues, the separator nodes, the zoom anchor, the animation freeze, the pack count, and a denied `localStorage`. A source-text assertion cannot tell a correct implementation of any of these from a broken one. Needs `requirements-dev.txt` and `python -m playwright install chromium`; set `EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out deliberately, never to make a missing browser look green |
+| `test_panel_browser.py` | what the panel's client code actually DOES, in headless Chromium: the save pipeline's revisioned queues, the separator nodes, the zoom anchor, the animation freeze, the pack count, and a denied `localStorage`. A source-text assertion cannot tell a correct implementation of any of these from a broken one. Needs `requirements-dev.txt` and `python -m playwright install chromium`; set `NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS=1` to opt out deliberately, never to make a missing browser look green |
 | `test_panel_server.py` | the panel as a process: which Host may reach it, and who owns the port. Real subprocesses and real sockets, so the slowest of the four |
 | `test_repaintable.py` | the `--repaintable` gate: the flag is read off the STICKER not the set, only an explicit yes proceeds, `skip`/`keep` never prompt, and an unanswerable prompt (EOF, Ctrl-C) is a no rather than a crash. Also `--tint`, which bakes the repaint instead of skipping: colour parsing, a Lottie recoloured through its tree (fills, strokes and gradient stops, offsets kept), a static filled through its alpha, video refused, and the tint recorded on the item |
 | `test_emoji_bot.py` | the bot's pure helpers: entity extraction and reply building |

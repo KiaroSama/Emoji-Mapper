@@ -72,7 +72,7 @@ export type BotName = "general" | "coin";
 
 /** One published pack, as the local builder reports it. */
 export interface PublishedPack {
-  /** Telegram set name, e.g. "gvcryptoemoji1_by_GodVerifyCoinEmojiMapperbot". */
+  /** Telegram set name, e.g. "cryptoemoji1_by_YourCoinEmojiBot". */
   name: string;
   /** Human title shown in the announcement. */
   title?: string;

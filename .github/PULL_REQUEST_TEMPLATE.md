@@ -1,5 +1,5 @@
 <!--
-  Emoji Mapper is free software under the GNU GPL v3 or later. Contributions are
+  Numera Emoji Mapper is free software under the GNU GPL v3 or later. Contributions are
   accepted under those same terms; you keep the copyright in what you write.
 -->
 

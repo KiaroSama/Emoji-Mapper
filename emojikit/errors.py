@@ -31,3 +31,12 @@ class UndecodableVideo(MediaError):
     on `MediaError`/`RuntimeError` and counts it, so an undecodable video is
     skipped and reported rather than silently absorbed.
     """
+
+
+class OperatorConfigMissing(RuntimeError):
+    """A setting that names THIS operator (a bot, a pack base, a logo) is unset.
+
+    The repository is public, so none of these has a default: a default would
+    be somebody else's identity, published under yours. Unset is unknown, and
+    the tool stops before changing anything instead of guessing.
+    """

@@ -13,8 +13,8 @@ Design:
     resume is deterministic and can never create a duplicate.
   - Progress is reconciled from LIVE Telegram counts (sum of stickers actually
     present), so interrupting and resuming can never create a duplicate.
-  - New pack base name 'gvce' (the old 'gvcryptoemoji' names are being deleted;
-    a fresh base avoids name-reuse conflicts). Titles: '@GodVerify Crypto Emoji N'.
+  - Pack base and titles are the operator's COIN_PACK_BASE and COIN_PACK_TITLE
+    ('<title> N'); a fresh base avoids name-reuse conflicts with deleted packs.
 
 Usage:
   python rebuild_dedup.py            # build plan (if needed) + delete old + build + map
@@ -45,6 +45,7 @@ from emojikit.announce import (announce_packs)
 from emojikit.packstate import (exclusive_lock)
 from emojikit.telegram_api import (AmbiguousUploadError, LiveStateUnknown, SetState, Telegram)
 from emojikit.identity import _dhash, hamming
+from emojikit import operator_config
 
 from coins._dedup_map import map_and_fill, send_final_links
 from coins import _dedup_plan as cfg
@@ -438,6 +439,7 @@ if __name__ == "__main__":
     _args = _ap.parse_args()
 
     load_env()
+    operator_config.stop_unless("COIN_PACK_BASE", "COIN_PACK_TITLE")
     _tg = Telegram(os.environ["TELEGRAM_BOT_TOKEN"])
     _bot = _tg.get_me()["username"]
     arg = _args.command

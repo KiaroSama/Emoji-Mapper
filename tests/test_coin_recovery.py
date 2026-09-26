@@ -24,7 +24,7 @@ from emojikit import telegram_api as tg_api  # noqa: E402
 from emojikit import packstate as ps  # noqa: E402
 from coins import fetch_paprika as fp  # noqa: E402
 
-SET = "gvcryptoemoji1_by_bot"
+SET = "cryptoemoji1_by_bot"
 
 from tests._coin_fixtures import (FakeTelegram, _gradient,  # noqa: E402
                                   _png_bytes)

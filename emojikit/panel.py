@@ -476,7 +476,7 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
 # of the .py so ruff stops linting a JS blob as opaque, editors highlight it
 # properly, and a UI diff stops churning this file.
 #
-# ROOT-relative like BRAND_LOGO_DEFAULT, never absolute: an absolute asset
+# ROOT-relative, never absolute: an absolute asset
 # path is exactly how the "mandatory" brand logo silently vanished on every
 # other machine. ThePanelPageActuallyShips pins that this file is present.
 PAGE = (ASSET_DIR / "panel.html").read_text(encoding="utf-8")
@@ -490,8 +490,8 @@ ASSET_VER = hashlib.sha1(SCRIPT.encode("utf-8")).hexdigest()[:12]
 
 def _detect_bot_username() -> str:
     """Best-effort: which bot's token is configured, so the panel can preview
-    the brand logo only when it would actually be added on publish (i.e. the
-    Emoji Mapper bot, never the coin bot). Never raises -- on any error
+    the brand logo only when it would actually be added on publish (a bot in
+    BRAND_LOGO_BOTS). Never raises -- on any error
     (missing .env, no network, bad token) the logo preview is simply skipped.
     """
     try:

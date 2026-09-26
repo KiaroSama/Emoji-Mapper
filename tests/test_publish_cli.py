@@ -90,7 +90,8 @@ class CliContract(_CatalogFixture):
                         emojis=["😀"], keywords=[f"x{i}"])
         logo = self.data / "logo.png"
         _make_png(logo)
-        rc, out = self._dry_run("--formats", "static", "--brand-logo", str(logo))
+        with mock.patch.dict(os.environ, {"BRAND_LOGO_BOTS": "YourEmojiBot"}):
+            rc, out = self._dry_run("--formats", "static", "--brand-logo", str(logo))
         self.assertEqual(rc, EXIT_OK)
         self.assertIn("200 emoji -> 2 set(s) of up to 199", out)
         rc, out = self._dry_run("--formats", "static", "--no-brand-logo")
@@ -100,9 +101,28 @@ class CliContract(_CatalogFixture):
     def test_per_set_1_with_a_logo_is_rejected_not_a_zero_division(self):
         logo = self.data / "logo.png"
         _make_png(logo)
-        self.assertEqual(
-            self._dry_run("--per-set", "1", "--brand-logo", str(logo))[0],
-            EXIT_USAGE)
+        with mock.patch.dict(os.environ, {"BRAND_LOGO_BOTS": "YourEmojiBot"}):
+            self.assertEqual(
+                self._dry_run("--per-set", "1", "--brand-logo", str(logo))[0],
+                EXIT_USAGE)
+
+    def test_unset_logo_configuration_stops_the_publish_naming_the_key(self):
+        """Unknown is not "no logo": the operator never said which bots get one."""
+        with mock.patch.dict(os.environ), self.assertLogs("build_collection", "ERROR") as logs:
+            os.environ.pop("BRAND_LOGO_BOTS")
+            self.assertEqual(self._dry_run()[0], EXIT_USAGE)
+        self.assertIn("BRAND_LOGO_BOTS", " ".join(logs.output))
+
+    def test_a_listed_bot_without_its_logo_file_stops_the_publish(self):
+        operator = {"BRAND_LOGO_BOTS": "YourEmojiBot",
+                    "BRAND_LOGO_PATH": str(self.data / "missing.png")}
+        with mock.patch.dict(os.environ, operator), self.assertLogs("build_collection", "ERROR"):
+            self.assertEqual(self._dry_run()[0], EXIT_USAGE)
+
+    def test_no_brand_logo_needs_no_logo_configuration(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("BRAND_LOGO_BOTS")
+            self.assertEqual(self._dry_run("--no-brand-logo")[0], EXIT_OK)
 
 
 class OccupiedNameTG(FakeTG):

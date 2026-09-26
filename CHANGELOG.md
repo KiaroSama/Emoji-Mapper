@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - the project is Numera Emoji Mapper, and it names no operator
+
+- **Renamed to Numera Emoji Mapper** everywhere: documentation, interface text,
+  the launcher, the Worker package, asset names and the environment switches,
+  which are now `NUMERA_EMOJI_MAPPER_*`. The old names are not read any more.
+- **Your identities are your configuration.** The brand-logo bots, the logo, its
+  keywords, the collection and coin pack bases, the coin pack title and the
+  archive folders come from `.env` (`BRAND_LOGO_BOTS`, `BRAND_LOGO_PATH`,
+  `BRAND_LOGO_KEYWORDS`, `COLLECTION_PACK_BASE`, `COIN_PACK_BASE`,
+  `COIN_PACK_TITLE`, `EMOJI_ARCHIVE_DIR`, `COIN_EMOJI_DIR`; see `.env.example`).
+  None has a default: a tool that needs an unset one stops before changing
+  anything and names it. `BRAND_LOGO_BOTS` set but empty means no bot gets a
+  logo. The repository no longer ships a brand logo; keep yours in the
+  git-ignored `private/`.
+- **A listed bot whose logo file is missing now stops the publish** instead of
+  warning and publishing packs without their first emoji.
+- The pack archive names the logo `001_logo.png`; a folder archived under an
+  older logo name has that file renamed on the next `--sync`.
+
 ### Fixed - a sandbox leaves the source alone, and a state write leaves other files alone
 
 - **Making a sandbox no longer writes to the real catalog.** The source was
@@ -1340,7 +1359,7 @@ the code and re-run. The stale ones:
   is required (and must be > 0), because an uncalibrated run would overwrite the
   map with nearest-but-wrong matches.
 - `--brand-logo`'s default was documented as a machine-specific `F:\...` path;
-  it is the repo's own `assets/emoji-mapper-logo.png`.
+  it is the repo's own `assets/numera-emoji-mapper-logo.png`.
 - The curate panel was described as autoplaying video and looping animations.
   Nothing plays until hover — that was the fix for the page hanging on large
   catalogs. The observer margin is 200 px, not 250, and `POST /api/order` was
@@ -1350,7 +1369,7 @@ the code and re-run. The stale ones:
   one, plus `copy_text` buttons.
 - `.env.example` listed `GENERAL_BOT_USERNAME` / `GENERAL_BOT_NAME`, which no
   code reads (the bot's username comes from `getMe`), and omitted
-  `EMOJI_FFMPEG_TIMEOUT`, `TELEGRAM_API_BASE` and `EMOJI_MAPPER_NO_DOTENV`,
+  `EMOJI_FFMPEG_TIMEOUT`, `TELEGRAM_API_BASE` and `NUMERA_EMOJI_MAPPER_NO_DOTENV`,
   which it does.
 
 ### Fixed — eighth audit pass (1 critical)
@@ -1599,7 +1618,7 @@ arrives from somewhere else — and the run then bound that stranger's
   `build_collection` (each per-format set publishes in this relative order). On
   first open the order is seeded to the look-alike similarity grouping.
 - **Curate panel**: a distinct gold "Brand logo" preview card now appears first
-  when the configured bot is `@GodVerifyEmojiMapperbot` and the logo file
+  when the configured bot is `@YourEmojiBot` and the logo file
   exists, showing where the mandatory logo will be inserted on publish. It's
   preview-only (not clickable, not counted, never reordered, never sent to
   `/api/save`) since the logo is only actually added by `build_collection.py`
@@ -1614,10 +1633,10 @@ arrives from somewhere else — and the run then bound that stranger's
 - **Curate panel**: benign browser disconnects while scrolling no longer spam
   the log with `ConnectionAbortedError` tracebacks (handled in the request
   handler and server `handle_error`).
-- **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
+- **Numera Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
   with a trailing newline, so pasting the copied IDs leaves a blank line after
   the last one.
-- **Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
+- **Numera Emoji Mapper bot**: each "Copy"/"Copy a-b" button's `copy_text` now ends
   with a trailing newline, so pasting the copied IDs leaves a blank line after
   the last one.
 
@@ -1645,7 +1664,7 @@ arrives from somewhere else — and the run then bound that stranger's
   by the fast pre-dedup and downloads nothing (previously every copy was
   re-downloaded and, for static, could even re-enter the catalog after
   Telegram's re-encode).
-- **Emoji Mapper bot**: id batching now follows the message-length limit again
+- **Numera Emoji Mapper bot**: id batching now follows the message-length limit again
   (not the smaller `copy_text` button limit), so a 50-id reply is 2 messages as
   before, not 5. Telegram's `copy_text` button is still hard-capped at 256 chars
   (~12 ids), so a message with more ids than that shows a few chunked
@@ -1653,7 +1672,7 @@ arrives from somewhere else — and the run then bound that stranger's
   itself has no single-tap way to copy an arbitrarily large id list, and a
   single message is capped at 4096 chars (a 50-id message would need ~4500+),
   so very large results still need more than one message.
-- **Emoji Mapper bot**: a manually quoted reply (the highlighted `>` excerpt
+- **Numera Emoji Mapper bot**: a manually quoted reply (the highlighted `>` excerpt
   above a reply) containing multiple premium emoji only surfaced **one** ID.
   Root cause: per the Bot API, custom_emoji entities inside a quoted excerpt
   live in `message.quote.entities` (a `TextQuote`), not in the reply's own
@@ -1674,19 +1693,19 @@ arrives from somewhere else — and the run then bound that stranger's
   (only the first prompt returns to the menu), and `exit`/`quit` leaves from
   anywhere. Per-run UTC log under `logs\run_<UTC>.log` also records each launched
   Python command and its exit code (no secret values).
-- **Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
+- **Numera Emoji Mapper bot reply** reworked: sending one or more premium emoji (any
   spacing/newlines) now returns a **single collapsed (expandable) quote** of the
   **actual premium emoji** (rendered via `<tg-emoji>`) + `<code>` ID per line for
   individual tap-to-copy, plus a `copy_text` **“Copy all” inline button** for
   reliable one-click copy-all on every platform (chunked for long lists). Huge
   lists split across messages; a rejected custom emoji falls back to plain
   fallback chars.
-- **`build_collection.py`** now places the **God Verify logo as the first emoji
-  of every set** built with `@GodVerifyEmojiMapperbot`. Since Bot API 7.2 a
+- **`build_collection.py`** now places the **YourBrand logo as the first emoji
+  of every set** built with `@YourEmojiBot`. Since Bot API 7.2 a
   single set may contain mixed formats, so the logo is always a static 100x100
   PNG and leads static, video AND animated sets alike (verified live). The coin
   bot is exempt. New `--brand-logo` / `--no-brand-logo` flags.
-- Renamed the project from `CoinEmojiMapper` to **Emoji Mapper** across the
+- Renamed the project from its coin-only name to a general one across the
   codebase, documentation and launcher.
 - Generalized the engine so `make_emoji_pngs.py` + `build_pack.py` build emoji
   packs from any folder of images, not only crypto-coin logos.
@@ -1716,7 +1735,7 @@ arrives from somewhere else — and the run then bound that stranger's
   ones to include (all on by default, Shift+click ranges), with look-alikes
   ordered next to each other; the saved selection drives what `build_collection`
   publishes.
-- **Emoji Mapper bot** (`emoji_bot.py`): interactive long-polling bot that
+- **Numera Emoji Mapper bot** (`emoji_bot.py`): interactive long-polling bot that
   extracts premium custom-emoji IDs from sent/forwarded messages and from new
   channel/group posts, with tap-to-copy (`copy_text`) inline buttons and a
   `/start` help menu.

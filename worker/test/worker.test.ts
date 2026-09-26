@@ -163,11 +163,11 @@ describe("only admins get answered", () => {
       update_id: 4,
       message: msgFrom(42, {
         text: "hi",
-        entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "5899781975" }],
+        entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "111111111" }],
       }),
     }), ENV, CTX);
     expect(calls).toHaveLength(1);
-    expect(String(calls[0].body.text)).toContain("5899781975");
+    expect(String(calls[0].body.text)).toContain("111111111");
   });
 });
 
@@ -224,7 +224,7 @@ describe("replies stay under Telegram's message limit", () => {
 
 describe("publishing a finished pack", () => {
   const body = {
-    packs: [{ name: "gvcryptoemoji1_by_bot", title: "Coins 1", count: 200 }],
+    packs: [{ name: "cryptoemoji1_by_bot", title: "Coins 1", count: 200 }],
   };
 
   it("refuses without the bearer", async () => {
@@ -258,7 +258,7 @@ describe("publishing a finished pack", () => {
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
     expect(calls[0].body.chat_id).toBe("@testchannel");
-    expect(String(calls[0].body.text)).toContain("t.me/addemoji/gvcryptoemoji1_by_bot");
+    expect(String(calls[0].body.text)).toContain("t.me/addemoji/cryptoemoji1_by_bot");
   });
 
   it("escapes a title so it cannot inject markup", () => {
@@ -271,7 +271,7 @@ describe("publishing a finished pack", () => {
     // message would eventually pass 4096 characters and Telegram rejects the
     // WHOLE thing -- so the overflow costs every link, not just the last one.
     const packs = Array.from({ length: 120 }, (_, i) => ({
-      name: `gvcryptoemoji${i + 1}_by_GodVerifyCoinEmojiMapperbot`,
+      name: `cryptoemoji${i + 1}_by_YourCoinEmojiBot`,
       title: `Crypto pack number ${i + 1}`,
     }));
     const parts = renderAnnouncement({ packs, note: "all packs:" });
@@ -294,7 +294,7 @@ describe("publishing a finished pack", () => {
   it("returns one message id per part", async () => {
     const calls = stubApi();
     const packs = Array.from({ length: 120 }, (_, i) => ({
-      name: `gvcryptoemoji${i + 1}_by_GodVerifyCoinEmojiMapperbot`,
+      name: `cryptoemoji${i + 1}_by_YourCoinEmojiBot`,
       title: `Crypto pack number ${i + 1}`,
     }));
     const res = await worker.fetch(new Request("https://w.dev/publish", {
@@ -324,7 +324,7 @@ describe("logging", () => {
     // Telegram shows the internal id in several places; the Bot API only takes
     // the -100 form, and the failure is a bare "chat not found" much later.
     expect(normalizeChatId("4211401345")).toBe("-1004211401345");
-    expect(normalizeChatId("-1001998461602")).toBe("-1001998461602");
+    expect(normalizeChatId("-1002222222222")).toBe("-1002222222222");
     expect(normalizeChatId("@logs")).toBe("@logs");
     expect(normalizeChatId("")).toBeNull();
     expect(normalizeChatId("0")).toBeNull();
@@ -447,11 +447,11 @@ describe("logging", () => {
     await worker.fetch(webhookReq("/tg/general", ENV.GENERAL_WEBHOOK_SECRET, {
       update_id: 11,
       channel_post: {
-        message_id: 1, chat: { id: -1001998461602, type: "channel", title: "Logs" },
+        message_id: 1, chat: { id: -1002222222222, type: "channel", title: "Logs" },
         text: "[coin] ERROR webhook",
         entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "123" }],
       },
-    }), { ...ENV, LOG_CHAT_ID: "-1001998461602", DB: db }, CTX);
+    }), { ...ENV, LOG_CHAT_ID: "-1002222222222", DB: db }, CTX);
     await settle();
     // No DM to the admins, and no row about a message we just wrote ourselves.
     expect(calls).toHaveLength(0);
@@ -466,7 +466,7 @@ describe("logging", () => {
         message_id: 1, chat: { id: -100777, type: "channel", title: "Real" },
         entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: "456" }],
       },
-    }), { ...ENV, LOG_CHAT_ID: "-1001998461602" }, CTX);
+    }), { ...ENV, LOG_CHAT_ID: "-1002222222222" }, CTX);
     await settle();
     expect(calls.length).toBeGreaterThan(0);
     expect(String(calls[0].body.text)).toContain("456");

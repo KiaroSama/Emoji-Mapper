@@ -66,6 +66,7 @@ from emojikit.build_pack import (EXIT_FAILED, EXIT_OK, EXIT_PARTIAL, EXIT_USAGE,
 from emojikit.packstate import (LockBusy, canonical_map_lock, exclusive_lock, pack_family_lock_path, write_json_atomic)
 from emojikit.telegram_api import (Telegram, api_base)
 from emojikit.logsetup import setup_logging
+from emojikit import operator_config
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("remap_ids")
@@ -74,7 +75,8 @@ SIG_PX = 16  # signature is a SIG_PX x SIG_PX RGB thumbnail (robust to re-encode
 # fetch_cmc, verify_logos --fix and rebuild_dedup, so it resolves to the SAME
 # lock file those take before mutating these sets -- a lock of our own would
 # exclude nobody.
-SET_BASE = "gvcryptoemoji"
+load_env()  # before the operator's pack family is read at import
+SET_BASE = operator_config.value("COIN_PACK_BASE")
 PACK_LOCK = pack_family_lock_path(SET_BASE)
 
 
@@ -262,6 +264,7 @@ def nearest(local: np.ndarray, live: np.ndarray) -> tuple[np.ndarray, np.ndarray
 
 def main() -> int:
     load_env()
+    operator_config.stop_unless("COIN_PACK_BASE")
     setup_logging("remap_ids")
     ap = argparse.ArgumentParser()
     ap.add_argument("--emoji-dir", required=True, help="Folder of <ticker>.png source logos.")

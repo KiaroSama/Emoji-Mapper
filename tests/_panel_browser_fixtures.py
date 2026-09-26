@@ -35,7 +35,7 @@ from emojikit.catalog import Catalog
 
 TOKEN = "test-token-value"
 VIEWPORT = {"width": 1200, "height": 900}
-OPT_OUT = "EMOJI_MAPPER_NO_BROWSER_TESTS"
+OPT_OUT = "NUMERA_EMOJI_MAPPER_NO_BROWSER_TESTS"
 HOWTO = (f"the panel browser tests need playwright and Chromium:\n"
          f"    python -m pip install -r requirements-dev.txt\n"
          f"    python -m playwright install chromium\n"
@@ -154,7 +154,7 @@ class Harness:
         self._pw = sync_playwright().start()
         try:
             # Local hardware checks may use installed Chrome; CI keeps its pinned build.
-            channel = os.environ.get("EMOJI_MAPPER_BROWSER_CHANNEL") or None
+            channel = os.environ.get("NUMERA_EMOJI_MAPPER_BROWSER_CHANNEL") or None
             self.browser = self._pw.chromium.launch(headless=True, channel=channel)
         except Exception as exc:         # re-raised, with the cure attached
             self._pw.stop()

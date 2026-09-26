@@ -24,7 +24,7 @@ from pathlib import Path
 from PIL import Image
 
 from emojikit.build_pack import EXIT_PARTIAL, load_env, safe_int_env
-from emojikit import media
+from emojikit import media, operator_config
 from emojikit.packstate import (pack_family_lock_path, write_json_atomic)
 
 
@@ -39,7 +39,10 @@ GROUPS_REPORT = ROOT / "shared_logo_groups.json"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 KEYWORDS_CSV = ROOT / "keywords.csv"
 
-BASE = "gvcryptoemoji"
+load_env()  # before any setting below is read at import
+# The operator's own pack family (COIN_PACK_BASE / COIN_PACK_TITLE); commands
+# stop on an unset one before changing anything (operator_config.stop_unless).
+BASE = operator_config.value("COIN_PACK_BASE")
 # One lock for the whole pack family, keyed on BASE. Naming it after this
 # tool's state file made it a different lock from the fetchers' coin_pack.lock,
 # so a rebuild and a provider top-up could append to the same live sets at once.
@@ -50,7 +53,7 @@ BASE = "gvcryptoemoji"
 # all follow it). A tool that only rewrites the map -- alias_map, enhance_map,
 # remap_ids --apply -- takes the map lock alone, so no cycle exists.
 LOCK = pack_family_lock_path(BASE)
-TITLE = "@GodVerify Crypto Emoji"
+TITLE = operator_config.value("COIN_PACK_TITLE")
 EMOJI_CHAR = "\U0001FA99"
 PER_SET = 200
 # Above this, a set of tickers sharing one emoji id is treated as corruption
@@ -62,7 +65,6 @@ SHARED_GROUP_LIMIT = 20
 # upload: Telegram re-encodes PNG to WEBP, so identical content still differs by
 # a bit or two. Same budget as the fetchers.
 SAME_IMAGE_MAX = 8
-load_env()  # ensure .env is loaded before resolving the owner id at import
 # Pack owner numeric Telegram id (from .env / env; never hardcode a personal id).
 # safe_int_env, not int(): a typo in .env must not raise at import, before
 # argparse can explain what is wrong.

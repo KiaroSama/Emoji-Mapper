@@ -165,7 +165,7 @@ class VerifyLogosFix(unittest.TestCase):
         self.map_path = self.tmp / "ticker_to_id.json"
         self.map_path.write_text(json.dumps(
             {"btc": OLD_CID, "wbtc": OLD_CID, "eth": "cid-eth"}), encoding="utf-8")
-        self.sets = [{"name": "gvcryptoemoji1_by_bot", "index": 1}]
+        self.sets = [{"name": "cryptoemoji1_by_bot", "index": 1}]
         self.patches = [
             mock.patch.object(self.mod, "ROOT", self.tmp),
             mock.patch.object(self.mod, "fetch_markets", lambda top: [
@@ -418,10 +418,10 @@ class VerifyLogosFix(unittest.TestCase):
         self.assertIsNone(self.intent())
 
     def test_fix_locks_on_the_pack_family_not_on_this_script(self):
-        # --fix REPLACES stickers in the same gvcryptoemoji* sets the coin
+        # --fix REPLACES stickers in the same cryptoemoji* sets the coin
         # fetchers append to. A lock named after this file was a different name
         # from theirs, so the exclusion it claimed never actually held.
-        self.assertEqual(self.mod.SET_BASE, "gvcryptoemoji")
+        self.assertEqual(self.mod.SET_BASE, "cryptoemoji")
         self.assertEqual(self.mod.PACK_LOCK,
                          ps.pack_family_lock_path(self.mod.SET_BASE))
 
@@ -447,7 +447,7 @@ class VerifyLogosMainContracts(unittest.TestCase):
         self.emoji = self.tmp / "emoji"
         self.emoji.mkdir()
         (self.tmp / "state.json").write_text(json.dumps(
-            {"sets": [{"name": "gvcryptoemoji1_by_bot", "index": 1}]}),
+            {"sets": [{"name": "cryptoemoji1_by_bot", "index": 1}]}),
             encoding="utf-8")
         (self.tmp / "map.json").write_text(json.dumps({"sol": OLD_CID}),
                                            encoding="utf-8")

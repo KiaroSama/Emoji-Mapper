@@ -72,7 +72,7 @@ class FakeTG:
 
     # ----- publishing side (the uploaded copy gets its own file_unique_id) --- #
     def get_me(self):
-        return {"username": "GodVerifyEmojiMapperbot"}
+        return {"username": "YourEmojiBot"}
 
     # Telegram re-encodes on upload, so the live copy's file_unique_id is a
     # FRESH one the catalog has never seen (``fuid_prefix``). The fixture
@@ -144,8 +144,8 @@ from emojikit import identity  # noqa: E402
 from emojikit.catalog import Catalog  # noqa: E402
 
 
-SET = "pks1_by_GodVerifyEmojiMapperbot"
-SET2 = "pks2_by_GodVerifyEmojiMapperbot"
+SET = "pks1_by_YourEmojiBot"
+SET2 = "pks2_by_YourEmojiBot"
 
 
 def _main(*argv: str) -> int:

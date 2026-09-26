@@ -1,4 +1,4 @@
-"""Interactive Emoji Mapper bot (general bot, long-polling).
+"""Interactive Numera Emoji Mapper bot (general bot, long-polling).
 
 Capabilities:
   1. Send the bot a premium (custom) emoji -> it replies with the emoji's id on
@@ -272,7 +272,7 @@ def build_payloads(ids: list[str], labels: dict[str, str] | None = None,
 
 
 START_TEXT = (
-    "<b>Emoji Mapper</b> — premium custom-emoji ID extractor\n\n"
+    "<b>Numera Emoji Mapper</b> — premium custom-emoji ID extractor\n\n"
     "• Send me one or more <b>premium emoji</b> in a row (spaces/newlines don't "
     "matter) → I reply with a collapsed quote of <i>emoji + ID</i> (tap an ID to "
     "copy just it) and a <b>Copy all</b> button to copy every ID at once.\n"
@@ -475,7 +475,7 @@ def main() -> int:
     log.info("access list: %d authorized user id(s)", len(allowed_users))
     tg = Telegram(token)
     me = tg.get_me()
-    log.info("Emoji Mapper bot @%s started (owner=%s)", me.get("username"), owner_id)
+    log.info("Numera Emoji Mapper bot @%s started (owner=%s)", me.get("username"), owner_id)
     try:
         tg._call("setMyCommands", data={"commands": json.dumps([
             {"command": "start", "description": "How to use the bot"},

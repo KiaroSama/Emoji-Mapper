@@ -2,8 +2,8 @@
  * One Worker, both bots.
  *
  * Routes:
- *   POST /tg/general   Telegram webhook for @GodVerifyEmojiMapperbot
- *   POST /tg/coin      Telegram webhook for @GodVerifyCoinEmojiMapperbot
+ *   POST /tg/general   Telegram webhook for @YourEmojiBot
+ *   POST /tg/coin      Telegram webhook for @YourCoinEmojiBot
  *   POST /publish      the local builder announcing a finished pack
  *   GET  /health       liveness, no secrets
  *

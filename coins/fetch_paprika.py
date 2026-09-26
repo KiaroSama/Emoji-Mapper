@@ -52,6 +52,7 @@ from coins._paprika_api import (QUOTA_EXHAUSTED, SLEEP, http_bytes, http_json, s
 # One definition of the inventory format and of "which asset is this ticker",
 # shared with alias_map, enhance_map, fetch_cmc and rebuild_dedup.
 from emojikit.identity import _dhash, hamming
+from emojikit import operator_config
 # The pipeline's single definition of "this image is effectively empty".
 
 ROOT = Path(__file__).resolve().parent
@@ -68,7 +69,7 @@ EMOJI = ROOT / "logos" / "emoji"
 # oracle matching what was actually published.
 INV = ROOT / "currency-emoji-inventory.md"
 OUT_INV = ROOT / "currency-emoji-inventory.filled.md"
-# The canonical publication state: which gvcryptoemoji* sets exist and how the
+# The canonical publication state: which coin sets exist and how the
 # family grows. Shared with rebuild_dedup, check_all_packs, remap_ids,
 # verify_logos and write_manifests, which all already read this file.
 #
@@ -91,11 +92,12 @@ INTENT_KEY = "provider_in_flight"
 TICKER_IDS = ROOT / "ticker_to_id.json"
 CACHE = ROOT / "paprika_matches.json"  # resumable {ticker: {id, conf, name}}
 KEYWORDS_CSV = ROOT / "keywords.csv"
-SET_BASE = "gvcryptoemoji"
-SET_TITLE = "@GodVerify Crypto Emoji"
+load_env()  # before the operator's pack family is read below
+SET_BASE = operator_config.value("COIN_PACK_BASE")
+SET_TITLE = operator_config.value("COIN_PACK_TITLE")
 # One lock for the whole coin pack family, keyed on the BASE NAME. fetch_paprika,
 # fetch_cmc, verify_logos --fix and rebuild_dedup all mutate the same
-# gvcryptoemoji* sets; a lock named after whichever state file each tool happens
+# coin sets; a lock named after whichever state file each tool happens
 # to read let them hold three different locks and append concurrently.
 #
 # LOCK ORDER, project-wide: this pack-family lock FIRST, canonical_map_lock()
@@ -112,9 +114,6 @@ COIN = "https://api.coinpaprika.com/v1/coins/"
 LOGO_CDN = "https://static.coinpaprika.com/coin/{id}/logo.png"
 EMOJI_CHAR = "\U0001FA99"
 PER_SET = 200
-# Load .env at import so the owner id is available even when this module is
-# imported by fetch_cmc.py (which reuses USER_ID).
-load_env()
 # Pack owner numeric Telegram id (from .env / env; never hardcode a personal id).
 USER_ID = safe_int_env("PACK_OWNER_USER_ID", 0, minimum=0)
 
@@ -641,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
                          "no pack or map changes.")
     dry = ap.parse_args(argv).dry
     load_env()
+    operator_config.stop_unless("COIN_PACK_BASE", "COIN_PACK_TITLE")
     ticker_to_id: dict[str, str] = json.loads(TICKER_IDS.read_text("utf-8"))
     have = set(ticker_to_id)
     missing = parse_missing(have)

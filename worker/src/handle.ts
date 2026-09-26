@@ -3,7 +3,7 @@
  * channel.
  *
  * Both bots run the same handler. The coin bot has never had an interactive
- * side -- it exists as the identity that owns the gvcryptoemoji* packs -- but
+ * side -- it exists as the identity that owns the cryptoemoji* packs -- but
  * giving it the same behaviour costs nothing and means a message sent to the
  * wrong bot still gets an answer instead of silence.
  */

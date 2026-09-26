@@ -2,7 +2,7 @@
 
 ## Secrets
 
-Emoji Mapper talks to the Telegram Bot API and (optionally) CoinMarketCap. All
+Numera Emoji Mapper talks to the Telegram Bot API and (optionally) CoinMarketCap. All
 secrets are read from environment variables or a local `.env` file and are
 never hard-coded in source:
 

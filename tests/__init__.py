@@ -41,7 +41,20 @@ os.environ["TELEGRAM_API_BASE"] = "http://127.0.0.1:9"   # discard port
 
 # Several modules call load_env() at import time, which would read .env and put
 # the real credentials straight back. Honoured by build_pack.load_env().
-os.environ["EMOJI_MAPPER_NO_DOTENV"] = "1"
+os.environ["NUMERA_EMOJI_MAPPER_NO_DOTENV"] = "1"
+
+# --- 1b. A synthetic operator ------------------------------------------------ #
+# The operator's identities are configuration with no default (docs/adr/0001),
+# and a tool stops without them. The suite runs as a made-up operator -- never
+# the real one, whose values stay in the .env this suite does not read.
+for _name in ("BRAND_LOGO_PATH", "BRAND_LOGO_KEYWORDS", "EMOJI_ARCHIVE_DIR", "COIN_EMOJI_DIR"):
+    os.environ.pop(_name, None)
+os.environ.update({
+    "BRAND_LOGO_BOTS": "",                      # set and empty: no bot gets a logo
+    "COLLECTION_PACK_BASE": "YourBrand_Emoji_Packs",
+    "COIN_PACK_BASE": "cryptoemoji",
+    "COIN_PACK_TITLE": "@YourBrand Crypto Emoji",
+})
 
 
 # --- 2. Refuse outbound connections ----------------------------------------- #

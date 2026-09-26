@@ -52,7 +52,7 @@ class TheSandboxChildGetsNoCredentials(unittest.TestCase):
     def test_dotenv_reading_is_switched_off_for_the_child(self):
         """The flag load_env() already honours for the suite; without it the
         child re-reads the real .env no matter what the parent environment holds."""
-        self.assertEqual(self.child()["EMOJI_MAPPER_NO_DOTENV"], "1")
+        self.assertEqual(self.child()["NUMERA_EMOJI_MAPPER_NO_DOTENV"], "1")
 
     def test_an_exported_token_does_not_survive_into_the_child(self):
         child = self.child(GENERAL_BOT_TOKEN="111:live", COIN_BOT_TOKEN="222:live")
@@ -474,7 +474,7 @@ class TheSandboxHoldsItsLeaseForTheLifeOfTheServer(SandboxFixture):
             # this directory busy and leave it alone.
             seen["swept"] = sandbox_clone.sweep_stale(clone.parent)
             seen["catalog_alive"] = (clone / "catalog.db").is_file()
-            seen["dotenv_off"] = os.environ.get("EMOJI_MAPPER_NO_DOTENV")
+            seen["dotenv_off"] = os.environ.get("NUMERA_EMOJI_MAPPER_NO_DOTENV")
             return 0
 
         before = dict(os.environ)
@@ -561,7 +561,7 @@ class TheScrubLeavesTheProcessAbleToRun(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GENERAL_BOT_TOKEN": "111:live"}, clear=False):
             with panel_sandbox.scrubbed_process_environment():
                 inside = dict(os.environ)
-        self.assertEqual(inside.get("EMOJI_MAPPER_NO_DOTENV"), "1")
+        self.assertEqual(inside.get("NUMERA_EMOJI_MAPPER_NO_DOTENV"), "1")
         self.assertNotIn("GENERAL_BOT_TOKEN", inside, "credentials must still go")
         present = {k.upper() for k in inside}
         self.assertIn("PATH", present, "PATH is gone; the process cannot run")
