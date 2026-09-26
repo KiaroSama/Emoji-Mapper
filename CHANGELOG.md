@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - a sandbox leaves the source alone, and a state write leaves other files alone
+
+- **Making a sandbox no longer writes to the real catalog.** The source was
+  opened through `Catalog`, whose constructor switches it to WAL, creates missing
+  tables and commits -- so cloning an older catalog upgraded it, even when the
+  clone was then refused. It is opened read-only now, under the writer lease.
+- **The sandbox holds the right media.** A relative path resolves against the
+  project root, as every tool does, instead of preferring a file beside the
+  source; each copy is checked by SHA-256 on both sides instead of by size; and
+  file names are the hex of the content key, so two keys can no longer share one.
+- **A sandbox is owned from the moment it is built until it is cleaned up.** The
+  lease now lives outside the sandbox and is taken first; before, a sweep could
+  delete a finished clone in the gap before it was served. Marker protocol 2;
+  version-1 directories are preserved, not guessed abandoned.
+- **Writing a state file cannot damage an unrelated one.** Each write uses its own
+  exclusive temporary file instead of a shared `<name>.tmp`, which was
+  overwritten if it already existed and collided between two writers.
+- **A rewrite keeps the file's permissions** (the exclusive temporary file is
+  owner-only, and publishing it narrowed every rewritten file), and **Windows'
+  transient refusal to replace a file is retried** for up to a second: two
+  writers to one file lost a write in 13 of 40 runs without it.
+
 ### Fixed - an emoji joins the pack it was dropped on, and a selection can be seen
 
 - **A drop reads the card you aimed at, not the card it landed above.** Those

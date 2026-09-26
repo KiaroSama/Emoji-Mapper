@@ -12,6 +12,7 @@ import contextlib
 import json
 import re
 import secrets
+import stat
 import subprocess
 import os
 import time
@@ -331,6 +332,39 @@ def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+_REPLACE_DEADLINE = 1.0   # seconds; pip bounds the same retry at 1 s
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """``os.replace``, with a bounded retry for Windows' transient refusal.
+
+    Windows answers ``PermissionError`` when the destination is itself mid-way
+    through another replace, or is held open without delete sharing (a second
+    writer, a virus scan). Measured on this machine: two writers to one file,
+    released together, lost one write in 13 of 40 runs. POSIX ``rename`` never
+    refuses that way, so only Windows retries, and only that error. pip does the
+    same: ``src/pip/_internal/utils/filesystem.py``,
+    ``replace = retry(stop_after_delay=1, wait=0.25)(os.replace)``.
+
+    The wait is a short, growing backoff inside a hard deadline, not a guess at
+    readiness: Windows gives no signal when the other rename completes.
+    """
+    if os.name != "nt":
+        os.replace(src, dst)
+        return
+    deadline = time.monotonic() + _REPLACE_DEADLINE
+    delay = 0.005
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
 def write_json_atomic(path: Path, data) -> None:
     """Write JSON so an interrupted run can never leave a truncated file.
 
@@ -351,7 +385,13 @@ def write_json_atomic(path: Path, data) -> None:
             json.dump(data, fh, ensure_ascii=False, indent=1)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        # mkstemp creates its file 0600 and os.replace publishes that inode, so
+        # without this every rewrite narrowed an existing 0644 file to owner-only.
+        # A NEW file keeps 0600: the umask default would need os.umask(), which is
+        # process-global and races other threads.
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        _replace(tmp, path)
     finally:
         # After replace the pathname is gone; on failure only our inode is removed.
         tmp.unlink(missing_ok=True)

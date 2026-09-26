@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import tempfile
 import threading
 import unittest
@@ -54,14 +56,62 @@ class AtomicStateFiles(unittest.TestCase):
         self.assert_foreign_preserved()
         self.assertEqual(set(self.root.iterdir()), {self.path, self.foreign})
 
+    @unittest.skipUnless(os.name == 'nt', "Windows' transient replace refusal")
+    def test_a_transient_windows_refusal_is_retried_to_completion(self):
+        """Without the retry, two writers to one file lost a write 13/40 runs.
+
+        Deterministic here: the destination refuses twice, then accepts.
+        """
+        original, calls = ps.os.replace, []
+
+        def refuse_twice(source, destination):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise PermissionError(13, 'Access is denied')
+            return original(source, destination)
+
+        with mock.patch.object(ps.os, 'replace', refuse_twice):
+            ps.write_json_atomic(self.path, {'new': True})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), {'new': True})
+        self.assertEqual(set(self.root.iterdir()), {self.path, self.foreign})
+
+    @unittest.skipUnless(os.name == 'nt', "Windows' transient replace refusal")
+    def test_a_persistent_refusal_still_fails_and_cleans_up(self):
+        """A retry that never gives up would turn a real error into a hang."""
+        with mock.patch.object(ps, '_REPLACE_DEADLINE', 0.05), \
+                mock.patch.object(ps.os, 'replace', side_effect=PermissionError(13, 'denied')), \
+                self.assertRaises(PermissionError):
+            ps.write_json_atomic(self.path, {'new': True})
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), {'old': True})
+        self.assert_foreign_preserved()
+        self.assertEqual(set(self.root.iterdir()), {self.path, self.foreign})
+
+    @unittest.skipUnless(os.name == 'posix', 'permission bits are a POSIX contract')
+    def test_rewriting_an_existing_file_keeps_its_permissions(self):
+        """mkstemp creates its file 0600, and os.replace publishes that inode.
+
+        Without carrying the old mode across, every rewrite silently narrowed an
+        existing 0644 state file to owner-only -- a change no caller asked for.
+        """
+        os.chmod(self.path, 0o644)
+        ps.write_json_atomic(self.path, {'new': True})
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), {'new': True})
+
     def test_overlapping_writes_use_independent_temps_and_publish_complete_json(self):
         barrier = threading.Barrier(2, timeout=5)
         original = ps.os.replace
         failures, sources = [], []
 
         def replace(source, destination):
+            # Only each writer's FIRST attempt meets the other at the barrier:
+            # that is what forces the overlap. A Windows retry of the same temp
+            # must not wait for a partner that has already gone through.
+            first = str(source) not in sources
             sources.append(str(source))
-            barrier.wait()
+            if first:
+                barrier.wait()
             return original(source, destination)
 
         def write(value):
