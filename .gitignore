@@ -177,3 +177,5 @@ worker/.wrangler/
 /private/
 
 /private/brand-logo.png
+
+/BRAND_LOGO_PATH
