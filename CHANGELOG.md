@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - new project logos
+
+- **New logos.** The project logo (README, general workflow, the curate panel's
+  tab and header icon) and the coin logo (coin workflow) are the new designs;
+  the old images are gone from the current files.
+- **The panel's icon URL is versioned by the icon's own content.** It was served
+  immutable-cached without a version, so a replaced logo kept showing the old one
+  in every browser that had opened the panel before.
+- **README badges:** sixteen verified badges, including support/donations linking
+  to the Donate section.
+
 ### Changed - the project is Numera Emoji Mapper, and it names no operator
 
 - **Renamed to Numera Emoji Mapper** everywhere: documentation, interface text,

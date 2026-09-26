@@ -54,6 +54,15 @@ class ThePanelScriptsShip(unittest.TestCase):
         for name in p.SCRIPT_FILES:
             self.assertIn((p.ASSET_DIR / name).read_text(encoding="utf-8"), p.SCRIPT)
 
+    def test_the_icon_url_is_versioned_by_the_icon_itself(self):
+        """The icon is immutable-cached like the scripts. Unversioned, a
+        replaced logo kept showing the OLD one from every browser that had
+        opened the panel before."""
+        self.assertEqual(p.ICON_VER, hashlib.sha1(
+            (p.ASSET_DIR / "logo-128.png").read_bytes()).hexdigest()[:12])
+        self.assertNotIn('"/static/logo-128.png"', p.PAGE)
+        self.assertEqual(p.PAGE.count("/static/logo-128.png?v=__ICON_VER__"), 2)
+
     def test_the_inline_block_carries_values_not_behaviour(self):
         """Everything that used to be inline now lives in the files, so a
         handler left behind in the page would run twice or against nothing."""
@@ -98,6 +107,8 @@ class TheStaticRouteServesVersionedScripts(unittest.TestCase):
         html = body.decode("utf-8")
         self.assertNotIn("__ASSET_VER__", html, "the placeholder reached the browser")
         self.assertIn(f"/static/{p.SCRIPT_FILES[0]}?v={p.ASSET_VER}", html)
+        self.assertNotIn("__ICON_VER__", html, "the icon placeholder reached the browser")
+        self.assertIn(f"/static/logo-128.png?v={p.ICON_VER}", html)
 
     def test_the_version_query_reaches_the_file_on_disk(self):
         """`?v=` is for the cache, not the filesystem: the route must strip it

@@ -209,7 +209,8 @@ def make_handler(view: list[dict], by_key: dict, db_path: Path, token: str,
                             .replace("__PREVIEW_FPS__", str(preview_fps))
                             .replace("__PER_SET__", str(PER_SET))
                             .replace("__HIDDEN__", str(hidden_now[0]))
-                            .replace("__ASSET_VER__", ASSET_VER))
+                            .replace("__ASSET_VER__", ASSET_VER)
+                            .replace("__ICON_VER__", ICON_VER))
                 self._send(200, page.encode("utf-8"), "text/html; charset=utf-8",
                            cache="no-store")
                 return
@@ -486,6 +487,10 @@ PAGE = (ASSET_DIR / "panel.html").read_text(encoding="utf-8")
 SCRIPT_FILES = ("panel-grid.js", "panel-actions.js", "panel-holding.js")
 SCRIPT = "\n".join((ASSET_DIR / f).read_text(encoding="utf-8") for f in SCRIPT_FILES)
 ASSET_VER = hashlib.sha1(SCRIPT.encode("utf-8")).hexdigest()[:12]
+# The icon is immutable-cached too: unversioned, a replaced logo kept showing the
+# OLD one in every browser that had opened the panel before. Its own bytes
+# version its URL.
+ICON_VER = hashlib.sha1((ASSET_DIR / "logo-128.png").read_bytes()).hexdigest()[:12]
 
 
 def _detect_bot_username() -> str:

@@ -15,6 +15,15 @@
 [![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 [![Docs: GUIDE](https://img.shields.io/badge/docs-GUIDE-blue)](docs/GUIDE.md)
 [![Last commit](https://img.shields.io/github/last-commit/KiaroSama/Numera-Emoji-Mapper)](https://github.com/KiaroSama/Numera-Emoji-Mapper/commits/main)
+<br>
+[![Commit activity](https://img.shields.io/github/commit-activity/m/KiaroSama/Numera-Emoji-Mapper)](https://github.com/KiaroSama/Numera-Emoji-Mapper/commits/main)
+[![Top language](https://img.shields.io/github/languages/top/KiaroSama/Numera-Emoji-Mapper)](https://github.com/KiaroSama/Numera-Emoji-Mapper)
+[![Repo size](https://img.shields.io/github/repo-size/KiaroSama/Numera-Emoji-Mapper)](https://github.com/KiaroSama/Numera-Emoji-Mapper)
+[![Built with Pillow](https://img.shields.io/badge/built%20with-Pillow-3776AB)](requirements.txt)
+[![FFmpeg for video emoji](https://img.shields.io/badge/FFmpeg-video%20emoji-007808?logo=ffmpeg&logoColor=white)](requirements.txt)
+[![SQLite catalog](https://img.shields.io/badge/SQLite-catalog-003B57?logo=sqlite&logoColor=white)](docs/GUIDE.md)
+[![Worker in TypeScript](https://img.shields.io/badge/Worker-TypeScript-3178C6?logo=typescript&logoColor=white)](worker/README.md)
+[![Support donations](https://img.shields.io/badge/Support-donations-d04a9a)](#donate)
 
 </div>
 
