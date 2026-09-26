@@ -512,7 +512,7 @@ test, then `scripts/check.ps1` (compile + lint + suite, `shell: pwsh`), then an
 offline `build_pack` dry-run. Run `scripts\check.ps1` locally before pushing.
 
 Git: work is committed in small logical commits and pushed to `main` on
-`KiaroSama/Emoji-Mapper`. Never commit `.env`, `secrets.md`, `collection/`,
+`KiaroSama/Numera-Emoji-Mapper`. Never commit `.env`, `secrets.md`, `collection/`,
 `logs/`, or any token.
 
 ---
@@ -2557,7 +2557,7 @@ $PY -c "from emojikit import build_pack, make_emoji_pngs, fetch_pack, fetch_emoj
 
 # --- git ---
 git add -A; git commit -m "..."; git push origin main
-gh run list --repo KiaroSama/Emoji-Mapper --limit 1 --json status,conclusion
+gh run list --repo KiaroSama/Numera-Emoji-Mapper --limit 1 --json status,conclusion
 ```
 
 ---
