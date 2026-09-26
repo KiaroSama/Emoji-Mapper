@@ -175,3 +175,5 @@ worker/.wrangler/
 # The operator's own assets (their brand logo, BRAND_LOGO_PATH). Per-operator,
 # never shipped: the public repository names no operator.
 /private/
+
+/private/brand-logo.png

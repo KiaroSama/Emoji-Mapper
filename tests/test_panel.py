@@ -585,6 +585,13 @@ class OnePackCanBeUnhidden(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name)
         self.db = self.data / "catalog.db"
+        # The logo cards need a configured operator logo: none ships in the repo.
+        logo = self.data / "brand.png"
+        _make_png(logo)
+        operator = mock.patch.dict(os.environ, {"BRAND_LOGO_BOTS": "YourEmojiBot",
+                                                "BRAND_LOGO_PATH": str(logo)})
+        operator.start()
+        self.addCleanup(operator.stop)
         with Catalog(self.db) as cat:
             for i in range(6):
                 img = self.data / "media" / "static" / f"i{i}.png"
