@@ -6,6 +6,16 @@
 
 **Build Telegram premium custom-emoji packs from any collection of images.**
 
+[![CI](https://github.com/KiaroSama/Numera-Emoji-Mapper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/KiaroSama/Numera-Emoji-Mapper/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/github/license/KiaroSama/Numera-Emoji-Mapper)](LICENSE)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](.github/workflows/ci.yml)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)](docs/GUIDE.md)
+<br>
+[![Backend: Cloudflare Workers](https://img.shields.io/badge/backend-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](worker/README.md)
+[![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
+[![Docs: GUIDE](https://img.shields.io/badge/docs-GUIDE-blue)](docs/GUIDE.md)
+[![Last commit](https://img.shields.io/github/last-commit/KiaroSama/Numera-Emoji-Mapper)](https://github.com/KiaroSama/Numera-Emoji-Mapper/commits/main)
+
 </div>
 
 Numera Emoji Mapper started as a crypto-coin logo packer and is now a general tool: it
