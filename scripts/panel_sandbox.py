@@ -37,7 +37,6 @@ import argparse
 import contextlib
 import os
 import re
-import shutil
 import sys
 import tempfile
 import uuid
@@ -46,9 +45,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from emojikit import panel  # noqa: E402 - needs ROOT on the path
-from emojikit.packstate import exclusive_lock  # noqa: E402
 from emojikit.sandbox_clone import (  # noqa: E402
-    TMP_PREFIX, clone_catalog, lifetime_lock_path, sweep_stale)
+    TMP_PREFIX, sandbox_session, sweep_stale)
 
 # IMPORTED, never re-typed: the sandbox's whole job is to stay off the port a
 # real panel uses, and two copies of that number would drift the day one moves.
@@ -159,19 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     sweep_stale()
     tmp = Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{uuid.uuid4().hex[:8]}"
 
-    n = clone_catalog(source, tmp)
-    print(f"sandbox catalog: {n} items cloned from {source} -> {tmp}", flush=True)
-    print(f"the real catalog at {source} is NOT served and cannot be modified",
-          flush=True)
-
-    try:
-        # Held for the whole life of the server, and released when this process
-        # ends however it ends. That is what lets the next run's sweep tell an
-        # abandoned clone from one that is still being served.
-        with exclusive_lock(lifetime_lock_path(tmp)), scrubbed_process_environment():
-            return panel.main(panel_arguments(args, tmp), reuse_existing=False)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    # Acquire lifetime ownership BEFORE creating the published clone marker.
+    # The same lease spans serving and cleanup, including exceptional exits.
+    with sandbox_session(source, tmp) as n, scrubbed_process_environment():
+        print(f"sandbox catalog: {n} items cloned from {source} -> {tmp}", flush=True)
+        print(f"the source catalog at {source} is not served", flush=True)
+        return panel.main(panel_arguments(args, tmp), reuse_existing=False)
 
 
 if __name__ == "__main__":

@@ -419,8 +419,8 @@ class TheSweepReclaimsOnlyWhatItCanProveIsAbandoned(SandboxFixture):
         # The LIFETIME lock, which is the one the sweep takes and therefore the
         # one whose inode must not be unlinked. The catalog's writer lock is a
         # different file and not this test's subject.
-        lock = sandbox_clone.lifetime_lock_path(self.sandbox_dir("dead"))
-        old = lock.parent
+        old = self.sandbox_dir("dead")
+        lock = sandbox_clone.lifetime_lock_path(old)
         with exclusive_lock(lock):
             pass                       # create the lock file, then release it
         self.assertTrue(lock.exists())

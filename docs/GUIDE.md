@@ -1030,26 +1030,49 @@ options straight through, appended AFTER its own `--data-dir`, so
 `panel_sandbox.py --data-dir collection` served the live catalog while the
 wrapper printed that the live catalog was not served.
 
-**The clone shares no bytes.** The database is an online snapshot through
-`emojikit.sqlite_snapshot`, so committed rows still sitting in the WAL come too
--- a plain file copy never copied the `-wal` at all. Media is COPIED, never
-hard-linked, into `media/<content key>.<ext>` with the colons replaced (on NTFS
-a colon opens an alternate data stream rather than a file), and every
-`file_path` is rewritten, including rows pointing at the owner's archive outside
-the collection. `pack_plan.json` travels with it, so the sandbox shows the
-layout you actually saved.
+**Making it never writes to the source.** The source catalog is opened
+READ-ONLY under the ordinary writer lease -- never through `Catalog`, whose
+constructor sets WAL mode, creates tables and commits, so cloning an older
+catalog used to upgrade it in passing, even when the clone was then refused.
+The copy is an online snapshot through `emojikit.sqlite_snapshot`, so committed
+rows still sitting in the WAL come too. (A read-only open of a WAL database may
+leave an empty `-wal`/`-shm` beside it: that is SQLite's own bookkeeping, not a
+change to the catalog.) The CLONE may upgrade its own schema when the panel
+first opens it.
+
+**The clone shares no bytes, and they are the right bytes.** Media is COPIED,
+never hard-linked, into `media/<hex>.<ext>`, where `<hex>` is the content key's
+UTF-8 bytes in hexadecimal: injective, so two keys can never share a file (the
+old colon-to-underscore swap mapped `s:a_b` and `s_a:b` to one name), and free
+of the colon that opens an alternate data stream on NTFS. A relative
+`file_path` resolves against the PROJECT ROOT -- the directory `run.ps1` runs
+every tool from -- and an absolute one (the owner's archive) stays absolute;
+searching beside the source first used to let a stray file of the same name win.
+Each file's SHA-256 is compared before copying, on the copy, and on the source
+again afterwards, so a same-length corruption or a file changed mid-copy
+refuses the whole clone; comparing sizes let both through. Every `file_path` is
+rewritten, and `pack_plan.json` travels with it.
 
 **It refuses rather than half-succeeds.** Another writer, an interrupted
 migration, an occupied or overlapping destination, or a media file it cannot
 read: each aborts and removes only what that attempt created. A sandbox finished
 with one row still pointing at production is worse than no sandbox.
 
-**One sandbox never destroys another.** Each carries a `.sandbox-owner.json`
-naming its own directory, and the start-up sweep reclaims a directory only when
-that marker is valid AND it can take that directory's lock. Unmarked, foreign,
-symlinked or still-served directories are left alone; a reclaimed directory
-keeps its lock file. The previous sweep matched the name prefix and deleted
-every hit, so starting a second sandbox removed the first one's catalog.
+**One sandbox never destroys another.** Each is OWNED from the first
+directory it creates to the last file its clean-up removes, by a lifetime lease
+held outside it, in `.panel-sandbox-leases/` beside the sandboxes. The lease is
+taken before anything is built -- the ownership marker used to be published
+first, and a sweep in that gap deleted a finished clone before it was served --
+and outlives the directory, because removing a lock file is what lets two
+processes each lock a different inode at the same name. Each lease file is a
+small permanent tombstone by design. The start-up sweep reclaims a directory
+only when its `.sandbox-owner.json` (protocol version 2) names that very
+directory AND the lease is free, and it checks the marker again after taking
+the lease. Unmarked, foreign, symlinked, still-served and version-1 directories
+are left alone: a version-1 owner may still be running under the old scheme,
+and an age or a PID is not proof it has stopped. The first sweep matched the
+name prefix and deleted every hit, so starting a second sandbox removed the
+first one's catalog.
 
 **And it isolates the account.** The panel runs in the wrapper's own process
 with `EMOJI_MAPPER_NO_DOTENV=1` -- the flag `load_env()` already honours for the

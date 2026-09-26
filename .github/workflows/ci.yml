@@ -225,4 +225,5 @@ jobs:
           tests.test_migration_lifecycle tests.test_migration_provenance
           tests.test_state_artifacts tests.test_sqlite_snapshot
           tests.test_panel_intent_persistence tests.test_video_collision_ingest
-          tests.test_entry_point_contracts tests.test_panel_sandbox -v
+          tests.test_entry_point_contracts tests.test_panel_sandbox
+          tests.test_sandbox_lifecycle tests.test_atomic_state_files -v
