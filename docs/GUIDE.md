@@ -2017,7 +2017,7 @@ A `ThreadingHTTPServer` on `127.0.0.1`. Routes:
 | `GET /` | The page (`assets/panel.html`: markup, CSS, items embedded as JSON, the per-run values). |
 | `GET /img/<key>` | The media bytes (webp/png/webm) with correct MIME. |
 | `GET /preview/<key>?fps=N&size=S` | Cached animated WebP for TGS; `still=1` returns a still for static/video/TGS. Sizes: 52, 72 or 104; rates: 1–30, bounded by `--preview-fps`. |
-| `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `emojikit.panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`emojikit.panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The query is stripped before the file lookup. |
+| `GET /static/<file>` | Static assets (logo, favicon, and the panel scripts, `emojikit.panel.SCRIPT_FILES`), traversal-guarded. The scripts are requested as `panel-grid.js?v=<hash>` — the hash is the scripts' content (`emojikit.panel.ASSET_VER`), because the route is immutable-cached and an edited script would otherwise be served stale. The logo is requested the same way, as `logo-128.png?v=<hash>` of its own bytes (`emojikit.panel.ICON_VER`), so a replaced logo is not served stale either. The query is stripped before the file lookup. |
 | `POST /api/save` | Body `{"excluded":[keys], "known":[keys]}` → `catalog.set_inclusion(...)`, **restricted to `known`**. |
 | `POST /api/order` | Body `{"order":[keys]}` → `catalog.set_order(...)` (drag-to-reorder = publish order). |
 | `POST /api/client-log` | Up to 32 whitelisted events, 16KiB per batch; counts/revisions/status/error type and location only. No token, label, media ID or arbitrary message fields. |
