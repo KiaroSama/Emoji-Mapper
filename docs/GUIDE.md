@@ -1431,7 +1431,7 @@ bots must administer it; each posts its own lines. Logging is handed to
 a response nor take a bot down. `GET /health` reports `log_db`.
 
 ```powershell
-npx wrangler d1 execute emoji-mapper-logs --remote `
+npx wrangler d1 execute numera-emoji-mapper-logs --remote `
   --command "SELECT ts, bot, level, event, detail FROM logs ORDER BY id DESC LIMIT 20"
 ```
 

@@ -1,4 +1,4 @@
-name = "emoji-mapper-bots"
+name = "numera-emoji-mapper-bots"
 main = "src/index.ts"
 compatibility_date = "2026-08-18"
 
@@ -23,6 +23,6 @@ preview_urls = false
 # Created by `scripts\deploy.ps1`, which fills the id in and applies migrations.
 [[d1_databases]]
 binding = "DB"
-database_name = "emoji-mapper-logs"
-database_id = "e9a95a21-5952-4fe4-88f8-27047652a375"
+database_name = "numera-emoji-mapper-logs"
+database_id = "3a2331f2-ffce-40d4-9d63-275e6c03ec3c"
 migrations_dir = "migrations"

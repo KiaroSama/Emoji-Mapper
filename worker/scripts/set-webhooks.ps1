@@ -87,7 +87,7 @@ foreach ($b in $bots) {
         continue
     }
 
-    if (-not $BaseUrl) { throw "-BaseUrl is required (e.g. https://emoji-mapper-bots.<sub>.workers.dev)" }
+    if (-not $BaseUrl) { throw "-BaseUrl is required (e.g. https://numera-emoji-mapper-bots.<sub>.workers.dev)" }
     if (-not $b.secret) { throw "$($b.name): no webhook secret in .env - run .\scripts\put-secrets.ps1 first" }
     $target = $BaseUrl.TrimEnd('/') + $b.path
 
